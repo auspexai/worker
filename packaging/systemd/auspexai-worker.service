@@ -1,0 +1,43 @@
+; AuspexAI worker — systemd user service unit template.
+;
+; Install: `systemctl --user enable --now auspexai-worker.service`
+;
+; M1 placeholder: the daemon loop arrives in M2 (heartbeat) and M3+
+; (assignment pull). Until then this unit only exercises the install path;
+; ExecStart runs `auspexai-worker status` once and exits. The hardening
+; directives below are in place from M1 so they don't get deferred. They are
+; PHASE-1 PERMISSIVE per §5.17 — Phase 2 tightens defaults via config without
+; rewriting the unit.
+
+[Unit]
+Description=AuspexAI volunteer worker (Phase 1)
+Documentation=https://github.com/auspexai/worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/auspexai-worker status
+Restart=on-failure
+RestartSec=10
+; Hardening per §5.17 — applied at the daemon (trusted) tier. Phase 1
+; permissive defaults; Phase 2 narrows further via config without altering
+; the unit body.
+PrivateTmp=true
+ProtectHome=read-only
+ProtectSystem=strict
+NoNewPrivileges=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+; Worker writes its state DB and (when libsecret is unavailable) the
+; encrypted-file keystore under XDG_STATE_HOME / XDG_DATA_HOME — both under
+; %h. ProtectHome=read-only would block those writes, so the standard XDG
+; subdirectories are explicitly listed as read-write.
+ReadWritePaths=%S/auspexai-worker %h/.local/state/auspexai-worker %h/.local/share/auspexai-worker
+
+[Install]
+WantedBy=default.target
