@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import os
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+
+from .capabilities import GpuDeclaration
 
 
 def _xdg_dir(env_name: str, default_subpath: str) -> Path:
@@ -52,6 +54,10 @@ class WorkerConfig:
     max_vram_gb: float | None = None
     max_cpu_cores: int | None = None
     network_quota_mb_per_hour: int | None = None
+    # [capabilities.gpus] — volunteer-declared GPU hardware (Q-W2 resolution).
+    # The volunteer is the source of truth for what hardware is actually
+    # usable; observed device-file probes ride alongside as diagnostic.
+    declared_gpus: GpuDeclaration = field(default_factory=GpuDeclaration)
 
     @property
     def state_db_path(self) -> Path:
@@ -88,6 +94,11 @@ class WorkerConfig:
             "max_vram_gb": None,
             "max_cpu_cores": None,
             "network_quota_mb_per_hour": None,
+            "declared_gpu_nvidia": None,
+            "declared_gpu_nvidia_model": None,
+            "declared_gpu_vram_total_gb": None,
+            "declared_gpu_amd": None,
+            "declared_gpu_amd_model": None,
         }
 
         if config_path is not None:
@@ -125,6 +136,17 @@ class WorkerConfig:
             ):
                 if cap_key in resources:
                     merged[cap_key] = resources[cap_key]
+            capabilities = data.get("capabilities") or {}
+            gpus_block = capabilities.get("gpus") or {}
+            for gpu_key in (
+                "nvidia",
+                "nvidia_model",
+                "vram_total_gb",
+                "amd",
+                "amd_model",
+            ):
+                if gpu_key in gpus_block:
+                    merged[f"declared_gpu_{gpu_key}"] = gpus_block[gpu_key]
             # [sandbox], [tenants], [models], [telemetry] are reserved for
             # M3+ milestones; tolerated here without consumption.
 
@@ -151,6 +173,13 @@ class WorkerConfig:
             max_vram_gb=_opt_float(merged.get("max_vram_gb")),
             max_cpu_cores=_opt_int(merged.get("max_cpu_cores")),
             network_quota_mb_per_hour=_opt_int(merged.get("network_quota_mb_per_hour")),
+            declared_gpus=GpuDeclaration(
+                nvidia=_opt_int(merged.get("declared_gpu_nvidia")),
+                nvidia_model=_opt_str(merged.get("declared_gpu_nvidia_model")),
+                vram_total_gb=_opt_float(merged.get("declared_gpu_vram_total_gb")),
+                amd=_opt_bool(merged.get("declared_gpu_amd")),
+                amd_model=_opt_str(merged.get("declared_gpu_amd_model")),
+            ),
         )
 
 
@@ -160,3 +189,11 @@ def _opt_float(raw: object) -> float | None:
 
 def _opt_int(raw: object) -> int | None:
     return None if raw is None else int(raw)  # type: ignore[arg-type]
+
+
+def _opt_str(raw: object) -> str | None:
+    return None if raw is None else str(raw)
+
+
+def _opt_bool(raw: object) -> bool | None:
+    return None if raw is None else bool(raw)

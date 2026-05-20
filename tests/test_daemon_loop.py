@@ -11,7 +11,12 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
-from auspexai_worker.capabilities import Capabilities, DeclaredCaps, GpuInventory
+from auspexai_worker.capabilities import (
+    Capabilities,
+    DeclaredCaps,
+    GpuDeclaration,
+    GpuObservation,
+)
 from auspexai_worker.coordinator import CoordinatorClient
 from auspexai_worker.daemon import HeartbeatLoop
 from auspexai_worker.signing import Rfc9421Signer
@@ -31,7 +36,8 @@ def _make_fake_capabilities() -> Capabilities:
         python_version="3.12.0",
         ram_total_gb=16.0,
         cpu_count=8,
-        gpus=GpuInventory(nvidia=0, amd=False),
+        gpus_observed=GpuObservation(nvidia=0, amd=False),
+        gpus_declared=GpuDeclaration(),
         declared_caps=DeclaredCaps(),
     )
 

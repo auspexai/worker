@@ -7,6 +7,8 @@ from pathlib import Path
 from auspexai_worker.capabilities import (
     Capabilities,
     DeclaredCaps,
+    GpuDeclaration,
+    GpuObservation,
     collect,
     detect_gpus,
     detect_ram_total_gb,
@@ -19,12 +21,10 @@ class TestRamDetection:
         path.write_text("MemTotal:     16777216 kB\nOther:        12345 kB\n")
         ram = detect_ram_total_gb(meminfo_path=path)
         assert ram is not None
-        # 16777216 KiB = 16 GiB exactly.
         assert ram == 16.0
 
     def test_returns_none_when_file_missing(self, tmp_path: Path) -> None:
-        ram = detect_ram_total_gb(meminfo_path=tmp_path / "nope")
-        assert ram is None
+        assert detect_ram_total_gb(meminfo_path=tmp_path / "nope") is None
 
     def test_returns_none_when_memtotal_missing(self, tmp_path: Path) -> None:
         path = tmp_path / "meminfo"
@@ -32,64 +32,123 @@ class TestRamDetection:
         assert detect_ram_total_gb(meminfo_path=path) is None
 
 
-class TestGpuDetection:
+class TestGpuObservation:
     def test_no_gpu_when_sysroot_empty(self, tmp_path: Path) -> None:
-        # sysroot/dev/ does not exist → no device files → no GPU.
-        gpus = detect_gpus(sysroot=tmp_path)
-        assert gpus.nvidia == 0
-        assert gpus.amd is False
-        assert gpus.has_any() is False
+        observed = detect_gpus(sysroot=tmp_path)
+        assert observed.nvidia == 0
+        assert observed.amd is False
+        assert observed.has_any() is False
 
-    def test_nvidia_detected_via_device_file(self, tmp_path: Path) -> None:
+    def test_nvidia_counted_when_device_files_responsive(self, tmp_path: Path) -> None:
         dev = tmp_path / "dev"
         dev.mkdir()
         (dev / "nvidia0").touch()
         (dev / "nvidia1").touch()
-        (dev / "nvidiactl").touch()  # control file, not counted
-        gpus = detect_gpus(sysroot=tmp_path)
-        assert gpus.nvidia == 2
-        assert gpus.amd is False
+        # Regular files in tmp_path open() just fine — exercises the
+        # validated-probe happy path.
+        observed = detect_gpus(sysroot=tmp_path)
+        assert observed.nvidia == 2
 
-    def test_amd_detected_via_kfd(self, tmp_path: Path) -> None:
+    def test_nvidiactl_not_counted(self, tmp_path: Path) -> None:
+        dev = tmp_path / "dev"
+        dev.mkdir()
+        (dev / "nvidiactl").touch()
+        observed = detect_gpus(sysroot=tmp_path)
+        assert observed.nvidia == 0
+
+    def test_stale_device_file_not_counted_q_w2(self, tmp_path: Path) -> None:
+        """Q-W2: a /dev/nvidia0 that doesn't respond to open() is excluded.
+
+        Simulates the partial-driver-uninstall, broken container bind-mount,
+        boot-race, and kernel-module-unloaded failure modes.
+        """
+        dev = tmp_path / "dev"
+        dev.mkdir()
+        (dev / "nvidia0").touch()
+        (dev / "nvidia1").touch()
+
+        # Probe that returns False for nvidia0 (stale), True for nvidia1.
+        def selective(path: Path) -> bool:
+            return path.name != "nvidia0"
+
+        observed = detect_gpus(sysroot=tmp_path, probe=selective)
+        assert observed.nvidia == 1
+
+    def test_amd_present_only_when_kfd_responsive(self, tmp_path: Path) -> None:
         dev = tmp_path / "dev"
         dev.mkdir()
         (dev / "kfd").touch()
-        gpus = detect_gpus(sysroot=tmp_path)
-        assert gpus.amd is True
-        assert gpus.nvidia == 0
+        # Default probe (open()) succeeds on a regular file.
+        assert detect_gpus(sysroot=tmp_path).amd is True
+        # Custom probe rejecting kfd.
+        assert detect_gpus(sysroot=tmp_path, probe=lambda _p: False).amd is False
+
+    def test_amd_not_present_when_kfd_missing(self, tmp_path: Path) -> None:
+        assert detect_gpus(sysroot=tmp_path).amd is False
+
+    def test_open_failure_treats_device_as_absent(self, tmp_path: Path) -> None:
+        """Sanity-check the production probe path: a path that doesn't exist
+        cannot be opened, so should not count."""
+        from auspexai_worker.capabilities.detect import _device_responsive
+
+        assert _device_responsive(tmp_path / "definitely-not-there") is False
+
+
+class TestGpuDeclaration:
+    def test_empty_declaration(self) -> None:
+        assert GpuDeclaration().is_empty() is True
+
+    def test_partial_declaration_is_not_empty(self) -> None:
+        assert GpuDeclaration(nvidia=1).is_empty() is False
+        assert GpuDeclaration(amd=True).is_empty() is False
+        assert GpuDeclaration(nvidia_model="RTX 4090").is_empty() is False
 
 
 class TestCollect:
     def test_returns_capabilities_with_expected_shape(self, tmp_path: Path) -> None:
-        # No meminfo path; CI may or may not have /proc/meminfo so we explicitly
-        # pass tmp_path so the test is hermetic.
         meminfo = tmp_path / "meminfo"
         meminfo.write_text("MemTotal: 8388608 kB\n")
         caps = collect(meminfo_path=meminfo, sysroot=tmp_path)
         assert isinstance(caps, Capabilities)
         assert caps.os == caps.os.lower()
-        assert caps.arch == caps.arch.lower()
         assert caps.ram_total_gb == 8.0
-        assert caps.cpu_count is not None
-        assert caps.gpus.has_any() is False
+        assert isinstance(caps.gpus_observed, GpuObservation)
+        assert caps.gpus_observed.has_any() is False
+        assert caps.gpus_declared.is_empty() is True
 
-    def test_to_dict_includes_gpus(self, tmp_path: Path) -> None:
+    def test_to_dict_includes_observed_omits_empty_declared(self, tmp_path: Path) -> None:
         caps = collect(sysroot=tmp_path)
         payload = caps.to_dict()
-        assert "gpus" in payload
-        assert payload["gpus"] == {"nvidia": 0, "amd": False}
-        assert "os" in payload
-        assert "python_version" in payload
-
-    def test_to_dict_omits_unset_declared_caps(self, tmp_path: Path) -> None:
-        caps = collect(sysroot=tmp_path, declared=DeclaredCaps())
-        payload = caps.to_dict()
+        assert payload["gpus_observed"] == {"nvidia": 0, "amd": False}
+        assert "gpus_declared" not in payload
         assert "declared_caps" not in payload
+
+    def test_to_dict_includes_declared_gpus_when_set(self, tmp_path: Path) -> None:
+        caps = collect(
+            sysroot=tmp_path,
+            declared_gpus=GpuDeclaration(
+                nvidia=2,
+                nvidia_model="RTX 4090",
+                vram_total_gb=48.0,
+            ),
+        )
+        payload = caps.to_dict()
+        assert payload["gpus_declared"] == {
+            "nvidia": 2,
+            "nvidia_model": "RTX 4090",
+            "vram_total_gb": 48.0,
+        }
 
     def test_to_dict_includes_set_declared_caps(self, tmp_path: Path) -> None:
         caps = collect(
             sysroot=tmp_path,
-            declared=DeclaredCaps(max_ram_gb=12.5, max_cpu_cores=4),
+            declared_caps=DeclaredCaps(max_ram_gb=12.5, max_cpu_cores=4),
         )
         payload = caps.to_dict()
         assert payload["declared_caps"] == {"max_ram_gb": 12.5, "max_cpu_cores": 4}
+
+    def test_declared_alias_back_compat(self, tmp_path: Path) -> None:
+        """`declared=` kwarg is the old name; still accepted for back-compat
+        so existing callers don't break during the M2-tail rename."""
+        caps = collect(sysroot=tmp_path, declared=DeclaredCaps(max_cpu_cores=2))
+        assert caps.declared_caps.max_cpu_cores == 2

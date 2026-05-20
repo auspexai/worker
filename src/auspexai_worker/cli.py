@@ -142,7 +142,7 @@ def daemon(ctx: click.Context, max_ticks: int | None) -> None:
         db.close()
         sys.exit(2)
 
-    declared = DeclaredCaps(
+    declared_caps = DeclaredCaps(
         max_ram_gb=config.max_ram_gb,
         max_vram_gb=config.max_vram_gb,
         max_cpu_cores=config.max_cpu_cores,
@@ -154,7 +154,10 @@ def daemon(ctx: click.Context, max_ticks: int | None) -> None:
             coordinator=client,
             repo=repo,
             worker_id=worker.worker_id,
-            capability_collector=lambda: collect_capabilities(declared=declared),
+            capability_collector=lambda: collect_capabilities(
+                declared_caps=declared_caps,
+                declared_gpus=config.declared_gpus,
+            ),
             interval_seconds=config.heartbeat_interval_seconds,
         )
 

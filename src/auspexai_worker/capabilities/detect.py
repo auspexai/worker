@@ -3,6 +3,15 @@
 Returns the JSON-serializable payload the worker sends to the coordinator on
 every heartbeat. Detection is intentionally cheap so calling on every tick
 (default 60 s) is fine.
+
+**GPU probe robustness (Q-W2 resolution):** the worker treats device-file
+*existence* as a hint, not as authority. A device file that doesn't respond
+to `open()` — stale node from a partial driver uninstall, container
+bind-mount without a working CUDA runtime, race during boot, kernel module
+unloaded at runtime — is excluded from the observed count. The volunteer's
+declared GPU hardware in `[capabilities.gpus]` is the routing-relevant
+signal (per §5.8 BYOM); the observed-probe travels alongside as
+corroboration / mismatch diagnostic, not as the authoritative inventory.
 """
 
 from __future__ import annotations
@@ -10,20 +19,53 @@ from __future__ import annotations
 import glob
 import os
 import platform
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 
 @dataclass(frozen=True)
-class GpuInventory:
-    """What the worker thinks it has for accelerators."""
+class GpuObservation:
+    """What the worker *observed* by probing device files. Not authoritative
+    — only the volunteer (via `[capabilities.gpus]` config / `GpuDeclaration`)
+    is authoritative about what hardware is actually usable."""
 
-    nvidia: int  # count of /dev/nvidia<N> device files
-    amd: bool  # /dev/kfd present (ROCm-capable)
+    nvidia: int  # /dev/nvidia[0-9]* device files that responded to open()
+    amd: bool  # /dev/kfd exists and responded to open()
 
     def has_any(self) -> bool:
         return self.nvidia > 0 or self.amd
+
+
+@dataclass(frozen=True)
+class GpuDeclaration:
+    """Volunteer-declared GPU hardware from `[capabilities.gpus]` config.
+
+    All fields are optional — a worker that wants the coordinator's
+    scheduler to consider it for GPU work must declare at least the count
+    and VRAM total of its accelerators. Authoritative VRAM/model
+    auto-detection (via `nvidia-smi` shell-out or NVML) is deferred to a
+    later milestone.
+    """
+
+    nvidia: int | None = None
+    nvidia_model: str | None = None
+    vram_total_gb: float | None = None
+    amd: bool | None = None
+    amd_model: str | None = None
+
+    def is_empty(self) -> bool:
+        return all(
+            v is None
+            for v in (
+                self.nvidia,
+                self.nvidia_model,
+                self.vram_total_gb,
+                self.amd,
+                self.amd_model,
+            )
+        )
 
 
 @dataclass(frozen=True)
@@ -47,14 +89,27 @@ class Capabilities:
     python_version: str
     ram_total_gb: float | None
     cpu_count: int | None
-    gpus: GpuInventory
+    gpus_observed: GpuObservation
+    gpus_declared: GpuDeclaration = field(default_factory=GpuDeclaration)
     declared_caps: DeclaredCaps = field(default_factory=DeclaredCaps)
 
     def to_dict(self) -> dict[str, Any]:
-        """JSON-serializable shape. Drops None-valued declared_caps fields so
-        the wire payload stays compact when nothing is configured."""
+        """JSON-serializable shape.
+
+        - `gpus_observed` is always included (operators rely on its presence
+          for fleet-view diagnostics).
+        - `gpus_declared` is omitted entirely when the volunteer hasn't
+          declared anything, to keep the wire payload compact.
+        - `declared_caps` is omitted when no caps are set.
+        """
         d = asdict(self)
-        d["gpus"] = asdict(self.gpus)
+        d["gpus_observed"] = asdict(self.gpus_observed)
+        if self.gpus_declared.is_empty():
+            d.pop("gpus_declared", None)
+        else:
+            d["gpus_declared"] = {
+                k: v for k, v in asdict(self.gpus_declared).items() if v is not None
+            }
         declared = {k: v for k, v in asdict(self.declared_caps).items() if v is not None}
         if declared:
             d["declared_caps"] = declared
@@ -90,17 +145,44 @@ def detect_cpu_count() -> int | None:
     return os.cpu_count()
 
 
-def detect_gpus(*, sysroot: Path | None = None) -> GpuInventory:
-    """Probe device files for GPU presence.
+def _device_responsive(path: Path) -> bool:
+    """Open the device file non-blocking; close immediately on success.
+
+    Stale `/dev/nvidiaN` nodes (driver unloaded, partial uninstall,
+    container bind-mount with no runtime, boot race) return ENXIO / ENODEV
+    on open. `EACCES` (permission denied) is also treated as "not
+    available" — if this worker user can't open the device, it can't
+    use the GPU even if one exists.
+
+    `O_NONBLOCK` is used so this can't hang on character devices with
+    weird semantics.
+    """
+    try:
+        fd = os.open(str(path), os.O_RDONLY | os.O_NONBLOCK)
+    except OSError:
+        return False
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+    return True
+
+
+GpuProbe = Callable[[Path], bool]
+
+
+def detect_gpus(
+    *,
+    sysroot: Path | None = None,
+    probe: GpuProbe = _device_responsive,
+) -> GpuObservation:
+    """Probe device files for GPU presence, with `open()` validation.
 
     Args:
         sysroot: Override for testing. Probes look for files under
             `sysroot / "dev" / "nvidiaN"` etc. instead of the real `/dev/`.
-
-    Detection is presence-based, not driver-state — a stale device file
-    without a working driver will overreport. The scheduler should pair this
-    with declared local model availability before assigning real GPU work
-    (M3 / M4).
+        probe: Injectable for tests. Returns True iff the device file is
+            actually openable. Default validates via `os.open()`.
     """
     if sysroot is None:
         nvidia_glob = "/dev/nvidia[0-9]*"
@@ -108,11 +190,10 @@ def detect_gpus(*, sysroot: Path | None = None) -> GpuInventory:
     else:
         nvidia_glob = str(sysroot / "dev" / "nvidia[0-9]*")
         kfd_path = sysroot / "dev" / "kfd"
-    nvidia_devices = [p for p in glob.glob(nvidia_glob) if Path(p).name != "nvidiactl"]
-    return GpuInventory(
-        nvidia=len(nvidia_devices),
-        amd=kfd_path.exists(),
-    )
+    candidates = [Path(p) for p in glob.glob(nvidia_glob) if Path(p).name != "nvidiactl"]
+    nvidia_responsive = sum(1 for path in candidates if probe(path))
+    amd = kfd_path.exists() and probe(kfd_path)
+    return GpuObservation(nvidia=nvidia_responsive, amd=amd)
 
 
 # ---- top-level collect -----------------------------------------------------
@@ -120,17 +201,23 @@ def detect_gpus(*, sysroot: Path | None = None) -> GpuInventory:
 
 def collect(
     *,
-    declared: DeclaredCaps | None = None,
+    declared_caps: DeclaredCaps | None = None,
+    declared_gpus: GpuDeclaration | None = None,
     sysroot: Path | None = None,
     meminfo_path: Path | None = None,
+    probe: GpuProbe = _device_responsive,
+    # Back-compat alias kept for callers that still pass `declared=...`.
+    declared: DeclaredCaps | None = None,
 ) -> Capabilities:
     """Top-level capability snapshot. Cheap; safe to call on every heartbeat."""
+    resolved_caps = declared_caps if declared_caps is not None else (declared or DeclaredCaps())
     return Capabilities(
         os=platform.system().lower(),
         arch=platform.machine().lower(),
         python_version=platform.python_version(),
         ram_total_gb=detect_ram_total_gb(meminfo_path=meminfo_path),
         cpu_count=detect_cpu_count(),
-        gpus=detect_gpus(sysroot=sysroot),
-        declared_caps=declared or DeclaredCaps(),
+        gpus_observed=detect_gpus(sysroot=sysroot, probe=probe),
+        gpus_declared=declared_gpus or GpuDeclaration(),
+        declared_caps=resolved_caps,
     )

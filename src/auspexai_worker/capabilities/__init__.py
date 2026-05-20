@@ -18,7 +18,9 @@ from __future__ import annotations
 from .detect import (
     Capabilities,
     DeclaredCaps,
-    GpuInventory,
+    GpuDeclaration,
+    GpuObservation,
+    GpuProbe,
     collect,
     detect_gpus,
     detect_ram_total_gb,
@@ -27,7 +29,9 @@ from .detect import (
 __all__ = [
     "Capabilities",
     "DeclaredCaps",
-    "GpuInventory",
+    "GpuDeclaration",
+    "GpuObservation",
+    "GpuProbe",
     "collect",
     "detect_gpus",
     "detect_ram_total_gb",
