@@ -2,12 +2,9 @@
 ;
 ; Install: `systemctl --user enable --now auspexai-worker.service`
 ;
-; M1 placeholder: the daemon loop arrives in M2 (heartbeat) and M3+
-; (assignment pull). Until then this unit only exercises the install path;
-; ExecStart runs `auspexai-worker status` once and exits. The hardening
-; directives below are in place from M1 so they don't get deferred. They are
-; PHASE-1 PERMISSIVE per §5.17 — Phase 2 tightens defaults via config without
-; rewriting the unit.
+; M2: heartbeat loop. M3+ adds assignment pull. The hardening directives
+; below are PHASE-1 PERMISSIVE per §5.17 — Phase 2 tightens defaults via
+; config without rewriting the unit.
 
 [Unit]
 Description=AuspexAI volunteer worker (Phase 1)
@@ -17,7 +14,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/auspexai-worker status
+ExecStart=%h/.local/bin/auspexai-worker daemon
 Restart=on-failure
 RestartSec=10
 ; Hardening per §5.17 — applied at the daemon (trusted) tier. Phase 1

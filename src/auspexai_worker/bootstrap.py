@@ -18,6 +18,7 @@ from .config import WorkerConfig
 from .coordinator import CoordinatorClient, EnrollmentResponse
 from .keystore import Keystore, default_keystore
 from .keystore.base import pubkey_hex as _pubkey_hex
+from .signing import Rfc9421Signer
 from .state import Database, MigrationRunner, WorkerSelf, WorkerSelfRepository
 
 
@@ -57,6 +58,12 @@ def open_keystore(config: WorkerConfig) -> Keystore:
         encrypted_file_path=config.keystore_path,
         force_backend=config.keystore_backend,
     )
+
+
+def build_signer(keystore: Keystore) -> Rfc9421Signer:
+    """Load the worker's keypair and construct an RFC 9421 signer."""
+    private_key = keystore.load()
+    return Rfc9421Signer(private_key, _pubkey_hex(private_key))
 
 
 def bootstrap(

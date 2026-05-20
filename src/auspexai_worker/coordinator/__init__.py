@@ -11,6 +11,10 @@ from .client import (
     EnrollmentResponse,
     PubkeyAlreadyEnrolledError,
     PubkeyAlreadyTenantError,
+    UnauthorizedError,
+    WorkerIdMismatchError,
+    WorkerNotFoundError,
+    WorkerStatusResponse,
 )
 
 __all__ = [
@@ -19,4 +23,8 @@ __all__ = [
     "EnrollmentResponse",
     "PubkeyAlreadyEnrolledError",
     "PubkeyAlreadyTenantError",
+    "UnauthorizedError",
+    "WorkerIdMismatchError",
+    "WorkerNotFoundError",
+    "WorkerStatusResponse",
 ]
