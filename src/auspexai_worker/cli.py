@@ -111,13 +111,25 @@ def bootstrap(ctx: click.Context) -> None:
     default=None,
     help="Stop after N heartbeats (debug / test only).",
 )
+@click.option(
+    "--verbose",
+    is_flag=True,
+    envvar="AUSPEXAI_WORKER_VERBOSE",
+    help="Restore httpx per-request logs at INFO. Default keeps them at WARNING "
+    "so the per-minute heartbeat loop doesn't flood journald.",
+)
 @click.pass_context
-def daemon(ctx: click.Context, max_ticks: int | None) -> None:
+def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
     config: WorkerConfig = ctx.obj["config"]
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # Per Q-W6: httpx logs one INFO line per request; the heartbeat loop fires
+    # every 60s by default, so unfiltered httpx INFO floods journald. Pin
+    # httpx to WARNING unless --verbose is set.
+    if not verbose:
+        logging.getLogger("httpx").setLevel(logging.WARNING)
 
     db, repo = initialize_state(config)
     worker = repo.get()
