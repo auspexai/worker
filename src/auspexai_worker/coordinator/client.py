@@ -47,6 +47,14 @@ class WorkerNotFoundError(CoordinatorError):
     """404 worker_not_found — the worker has been retired or never existed."""
 
 
+class AssignmentNotFoundError(CoordinatorError):
+    """404 assignment_not_found — no assignment exists for this (unit, worker)."""
+
+
+class AssignmentAlreadyResolvedError(CoordinatorError):
+    """409 assignment_already_resolved — already has a result, or already refused."""
+
+
 class UnauthorizedError(CoordinatorError):
     """401/403 from a signed endpoint. Usually means the signature was bad,
     the keyid resolved to nothing, or the credential class wasn't allowed."""
@@ -70,6 +78,44 @@ class WorkerStatusResponse:
     registered_at: datetime | None
     last_heartbeat_at: datetime | None
     retired_at: datetime | None
+
+
+@dataclass(frozen=True)
+class WorkUnitEnvelope:
+    """Wire shape of the coordinator's WorkUnitEnvelopeOut. Mirrors the SDK's
+    workunit_v0_1 schema. Payload is opaque; tenant code interprets it."""
+
+    schema_version: str
+    unit_id: str
+    tenant_id: str
+    experiment_id: str  # tenant's experiment_label (NOT the coordinator's exp-... id)
+    manifest_sha256: str
+    created_at: datetime
+    payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class RefuseResponse:
+    """Coordinator's acknowledgment of a refuse call."""
+
+    assignment_id: str
+    unit_id: str
+    refused_at: datetime | None
+    refused_kind: str | None
+
+
+@dataclass(frozen=True)
+class AssignmentResponse:
+    """Coordinator's response to GET /workers/{id}/assignments.
+
+    When no work is available, all four fields are None — `work_unit is None`
+    is the canonical check.
+    """
+
+    assignment_id: str | None
+    assigned_at: datetime | None
+    coordinator_experiment_id: str | None  # coordinator's exp-... id (stable)
+    work_unit: WorkUnitEnvelope | None
 
 
 class CoordinatorClient:
@@ -175,6 +221,92 @@ class CoordinatorClient:
             f"heartbeat: unexpected status {response.status_code}: {response.text[:500]}"
         )
 
+    # ---- /workers/{id}/assignments (signed) -----------------------------
+
+    def get_assignment(self, *, worker_id: str) -> AssignmentResponse:
+        """GET /api/v0/workers/{worker_id}/assignments. Worker-credentialed.
+
+        Returns an AssignmentResponse. When no work is available the response
+        has `work_unit is None`; otherwise the envelope carries the assigned
+        unit. Coordinator's first-fit scheduler creates the assignment row
+        as a side effect of this call (per the platform's M6d design); the
+        worker should treat receiving a non-null work_unit as a commitment
+        and submit a result (or let the assignment lapse).
+        """
+        if self._signer is None:
+            raise CoordinatorError(
+                "get_assignment requires a signer; CoordinatorClient was constructed without one"
+            )
+        response = self._signed_request(
+            method="GET",
+            path=f"/api/v0/workers/{worker_id}/assignments",
+            json_body=None,
+        )
+        if response.status_code == 200:
+            return _parse_assignment(response.json())
+        if response.status_code == 403:
+            code = _error_code(response)
+            if code == "worker_id_mismatch":
+                raise WorkerIdMismatchError(_error_message(response))
+            raise UnauthorizedError(_error_message(response))
+        if response.status_code == 401:
+            raise UnauthorizedError(_error_message(response))
+        if response.status_code == 404:
+            raise WorkerNotFoundError(_error_message(response))
+        raise CoordinatorError(
+            f"get_assignment: unexpected status {response.status_code}: {response.text[:500]}"
+        )
+
+    # ---- /workers/{id}/assignments/{unit_id}/refuse (signed) -----------
+
+    def refuse_assignment(
+        self,
+        *,
+        worker_id: str,
+        unit_id: str,
+        kind: str,
+        reason: str,
+    ) -> RefuseResponse:
+        """POST .../refuse. Worker-credentialed.
+
+        Tells the coordinator the worker is declining a previously-pulled
+        assignment so the coordinator can free the replication slot and
+        operators can see the refusal reason. The local audit log is the
+        primary record; this call is the network half of the same fact.
+
+        Raises:
+            AssignmentNotFoundError: 404, no such (unit, worker) assignment.
+            AssignmentAlreadyResolvedError: 409, already has result or
+                already refused.
+            WorkerIdMismatchError: 403, signer's worker doesn't match URL.
+            UnauthorizedError: 401/403 on signature/credential failure.
+        """
+        if self._signer is None:
+            raise CoordinatorError(
+                "refuse_assignment requires a signer; CoordinatorClient was constructed without one"
+            )
+        response = self._signed_request(
+            method="POST",
+            path=f"/api/v0/workers/{worker_id}/assignments/{unit_id}/refuse",
+            json_body={"kind": kind, "reason": reason},
+        )
+        if response.status_code == 200:
+            return _parse_refuse(response.json())
+        if response.status_code == 403:
+            code = _error_code(response)
+            if code == "worker_id_mismatch":
+                raise WorkerIdMismatchError(_error_message(response))
+            raise UnauthorizedError(_error_message(response))
+        if response.status_code == 401:
+            raise UnauthorizedError(_error_message(response))
+        if response.status_code == 404:
+            raise AssignmentNotFoundError(_error_message(response))
+        if response.status_code == 409:
+            raise AssignmentAlreadyResolvedError(_error_message(response))
+        raise CoordinatorError(
+            f"refuse_assignment: unexpected status {response.status_code}: {response.text[:500]}"
+        )
+
     # ---- internals ------------------------------------------------------
 
     def _signed_request(
@@ -233,6 +365,46 @@ def _parse_enrollment(payload: dict[str, Any]) -> EnrollmentResponse:
         trust_tier=trust_tier,
         registered_at=registered_at,
     )
+
+
+def _parse_assignment(payload: dict[str, Any]) -> AssignmentResponse:
+    work_unit_raw = payload.get("work_unit")
+    work_unit: WorkUnitEnvelope | None = None
+    if work_unit_raw is not None:
+        try:
+            work_unit = WorkUnitEnvelope(
+                schema_version=str(work_unit_raw.get("schema_version", "0.1")),
+                unit_id=str(work_unit_raw["unit_id"]),
+                tenant_id=str(work_unit_raw["tenant_id"]),
+                experiment_id=str(work_unit_raw["experiment_id"]),
+                manifest_sha256=str(work_unit_raw["manifest_sha256"]).lower(),
+                created_at=_parse_datetime(work_unit_raw["created_at"]),
+                payload=dict(work_unit_raw.get("payload") or {}),
+            )
+        except KeyError as exc:
+            raise CoordinatorError(f"assignment work_unit missing field: {exc}") from exc
+    return AssignmentResponse(
+        assignment_id=_opt_str(payload.get("assignment_id")),
+        assigned_at=_parse_optional_datetime(payload.get("assigned_at")),
+        coordinator_experiment_id=_opt_str(payload.get("experiment_id")),
+        work_unit=work_unit,
+    )
+
+
+def _opt_str(raw: object) -> str | None:
+    return None if raw is None else str(raw)
+
+
+def _parse_refuse(payload: dict[str, Any]) -> RefuseResponse:
+    try:
+        return RefuseResponse(
+            assignment_id=str(payload["assignment_id"]),
+            unit_id=str(payload["unit_id"]),
+            refused_at=_parse_optional_datetime(payload.get("refused_at")),
+            refused_kind=_opt_str(payload.get("refused_kind")),
+        )
+    except KeyError as exc:
+        raise CoordinatorError(f"refuse response missing field: {exc}") from exc
 
 
 def _parse_worker_status(payload: dict[str, Any]) -> WorkerStatusResponse:

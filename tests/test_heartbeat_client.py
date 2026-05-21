@@ -168,3 +168,82 @@ class TestHeartbeatErrors:
         with _make_client(handler, signer=None) as client:
             with pytest.raises(CoordinatorError):
                 client.heartbeat(worker_id="wkr-a", capabilities={})
+
+
+# ---- /assignments/{unit_id}/refuse ---------------------------------------
+
+
+class TestRefuseAssignment:
+    def test_200_returns_parsed_response(self) -> None:
+        signer, _pub = _make_signer()
+        captured: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["path"] = request.url.path
+            captured["body"] = json.loads(request.content)
+            return httpx.Response(
+                200,
+                json={
+                    "assignment_id": "asg-1",
+                    "unit_id": "u-1",
+                    "refused_at": "2026-05-20T12:00:00+00:00",
+                    "refused_kind": "manifest_swap",
+                },
+            )
+
+        with _make_client(handler, signer) as client:
+            response = client.refuse_assignment(
+                worker_id="wkr-a",
+                unit_id="u-1",
+                kind="manifest_swap",
+                reason="hash diverged",
+            )
+        assert captured["path"] == "/api/v0/workers/wkr-a/assignments/u-1/refuse"
+        assert captured["body"] == {"kind": "manifest_swap", "reason": "hash diverged"}
+        assert response.assignment_id == "asg-1"
+        assert response.refused_kind == "manifest_swap"
+
+    def test_404_maps_to_assignment_not_found(self) -> None:
+        from auspexai_worker.coordinator import AssignmentNotFoundError
+
+        signer, _pub = _make_signer()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                404,
+                json={"detail": {"error": {"code": "assignment_not_found", "message": "no"}}},
+            )
+
+        with _make_client(handler, signer) as client:
+            with pytest.raises(AssignmentNotFoundError):
+                client.refuse_assignment(worker_id="wkr-a", unit_id="u-1", kind="x", reason="y")
+
+    def test_409_maps_to_already_resolved(self) -> None:
+        from auspexai_worker.coordinator import AssignmentAlreadyResolvedError
+
+        signer, _pub = _make_signer()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                409,
+                json={
+                    "detail": {"error": {"code": "assignment_already_resolved", "message": "no"}}
+                },
+            )
+
+        with _make_client(handler, signer) as client:
+            with pytest.raises(AssignmentAlreadyResolvedError):
+                client.refuse_assignment(worker_id="wkr-a", unit_id="u-1", kind="x", reason="y")
+
+    def test_403_worker_id_mismatch_maps_to_typed_error(self) -> None:
+        signer, _pub = _make_signer()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                403,
+                json={"detail": {"error": {"code": "worker_id_mismatch", "message": "no"}}},
+            )
+
+        with _make_client(handler, signer) as client:
+            with pytest.raises(WorkerIdMismatchError):
+                client.refuse_assignment(worker_id="wkr-b", unit_id="u-1", kind="x", reason="y")

@@ -26,13 +26,24 @@ def repo(db: Database) -> WorkerSelfRepository:
 class TestMigrations:
     def test_apply_all_creates_worker_self_table(self, db: Database) -> None:
         applied = MigrationRunner(db).apply_all()
-        assert applied == [1]
+        # M1 = 0001_init, M3 = 0002_m3. Test the prefix shape rather than the
+        # exact list so adding migrations doesn't break this assertion.
+        assert applied[:2] == [1, 2]
         rows = db.connection.execute(
             "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
         ).fetchall()
         names = [row["name"] for row in rows]
         assert "worker_self" in names
         assert "schema_migrations" in names
+        # M3 tables also present.
+        for t in (
+            "manifest_pins",
+            "accepted_sensitive_experiments",
+            "tenant_allow_list",
+            "tenant_deny_list",
+            "assignment_audit",
+        ):
+            assert t in names, f"M3 table {t!r} missing after migrations"
 
     def test_re_apply_is_noop(self, db: Database) -> None:
         runner = MigrationRunner(db)

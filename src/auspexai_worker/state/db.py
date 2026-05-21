@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -23,7 +24,18 @@ class MigrationError(Exception):
 
 
 class Database:
-    """Thin wrapper around a sqlite3.Connection with WAL + foreign keys on."""
+    """Thin wrapper around a sqlite3.Connection with WAL + foreign keys on.
+
+    The daemon runs two loops (heartbeat + assignment poller) as separate
+    threads sharing one Database instance. `check_same_thread=False` lets
+    them both call the connection, but sqlite serializes a transaction at a
+    time — two parallel `BEGIN` statements raise "cannot start a transaction
+    within a transaction". A re-entrant lock around `transaction()`
+    serializes the BEGIN..COMMIT window so the two threads can write
+    concurrently without colliding. The lock is re-entrant so a repository
+    method that opens a transaction can itself be called from inside another
+    transaction (rare today, but eliminates a foot-gun).
+    """
 
     def __init__(self, path: Path) -> None:
         self._path = path
@@ -32,6 +44,7 @@ class Database:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL;")
         self._conn.execute("PRAGMA foreign_keys=ON;")
+        self._tx_lock = threading.RLock()
 
     @property
     def path(self) -> Path:
@@ -43,14 +56,15 @@ class Database:
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
-        self._conn.execute("BEGIN")
-        try:
-            yield self._conn
-        except BaseException:
-            self._conn.execute("ROLLBACK")
-            raise
-        else:
-            self._conn.execute("COMMIT")
+        with self._tx_lock:
+            self._conn.execute("BEGIN")
+            try:
+                yield self._conn
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
+            else:
+                self._conn.execute("COMMIT")
 
     def close(self) -> None:
         self._conn.close()

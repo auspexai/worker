@@ -10,12 +10,28 @@ codebases.
 from __future__ import annotations
 
 from .db import Database, MigrationError, MigrationRunner
+from .m3_repositories import (
+    AcceptedSensitiveRepository,
+    AssignmentAuditRepository,
+    AssignmentAuditRow,
+    ManifestPin,
+    ManifestPinRepository,
+    PinResult,
+    TenantListRepository,
+)
 from .repository import WorkerSelf, WorkerSelfRepository
 
 __all__ = [
+    "AcceptedSensitiveRepository",
+    "AssignmentAuditRepository",
+    "AssignmentAuditRow",
     "Database",
+    "ManifestPin",
+    "ManifestPinRepository",
     "MigrationError",
     "MigrationRunner",
+    "PinResult",
+    "TenantListRepository",
     "WorkerSelf",
     "WorkerSelfRepository",
 ]

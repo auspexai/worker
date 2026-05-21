@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import signal
 import sys
+import threading
 from pathlib import Path
 
 import click
@@ -26,7 +27,13 @@ from .coordinator import (
     PubkeyAlreadyEnrolledError,
     PubkeyAlreadyTenantError,
 )
-from .daemon import HeartbeatLoop
+from .daemon import AssignmentPoller, HeartbeatLoop
+from .state import (
+    AcceptedSensitiveRepository,
+    AssignmentAuditRepository,
+    ManifestPinRepository,
+    TenantListRepository,
+)
 
 
 @click.group(help="AuspexAI volunteer worker.")
@@ -161,8 +168,13 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
         network_quota_mb_per_hour=config.network_quota_mb_per_hour,
     )
 
+    manifest_pins = ManifestPinRepository(db)
+    accepted_sensitive = AcceptedSensitiveRepository(db)
+    tenant_lists = TenantListRepository(db)
+    audit = AssignmentAuditRepository(db)
+
     with CoordinatorClient(base_url=config.coordinator_url, signer=signer) as client:
-        loop = HeartbeatLoop(
+        heartbeat = HeartbeatLoop(
             coordinator=client,
             repo=repo,
             worker_id=worker.worker_id,
@@ -172,25 +184,213 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
             ),
             interval_seconds=config.heartbeat_interval_seconds,
         )
+        poller = AssignmentPoller(
+            coordinator=client,
+            worker_id=worker.worker_id,
+            manifest_pins=manifest_pins,
+            accepted_sensitive=accepted_sensitive,
+            tenant_lists=tenant_lists,
+            audit=audit,
+            interval_seconds=config.assignment_poll_interval_seconds,
+        )
 
         def _on_signal(signum: int, _frame: object) -> None:
             click.echo(f"received signal {signum}, shutting down", err=True)
-            loop.stop()
+            heartbeat.stop()
+            poller.stop()
 
         signal.signal(signal.SIGTERM, _on_signal)
         signal.signal(signal.SIGINT, _on_signal)
 
-        stats = loop.run(max_ticks=max_ticks)
+        heartbeat_thread = threading.Thread(
+            target=heartbeat.run,
+            kwargs={"max_ticks": max_ticks},
+            name="auspexai-heartbeat",
+            daemon=True,
+        )
+        poller_thread = threading.Thread(
+            target=poller.run,
+            kwargs={"max_polls": max_ticks},
+            name="auspexai-assignment-poller",
+            daemon=True,
+        )
+        heartbeat_thread.start()
+        poller_thread.start()
+        heartbeat_thread.join()
+        poller_thread.join()
+
+        hstats = heartbeat.stats
+        pstats = poller.stats
     db.close()
 
-    if stats.ticks_failed > 0:
-        click.echo(
-            f"heartbeat loop exited with {stats.ticks_failed} failed ticks "
-            f"(succeeded={stats.ticks_succeeded}); last error: {stats.last_error}",
-            err=True,
+    click.echo(
+        f"heartbeat ticks=attempted:{hstats.ticks_attempted} "
+        f"succeeded:{hstats.ticks_succeeded} failed:{hstats.ticks_failed}",
+        err=True,
+    )
+    click.echo(
+        f"assignment polls=attempted:{pstats.polls_attempted} "
+        f"succeeded:{pstats.polls_succeeded} failed:{pstats.polls_failed} "
+        f"accepted:{pstats.units_accepted} refused:{pstats.units_refused} "
+        f"no_work:{pstats.no_work_polls}",
+        err=True,
+    )
+
+    failed_total = hstats.ticks_failed + pstats.polls_failed
+    succeeded_total = hstats.ticks_succeeded + pstats.polls_succeeded
+    if failed_total > 0:
+        # Non-zero exit so systemd flags Restart=on-failure paths correctly,
+        # but only when *everything* failed (intermittent failures shouldn't
+        # restart-loop the daemon).
+        sys.exit(1 if succeeded_total == 0 else 0)
+
+
+@cli.command(help="List recent assignment-handling decisions (local audit).")
+@click.option("--limit", type=int, default=20, help="Show the most recent N rows.")
+@click.pass_context
+def queue(ctx: click.Context, limit: int) -> None:
+    config: WorkerConfig = ctx.obj["config"]
+    db, _ = initialize_state(config)
+    try:
+        audit = AssignmentAuditRepository(db)
+        rows = audit.recent(limit=limit)
+        if not rows:
+            click.echo("no assignment activity yet")
+            return
+        for row in rows:
+            ts = row.occurred_at.isoformat(timespec="seconds")
+            unit = row.unit_id or "-"
+            tenant = row.tenant_id or "-"
+            action = row.action
+            reason = row.reason or ""
+            line = f"{ts}  {action:<35}  unit={unit}  tenant={tenant}"
+            if reason:
+                line += f"  ({reason})"
+            click.echo(line)
+    finally:
+        db.close()
+
+
+@cli.command(help="Inspect the worker's local audit history for a given unit.")
+@click.argument("unit_id")
+@click.pass_context
+def peek(ctx: click.Context, unit_id: str) -> None:
+    config: WorkerConfig = ctx.obj["config"]
+    db, _ = initialize_state(config)
+    try:
+        audit = AssignmentAuditRepository(db)
+        rows = audit.by_unit(unit_id)
+        if not rows:
+            click.echo(f"no local record of unit {unit_id!r}")
+            click.echo(
+                "(M3 worker drops work-unit payloads after the gate decision; "
+                "live execution lands in M4)"
+            )
+            return
+        for row in rows:
+            click.echo(f"  occurred_at:    {row.occurred_at.isoformat(timespec='seconds')}")
+            click.echo(f"  action:         {row.action}")
+            click.echo(f"  experiment_id:  {row.coordinator_experiment_id}")
+            click.echo(f"  tenant_id:      {row.tenant_id}")
+            click.echo(f"  manifest_sha:   {row.manifest_sha256}")
+            click.echo(f"  assignment_id:  {row.assignment_id}")
+            if row.reason:
+                click.echo(f"  reason:         {row.reason}")
+            click.echo("")
+    finally:
+        db.close()
+
+
+@cli.command(help="Opt in to a sensitive-flagged experiment by coordinator experiment ID.")
+@click.argument("coordinator_experiment_id")
+@click.pass_context
+def accept(ctx: click.Context, coordinator_experiment_id: str) -> None:
+    config: WorkerConfig = ctx.obj["config"]
+    db, _ = initialize_state(config)
+    try:
+        AcceptedSensitiveRepository(db).accept(coordinator_experiment_id)
+        click.echo(f"accepted: {coordinator_experiment_id}")
+        click.echo("future sensitive-flagged assignments under this experiment will be accepted.")
+    finally:
+        db.close()
+
+
+@cli.command(help="Manually refuse a unit (local audit only; coordinator re-schedules on timeout).")
+@click.argument("unit_id")
+@click.option("--reason", default="manual refuse", help="Free-form reason recorded in audit.")
+@click.pass_context
+def refuse(ctx: click.Context, unit_id: str, reason: str) -> None:
+    config: WorkerConfig = ctx.obj["config"]
+    db, _ = initialize_state(config)
+    try:
+        AssignmentAuditRepository(db).append(
+            action="refused_manual",
+            unit_id=unit_id,
+            reason=reason,
         )
-        # Non-zero exit so systemd flags Restart=on-failure paths correctly.
-        sys.exit(1 if stats.ticks_succeeded == 0 else 0)
+        click.echo(f"recorded manual refusal of unit {unit_id}")
+        click.echo(
+            "(Phase 1 worker has no live refuse endpoint — the coordinator "
+            "re-schedules the unit when this worker's assignment times out.)"
+        )
+    finally:
+        db.close()
+
+
+@cli.group(help="Manage tenant allow/deny lists.")
+def tenant() -> None:
+    pass
+
+
+@tenant.command("allow", help="Add a tenant to the allow list.")
+@click.argument("tenant_id")
+@click.pass_context
+def tenant_allow(ctx: click.Context, tenant_id: str) -> None:
+    config: WorkerConfig = ctx.obj["config"]
+    db, _ = initialize_state(config)
+    try:
+        TenantListRepository(db).allow_add(tenant_id)
+        click.echo(f"allow: {tenant_id}")
+    finally:
+        db.close()
+
+
+@tenant.command("deny", help="Add a tenant to the deny list.")
+@click.argument("tenant_id")
+@click.pass_context
+def tenant_deny(ctx: click.Context, tenant_id: str) -> None:
+    config: WorkerConfig = ctx.obj["config"]
+    db, _ = initialize_state(config)
+    try:
+        TenantListRepository(db).deny_add(tenant_id)
+        click.echo(f"deny: {tenant_id}")
+    finally:
+        db.close()
+
+
+@tenant.command("list", help="Show allow + deny lists.")
+@click.pass_context
+def tenant_list(ctx: click.Context) -> None:
+    config: WorkerConfig = ctx.obj["config"]
+    db, _ = initialize_state(config)
+    try:
+        repo = TenantListRepository(db)
+        allow = repo.list_allow()
+        deny = repo.list_deny()
+        click.echo("allow:")
+        if allow:
+            for t in allow:
+                click.echo(f"  {t}")
+        else:
+            click.echo("  (empty — all known tenants accepted)")
+        click.echo("deny:")
+        if deny:
+            for t in deny:
+                click.echo(f"  {t}")
+        else:
+            click.echo("  (empty)")
+    finally:
+        db.close()
 
 
 def main() -> None:

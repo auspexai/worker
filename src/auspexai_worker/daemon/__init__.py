@@ -7,6 +7,12 @@ several together without prescribing an event loop framework.
 
 from __future__ import annotations
 
+from .assignment_loop import AssignmentPoller, AssignmentStats
 from .loop import HeartbeatLoop, HeartbeatStats
 
-__all__ = ["HeartbeatLoop", "HeartbeatStats"]
+__all__ = [
+    "AssignmentPoller",
+    "AssignmentStats",
+    "HeartbeatLoop",
+    "HeartbeatStats",
+]
