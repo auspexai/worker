@@ -42,6 +42,7 @@ secret-service = [
 
 [project.scripts]
 auspexai-worker = "auspexai_worker.cli:main"
+auspexai-worker-runner = "auspexai_worker.runner:main"
 
 [project.urls]
 Homepage = "https://auspexai.network"

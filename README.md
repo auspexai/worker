@@ -4,7 +4,7 @@ The volunteer worker process for [AuspexAI](https://github.com/auspexai) — run
 
 ## Status
 
-**Phase 1 — M1 + M2 + M3 SHIPPED 2026-05-20.** First-run enrollment, signed-heartbeat loop, and assignment-pull pipeline all verified end-to-end against the coordinator. Phase 1 worker target is Linux x86_64 + ARM64 (per principles doc §5.13 + §5.19); macOS/WSL2 packaging arrives in Phase 2.
+**Phase 1 — M1 + M2 + M3 + M4 SHIPPED 2026-05-20.** First-run enrollment, signed-heartbeat loop, assignment-pull pipeline, and sandboxed runner subprocess all verified end-to-end against the coordinator. Phase 1 worker target is Linux x86_64 + ARM64 (per principles doc §5.13 + §5.19); macOS/WSL2 packaging arrives in Phase 2.
 
 What's live:
 
@@ -15,16 +15,17 @@ What's live:
   - Manifest-pin defense (§5.14): first sighting of an experiment locks its `manifest_sha256`; a later assignment under a different hash is refused as a manifest-swap attempt.
   - Sensitive-content gate (§5.14 + §5.12): assignments carrying `sensitive_content_flags` in the payload require an explicit `accept <experiment-id>` to proceed (default-decline). *Note: the M6-era coordinator does NOT yet ship this field on `WorkUnitEnvelopeOut`; the gate is plumbed and waits for the coordinator-side change.*
   - Tenant allow/deny gate (§5.14): tenants on the deny list are always refused; a non-empty allow list restricts acceptance to listed tenants.
-  - **Refusals call back to the coordinator** via `POST /api/v0/workers/{id}/assignments/{unit_id}/refuse` so the operator console can see the refusal reason and the unit's replication slot is freed for another worker (Option A per Q-W4). Each decision is also written to a local `assignment_audit` log; M3 ACCEPTED units are dropped (no runner subprocess yet — that lands in M4).
+  - **Refusals call back to the coordinator** via `POST /api/v0/workers/{id}/assignments/{unit_id}/refuse` so the operator console can see the refusal reason and the unit's replication slot is freed for another worker (Option A per Q-W4). Each decision is also written to a local `assignment_audit` log.
+- **M4: sandboxed runner + signed result submission.** On accept, the daemon spawns `auspexai-worker-runner` inside a `bubblewrap` sandbox (Phase 1 permissive policy: `--die-with-parent --new-session --dev-bind / /` plus env passthrough). The runner reads the work-unit envelope from stdin, executes the M4 *synthetic* executor (echoes the payload — tenant code arrives later), writes a Result body to `$AUSPEXAI_OUTPUT_PATH`, exits. Daemon reads the output, signs it with the worker key over a canonical encoding, POSTs to `/api/v0/workers/{id}/assignments/{unit_id}/result`. Local `submitted_results` table mirrors the coordinator's ack. Per Q-W4: any failure during dispatch (runner crash, submit error) triggers an explicit `refuse` to the coordinator. Per Q-W9: one-at-a-time on the poller thread; heartbeat thread runs independently. Per Q-W10: bubblewrap requires unprivileged user namespaces — on AppArmor-restricted hosts (Ubuntu 24.04 default) deploy needs `kernel.apparmor_restrict_unprivileged_userns=0` or a worker AppArmor profile. Passthrough mode (`[sandbox] use_bubblewrap = false`) is the documented escape hatch for CI + dev hosts.
+- `auspexai-worker abort <unit-id>` — reads the runner PID file from the workspace, sends SIGTERM, waits `--grace-seconds` (default 5), sends SIGKILL if still running. No-op when no workspace / no PID / process already exited; always writes an audit row.
 - M3 CLI verbs: `queue`, `peek <unit-id>`, `accept <coordinator-experiment-id>`, `refuse <unit-id>`, `tenant {allow,deny,list} <tenant-id>`.
 - RFC 9421 HTTP Message Signature signer (`ed25519`, covered `@method`+`@path`+`@authority`+`content-digest`, label `sig1`, `created` window enforced by the coordinator). Symmetric to the platform's verifier; wire format verified by an inline oracle in the worker's own test suite.
 - Keystore backends: libsecret (Secret Service) primary; encrypted-file (ChaCha20-Poly1305, key derived from `/etc/machine-id` + UID) fallback for headless hosts and containers.
 - Local SQLite state at `$XDG_STATE_HOME/auspexai-worker/worker.db` with a sequential migration framework matching the coordinator's convention. Re-entrant transaction lock so the two daemon threads can write concurrently without colliding on `BEGIN`.
 - `systemd --user` service unit template at `packaging/systemd/auspexai-worker.service` with Phase 1 hardening (`PrivateTmp`, `ProtectHome=read-only`, `ProtectSystem=strict`, `NoNewPrivileges`, `SystemCallFilter=@system-service`). ExecStart runs the daemon.
-- 131 tests on Python 3.11 + 3.12; ruff check + format-check clean.
+- 157 tests on Python 3.11 + 3.12; ruff check + format-check clean.
 
 Subsequent milestones (per design doc §14):
-- **M4** — Sandboxed runner subprocess (bubblewrap) + end-to-end work-unit execution.
 - **M5** — Receipts store + `receipts list/show` + `log` CLI.
 - **M6** — T1 upgrade via OAuth Device Flow + `withdraw` flow.
 - **M7** — Cosign-signed `.deb` + source tarball as GitHub release artifacts.
@@ -56,7 +57,7 @@ AUSPEXAI_COORDINATOR_URL=http://127.0.0.1:8080 \
   auspexai-worker bootstrap                         # enrolls against a local coordinator
 AUSPEXAI_COORDINATOR_URL=http://127.0.0.1:8080 \
   auspexai-worker daemon --max-ticks=3              # run 3 heartbeats then exit
-pytest                                              # 131 tests
+pytest                                              # 157 tests
 ruff check src tests
 ruff format --check src tests
 ```

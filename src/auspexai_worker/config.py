@@ -58,6 +58,12 @@ class WorkerConfig:
     # The volunteer is the source of truth for what hardware is actually
     # usable; observed device-file probes ride alongside as diagnostic.
     declared_gpus: GpuDeclaration = field(default_factory=GpuDeclaration)
+    # [sandbox] — Phase 1 ships PERMISSIVE; tests + dev hosts without bwrap
+    # set use_bubblewrap=false. Production MUST use bwrap.
+    sandbox_use_bubblewrap: bool = True
+    # Maximum wall-clock seconds a runner subprocess can take. None = no
+    # timeout (Phase 1 synthetic-tenant work is bounded by trivial logic).
+    runner_timeout_seconds: float | None = None
 
     @property
     def state_db_path(self) -> Path:
@@ -99,6 +105,8 @@ class WorkerConfig:
             "declared_gpu_vram_total_gb": None,
             "declared_gpu_amd": None,
             "declared_gpu_amd_model": None,
+            "sandbox_use_bubblewrap": True,
+            "runner_timeout_seconds": None,
         }
 
         if config_path is not None:
@@ -147,8 +155,13 @@ class WorkerConfig:
             ):
                 if gpu_key in gpus_block:
                     merged[f"declared_gpu_{gpu_key}"] = gpus_block[gpu_key]
-            # [sandbox], [tenants], [models], [telemetry] are reserved for
-            # M3+ milestones; tolerated here without consumption.
+            sandbox_block = data.get("sandbox") or {}
+            if "use_bubblewrap" in sandbox_block:
+                merged["sandbox_use_bubblewrap"] = sandbox_block["use_bubblewrap"]
+            if "runner_timeout_seconds" in sandbox_block:
+                merged["runner_timeout_seconds"] = sandbox_block["runner_timeout_seconds"]
+            # [tenants], [models], [telemetry] are reserved for later
+            # milestones; tolerated here without consumption.
 
         # Env var overrides (highest precedence besides explicit kwargs).
         if "AUSPEXAI_COORDINATOR_URL" in env:
@@ -180,6 +193,8 @@ class WorkerConfig:
                 amd=_opt_bool(merged.get("declared_gpu_amd")),
                 amd_model=_opt_str(merged.get("declared_gpu_amd_model")),
             ),
+            sandbox_use_bubblewrap=bool(merged.get("sandbox_use_bubblewrap", True)),
+            runner_timeout_seconds=_opt_float(merged.get("runner_timeout_seconds")),
         )
 
 

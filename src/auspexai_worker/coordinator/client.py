@@ -55,6 +55,18 @@ class AssignmentAlreadyResolvedError(CoordinatorError):
     """409 assignment_already_resolved — already has a result, or already refused."""
 
 
+class ResultAlreadySubmittedError(CoordinatorError):
+    """409 result_already_submitted — this assignment already has a result."""
+
+
+class UnitIdMismatchError(CoordinatorError):
+    """422 unit_id_mismatch — body.unit_id ≠ URL unit_id."""
+
+
+class WorkerPubkeyMismatchError(CoordinatorError):
+    """403 worker_pubkey_mismatch — Result.worker_pubkey ≠ signing credential."""
+
+
 class UnauthorizedError(CoordinatorError):
     """401/403 from a signed endpoint. Usually means the signature was bad,
     the keyid resolved to nothing, or the credential class wasn't allowed."""
@@ -92,6 +104,21 @@ class WorkUnitEnvelope:
     manifest_sha256: str
     created_at: datetime
     payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ResultSubmissionResponse:
+    """Coordinator's acknowledgment of a submitted Result.
+
+    `unit_status_after` is "in_progress" until completions_so_far reaches
+    replication_target, at which point it transitions to "completed".
+    """
+
+    result_id: str
+    unit_id: str
+    unit_status_after: str
+    completions_so_far: int
+    replication_target: int
 
 
 @dataclass(frozen=True)
@@ -257,6 +284,67 @@ class CoordinatorClient:
             f"get_assignment: unexpected status {response.status_code}: {response.text[:500]}"
         )
 
+    # ---- /workers/{id}/assignments/{unit_id}/result (signed) ----------
+
+    def submit_result(
+        self,
+        *,
+        worker_id: str,
+        unit_id: str,
+        worker_pubkey: str,
+        completed_at: str,
+        exit_code: int,
+        payload: dict[str, Any],
+        worker_signature: str,
+    ) -> ResultSubmissionResponse:
+        """POST .../result. Worker-credentialed.
+
+        Per coordinator M6d the body's `worker_signature` is stored but
+        not verified at submit time — M7 will re-verify when issuing
+        receipts. The worker still produces a valid signature (see
+        `signing.sign_result`) so M7 verification just works.
+        """
+        if self._signer is None:
+            raise CoordinatorError(
+                "submit_result requires a signer; CoordinatorClient was constructed without one"
+            )
+        body: dict[str, Any] = {
+            "unit_id": unit_id,
+            "worker_pubkey": worker_pubkey.lower(),
+            "completed_at": completed_at,
+            "exit_code": int(exit_code),
+            "payload": payload,
+            "worker_signature": worker_signature,
+        }
+        response = self._signed_request(
+            method="POST",
+            path=f"/api/v0/workers/{worker_id}/assignments/{unit_id}/result",
+            json_body=body,
+        )
+        if response.status_code == 201:
+            return _parse_result_submission(response.json())
+        if response.status_code == 422:
+            code = _error_code(response)
+            if code == "unit_id_mismatch":
+                raise UnitIdMismatchError(_error_message(response))
+            raise CoordinatorError(f"submit_result: 422 {code!r}: {_error_message(response)}")
+        if response.status_code == 403:
+            code = _error_code(response)
+            if code == "worker_pubkey_mismatch":
+                raise WorkerPubkeyMismatchError(_error_message(response))
+            if code == "worker_id_mismatch":
+                raise WorkerIdMismatchError(_error_message(response))
+            raise UnauthorizedError(_error_message(response))
+        if response.status_code == 401:
+            raise UnauthorizedError(_error_message(response))
+        if response.status_code == 404:
+            raise AssignmentNotFoundError(_error_message(response))
+        if response.status_code == 409:
+            raise ResultAlreadySubmittedError(_error_message(response))
+        raise CoordinatorError(
+            f"submit_result: unexpected status {response.status_code}: {response.text[:500]}"
+        )
+
     # ---- /workers/{id}/assignments/{unit_id}/refuse (signed) -----------
 
     def refuse_assignment(
@@ -393,6 +481,19 @@ def _parse_assignment(payload: dict[str, Any]) -> AssignmentResponse:
 
 def _opt_str(raw: object) -> str | None:
     return None if raw is None else str(raw)
+
+
+def _parse_result_submission(payload: dict[str, Any]) -> ResultSubmissionResponse:
+    try:
+        return ResultSubmissionResponse(
+            result_id=str(payload["result_id"]),
+            unit_id=str(payload["unit_id"]),
+            unit_status_after=str(payload["unit_status_after"]),
+            completions_so_far=int(payload["completions_so_far"]),
+            replication_target=int(payload["replication_target"]),
+        )
+    except KeyError as exc:
+        raise CoordinatorError(f"result-submission response missing field: {exc}") from exc
 
 
 def _parse_refuse(payload: dict[str, Any]) -> RefuseResponse:

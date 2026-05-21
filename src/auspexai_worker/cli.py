@@ -28,12 +28,15 @@ from .coordinator import (
     PubkeyAlreadyTenantError,
 )
 from .daemon import AssignmentPoller, HeartbeatLoop
+from .daemon.dispatch import RunnerDispatcher
 from .state import (
     AcceptedSensitiveRepository,
     AssignmentAuditRepository,
     ManifestPinRepository,
+    SubmittedResultRepository,
     TenantListRepository,
 )
+from .workspace import WorkspaceManager, workspace_runs_dir
 
 
 @click.group(help="AuspexAI volunteer worker.")
@@ -172,8 +175,23 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
     accepted_sensitive = AcceptedSensitiveRepository(db)
     tenant_lists = TenantListRepository(db)
     audit = AssignmentAuditRepository(db)
+    submitted_results = SubmittedResultRepository(db)
+
+    runs_dir = workspace_runs_dir(config.state_dir)
+    workspace_manager = WorkspaceManager(runs_dir)
+    privkey = keystore.load()
 
     with CoordinatorClient(base_url=config.coordinator_url, signer=signer) as client:
+        dispatcher = RunnerDispatcher(
+            coordinator=client,
+            worker_id=worker.worker_id,
+            worker_pubkey=worker.pubkey_hex,
+            privkey=privkey,
+            workspace_manager=workspace_manager,
+            submitted_repo=submitted_results,
+            use_bubblewrap=config.sandbox_use_bubblewrap,
+            runner_timeout_seconds=config.runner_timeout_seconds,
+        )
         heartbeat = HeartbeatLoop(
             coordinator=client,
             repo=repo,
@@ -192,6 +210,7 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
             tenant_lists=tenant_lists,
             audit=audit,
             interval_seconds=config.assignment_poll_interval_seconds,
+            dispatcher=dispatcher,
         )
 
         def _on_signal(signum: int, _frame: object) -> None:
@@ -333,6 +352,85 @@ def refuse(ctx: click.Context, unit_id: str, reason: str) -> None:
             "(Phase 1 worker has no live refuse endpoint — the coordinator "
             "re-schedules the unit when this worker's assignment times out.)"
         )
+    finally:
+        db.close()
+
+
+@cli.command(help="Abort a running unit by signaling its runner subprocess.")
+@click.argument("unit_id")
+@click.option(
+    "--grace-seconds",
+    type=float,
+    default=5.0,
+    help="Wait N seconds after SIGTERM before sending SIGKILL.",
+)
+@click.pass_context
+def abort(ctx: click.Context, unit_id: str, grace_seconds: float) -> None:
+    """Send SIGTERM (then SIGKILL after grace_seconds) to the runner
+    subprocess executing `unit_id`. Reads the PID from the workspace
+    `runner.pid` file. No-op if no workspace / no PID file / process
+    already exited; always writes an audit row."""
+    import os as _os
+    import time as _time
+
+    config: WorkerConfig = ctx.obj["config"]
+    runs_dir = workspace_runs_dir(config.state_dir)
+    manager = WorkspaceManager(runs_dir)
+
+    db, _ = initialize_state(config)
+    audit = AssignmentAuditRepository(db)
+    try:
+        try:
+            workspace = manager.get_existing(unit_id)
+        except Exception as exc:
+            audit.append(action="abort_no_workspace", unit_id=unit_id, reason=str(exc))
+            click.echo(f"no active runner for unit {unit_id} ({exc})")
+            return
+        pid = workspace.read_pid()
+        if pid is None:
+            audit.append(action="abort_no_pid", unit_id=unit_id, reason="runner.pid missing")
+            click.echo(f"no PID file in workspace for unit {unit_id}")
+            return
+        try:
+            _os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            audit.append(
+                action="abort_already_exited",
+                unit_id=unit_id,
+                reason=f"pid {pid} already exited",
+            )
+            click.echo(f"pid {pid} already exited")
+            return
+
+        deadline = _time.monotonic() + grace_seconds
+        while _time.monotonic() < deadline:
+            try:
+                _os.kill(pid, 0)
+            except ProcessLookupError:
+                audit.append(
+                    action="aborted_sigterm",
+                    unit_id=unit_id,
+                    reason=f"pid {pid} exited within grace period",
+                )
+                click.echo(f"sent SIGTERM to pid {pid}; exited cleanly")
+                return
+            _time.sleep(0.1)
+
+        try:
+            _os.kill(pid, signal.SIGKILL)
+            audit.append(
+                action="aborted_sigkill",
+                unit_id=unit_id,
+                reason=f"pid {pid} did not exit within {grace_seconds}s of SIGTERM",
+            )
+            click.echo(f"sent SIGKILL to pid {pid} after {grace_seconds}s grace")
+        except ProcessLookupError:
+            audit.append(
+                action="aborted_sigterm_race",
+                unit_id=unit_id,
+                reason=f"pid {pid} exited between SIGTERM grace check and SIGKILL",
+            )
+            click.echo(f"pid {pid} exited just before SIGKILL")
     finally:
         db.close()
 

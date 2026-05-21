@@ -28,6 +28,11 @@ from auspexai_worker.coordinator import (
     CoordinatorClient,
     CoordinatorError,
 )
+from auspexai_worker.daemon.dispatch import (
+    DispatchOutcome,
+    DispatchOutcomeKind,
+    RunnerDispatcher,
+)
 from auspexai_worker.state import (
     AcceptedSensitiveRepository,
     AssignmentAuditRepository,
@@ -45,6 +50,8 @@ class AssignmentStats:
     polls_failed: int = 0
     units_accepted: int = 0
     units_refused: int = 0
+    units_submitted: int = 0  # M4: dispatched + run + submitted ok
+    units_dispatch_failed: int = 0  # M4: gate-accepted but runner / submit failed
     no_work_polls: int = 0
     refuse_calls_succeeded: int = 0
     refuse_calls_failed: int = 0
@@ -53,7 +60,14 @@ class AssignmentStats:
 
 
 class AssignmentPoller:
-    """Periodic GET /workers/{id}/assignments + gate-pipeline + audit-log writer."""
+    """Periodic GET /workers/{id}/assignments + gate-pipeline + audit-log writer.
+
+    M4: when the gate decision is accepted AND a `dispatcher` is configured,
+    the poller calls `dispatcher.run_unit(...)` synchronously to execute
+    the unit and submit the result before polling again. Without a
+    dispatcher (M3 behavior, kept for backward compatibility in tests),
+    accepted units are dropped after the audit row is written.
+    """
 
     def __init__(
         self,
@@ -65,6 +79,7 @@ class AssignmentPoller:
         tenant_lists: TenantListRepository,
         audit: AssignmentAuditRepository,
         interval_seconds: float,
+        dispatcher: RunnerDispatcher | None = None,
         stop_event: threading.Event | None = None,
     ) -> None:
         self._coordinator = coordinator
@@ -74,6 +89,7 @@ class AssignmentPoller:
         self._tenant_lists = tenant_lists
         self._audit = audit
         self._interval = float(interval_seconds)
+        self._dispatcher = dispatcher
         self._stop_event = stop_event or threading.Event()
         self._stats = AssignmentStats()
 
@@ -155,16 +171,113 @@ class AssignmentPoller:
 
         if decision.accepted:
             self._stats.units_accepted += 1
-            logger.info(
-                "assignment accepted (unit=%s experiment=%s tenant=%s) — M3 drops "
-                "(runner subprocess arrives in M4)",
-                response.work_unit.unit_id,
-                response.coordinator_experiment_id,
-                response.work_unit.tenant_id,
-            )
+            if self._dispatcher is not None:
+                self._dispatch_accepted(response)
+            else:
+                logger.info(
+                    "assignment accepted (unit=%s experiment=%s tenant=%s) — no "
+                    "dispatcher configured; dropping (M3-mode)",
+                    response.work_unit.unit_id,
+                    response.coordinator_experiment_id,
+                    response.work_unit.tenant_id,
+                )
         else:
             self._stats.units_refused += 1
             self._on_refused(decision, response)
+
+    def _dispatch_accepted(self, response: AssignmentResponse) -> None:
+        """M4: hand an accepted assignment to the runner dispatcher,
+        record the outcome, and translate failures into a coordinator-side
+        refuse + audit so dangling in_progress rows don't accumulate."""
+        assert self._dispatcher is not None and response.work_unit is not None
+        unit = response.work_unit
+        try:
+            outcome = self._dispatcher.run_unit(response)
+        except Exception as exc:
+            logger.exception("dispatcher raised for unit %s", unit.unit_id)
+            outcome = DispatchOutcome(
+                kind=DispatchOutcomeKind.RUNNER_CRASH,
+                reason=f"dispatcher exception: {type(exc).__name__}: {exc}",
+            )
+
+        if outcome.kind == DispatchOutcomeKind.SUBMITTED:
+            self._stats.units_submitted += 1
+            self._audit.append(
+                action="submitted",
+                assignment_id=response.assignment_id,
+                coordinator_experiment_id=response.coordinator_experiment_id,
+                tenant_id=unit.tenant_id,
+                unit_id=unit.unit_id,
+                manifest_sha256=unit.manifest_sha256,
+                reason=(
+                    f"result_id={outcome.result_response.result_id} "
+                    f"status={outcome.result_response.unit_status_after} "
+                    f"completions={outcome.result_response.completions_so_far}/"
+                    f"{outcome.result_response.replication_target}"
+                    if outcome.result_response
+                    else None
+                ),
+            )
+            return
+
+        # Anything else is a failed dispatch — record locally and tell the
+        # coordinator we refused so the assignment row doesn't dangle.
+        self._stats.units_dispatch_failed += 1
+        action_tag = (
+            "submit_failed"
+            if outcome.kind == DispatchOutcomeKind.SUBMIT_FAILED
+            else outcome.kind  # runner_failed / sandbox_unavailable
+        )
+        self._audit.append(
+            action=action_tag,
+            assignment_id=response.assignment_id,
+            coordinator_experiment_id=response.coordinator_experiment_id,
+            tenant_id=unit.tenant_id,
+            unit_id=unit.unit_id,
+            manifest_sha256=unit.manifest_sha256,
+            reason=outcome.reason,
+        )
+        if outcome.kind == DispatchOutcomeKind.SUBMIT_FAILED:
+            # Coordinator-side state may be inconsistent (result possibly
+            # received); don't double-refuse if the submit itself partially
+            # succeeded. Operator can untangle from audit + assignments table.
+            return
+        # Runner crashed or sandbox unavailable — tell coordinator to free
+        # the slot.
+        self._call_refuse_after_failure(response, action_tag, outcome.reason or "")
+
+    def _call_refuse_after_failure(
+        self,
+        response: AssignmentResponse,
+        kind: str,
+        reason: str,
+    ) -> None:
+        """Tell the coordinator the assignment failed after acceptance so
+        the unit can be re-offered. Network errors during the refuse log
+        a warning but don't propagate."""
+        assert response.work_unit is not None
+        try:
+            self._coordinator.refuse_assignment(
+                worker_id=self._worker_id,
+                unit_id=response.work_unit.unit_id,
+                kind=kind,
+                reason=reason,
+            )
+            self._stats.refuse_calls_succeeded += 1
+        except (AssignmentNotFoundError, AssignmentAlreadyResolvedError) as exc:
+            self._stats.refuse_calls_failed += 1
+            logger.info(
+                "post-failure refuse no-op (unit=%s): %s",
+                response.work_unit.unit_id,
+                exc,
+            )
+        except CoordinatorError as exc:
+            self._stats.refuse_calls_failed += 1
+            logger.warning(
+                "post-failure refuse failed (unit=%s): %s",
+                response.work_unit.unit_id,
+                exc,
+            )
 
     def _on_refused(
         self,

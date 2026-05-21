@@ -293,6 +293,100 @@ class AssignmentAuditRepository:
         ]
 
 
+# ---- submitted_results (M4) ----------------------------------------------
+
+
+@dataclass(frozen=True)
+class SubmittedResult:
+    id: int
+    unit_id: str
+    assignment_id: str | None
+    result_id: str
+    exit_code: int
+    completed_at: str
+    submitted_at: datetime
+    coord_unit_status_after: str | None
+    coord_completions_so_far: int | None
+    coord_replication_target: int | None
+    payload_json: str
+
+
+class SubmittedResultRepository:
+    """Local record of results the worker submitted to the coordinator (M4)."""
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    def record(
+        self,
+        *,
+        unit_id: str,
+        assignment_id: str | None,
+        result_id: str,
+        exit_code: int,
+        completed_at: str,
+        coord_unit_status_after: str | None,
+        coord_completions_so_far: int | None,
+        coord_replication_target: int | None,
+        payload_json: str,
+    ) -> None:
+        with self._db.transaction() as conn:
+            conn.execute(
+                "INSERT INTO submitted_results "
+                "(unit_id, assignment_id, result_id, exit_code, completed_at, "
+                " coord_unit_status_after, coord_completions_so_far, "
+                " coord_replication_target, payload_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    unit_id,
+                    assignment_id,
+                    result_id,
+                    exit_code,
+                    completed_at,
+                    coord_unit_status_after,
+                    coord_completions_so_far,
+                    coord_replication_target,
+                    payload_json,
+                ),
+            )
+
+    def get_by_unit(self, unit_id: str) -> list[SubmittedResult]:
+        rows = self._db.connection.execute(
+            "SELECT id, unit_id, assignment_id, result_id, exit_code, "
+            "completed_at, submitted_at, coord_unit_status_after, "
+            "coord_completions_so_far, coord_replication_target, payload_json "
+            "FROM submitted_results WHERE unit_id = ? ORDER BY id DESC",
+            (unit_id,),
+        ).fetchall()
+        return [_row_to_submitted_result(r) for r in rows]
+
+    def recent(self, *, limit: int = 50) -> list[SubmittedResult]:
+        rows = self._db.connection.execute(
+            "SELECT id, unit_id, assignment_id, result_id, exit_code, "
+            "completed_at, submitted_at, coord_unit_status_after, "
+            "coord_completions_so_far, coord_replication_target, payload_json "
+            "FROM submitted_results ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [_row_to_submitted_result(r) for r in rows]
+
+
+def _row_to_submitted_result(row) -> SubmittedResult:
+    return SubmittedResult(
+        id=row["id"],
+        unit_id=row["unit_id"],
+        assignment_id=row["assignment_id"],
+        result_id=row["result_id"],
+        exit_code=row["exit_code"],
+        completed_at=row["completed_at"],
+        submitted_at=_parse_ts(row["submitted_at"]),
+        coord_unit_status_after=row["coord_unit_status_after"],
+        coord_completions_so_far=row["coord_completions_so_far"],
+        coord_replication_target=row["coord_replication_target"],
+        payload_json=row["payload_json"],
+    )
+
+
 def _parse_ts(raw: str) -> datetime:
     # SQLite DEFAULT CURRENT_TIMESTAMP yields "YYYY-MM-DD HH:MM:SS" (no T).
     # Application-side inserts use isoformat(). Normalize both.

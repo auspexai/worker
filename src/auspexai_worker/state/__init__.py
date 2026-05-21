@@ -17,6 +17,8 @@ from .m3_repositories import (
     ManifestPin,
     ManifestPinRepository,
     PinResult,
+    SubmittedResult,
+    SubmittedResultRepository,
     TenantListRepository,
 )
 from .repository import WorkerSelf, WorkerSelfRepository
@@ -31,6 +33,8 @@ __all__ = [
     "MigrationError",
     "MigrationRunner",
     "PinResult",
+    "SubmittedResult",
+    "SubmittedResultRepository",
     "TenantListRepository",
     "WorkerSelf",
     "WorkerSelfRepository",
