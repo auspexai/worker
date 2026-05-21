@@ -13,17 +13,21 @@ config flag `[sandbox] use_bubblewrap = false` selects passthrough.
 from __future__ import annotations
 
 from .wrapper import (
+    BubblewrapProbeResult,
     SandboxConfig,
     SandboxNotAvailableError,
     SandboxPolicy,
     build_argv,
     check_bubblewrap_available,
+    probe_bubblewrap,
 )
 
 __all__ = [
+    "BubblewrapProbeResult",
     "SandboxConfig",
     "SandboxNotAvailableError",
     "SandboxPolicy",
     "build_argv",
     "check_bubblewrap_available",
+    "probe_bubblewrap",
 ]

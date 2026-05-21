@@ -29,6 +29,7 @@ from .coordinator import (
 )
 from .daemon import AssignmentPoller, HeartbeatLoop
 from .daemon.dispatch import RunnerDispatcher
+from .sandbox import probe_bubblewrap
 from .state import (
     AcceptedSensitiveRepository,
     AssignmentAuditRepository,
@@ -163,6 +164,41 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
         )
         db.close()
         sys.exit(2)
+
+    # Sandbox pre-check (Q-W10): when running with bubblewrap, verify it
+    # can actually construct a user namespace on this host before we start
+    # accepting work. On Ubuntu 24.04 with default AppArmor settings the
+    # binary is present but unprivileged userns is blocked; without this
+    # check, every assignment would fail with a cryptic per-unit error.
+    if config.sandbox_use_bubblewrap:
+        probe = probe_bubblewrap()
+        if not probe.ok:
+            click.echo(
+                "ERROR: bubblewrap sandbox is not functional on this host.\n"
+                f"       Probe failure: {probe.reason}\n"
+                "\n"
+                "       Most common cause on Ubuntu 24.04: AppArmor restricts\n"
+                "       unprivileged user namespaces. To fix:\n"
+                "\n"
+                "       1. (Phase 1 / lab) Drop the AppArmor restriction host-wide:\n"
+                "            echo 'kernel.apparmor_restrict_unprivileged_userns = 0' \\\n"
+                "              | sudo tee /etc/sysctl.d/60-auspexai-userns.conf\n"
+                "            sudo sysctl --system\n"
+                "\n"
+                "       2. (Phase 2 packaging, NOT YET AVAILABLE) An AppArmor\n"
+                "          profile scoped to auspexai-worker-runner is the right\n"
+                "          long-term fix; ships with the .deb in M7.\n"
+                "\n"
+                "       3. (last resort, DEGRADES SECURITY) Set\n"
+                "          `[sandbox] use_bubblewrap = false` in worker.toml to\n"
+                "          run the runner outside the §5.17 sandbox.\n"
+                "\n"
+                "       See Documentation/AuspexAI/v0.1.0/worker_daemon_design.md\n"
+                "       §15 Q-W10 for the full resolution discussion.",
+                err=True,
+            )
+            db.close()
+            sys.exit(2)
 
     declared_caps = DeclaredCaps(
         max_ram_gb=config.max_ram_gb,

@@ -17,6 +17,7 @@ Environment variables passed through to the runner regardless of mode:
 from __future__ import annotations
 
 import shutil
+import subprocess
 from dataclasses import dataclass
 from enum import Enum
 
@@ -56,6 +57,53 @@ class SandboxConfig:
 def check_bubblewrap_available(bwrap_path: str = "bwrap") -> bool:
     """Return True if the bubblewrap binary is on PATH."""
     return shutil.which(bwrap_path) is not None
+
+
+@dataclass(frozen=True)
+class BubblewrapProbeResult:
+    """Outcome of `probe_bubblewrap`. `ok=True` means bwrap can actually
+    construct a user-namespace and run a no-op subprocess on this host.
+    `ok=False` includes a human-readable `reason` suitable for surfacing
+    to operators."""
+
+    ok: bool
+    reason: str | None = None
+
+
+def probe_bubblewrap(bwrap_path: str = "bwrap") -> BubblewrapProbeResult:
+    """Probe whether bwrap actually works on this host.
+
+    Runs a minimal `bwrap --dev-bind / / -- /bin/true` and reports
+    whether the namespace setup succeeded. This catches the common
+    Ubuntu 24.04 failure mode where the binary is installed but
+    AppArmor restricts unprivileged user namespaces — bwrap exits
+    non-zero with `bwrap: setting up uid map: Permission denied`.
+
+    The daemon calls this at startup when `use_bubblewrap=true` so
+    operators see a clear, actionable error instead of a cryptic per-
+    unit failure that only surfaces after assignments start arriving.
+    """
+    if not check_bubblewrap_available(bwrap_path):
+        return BubblewrapProbeResult(
+            ok=False,
+            reason=f"bwrap binary {bwrap_path!r} not found on PATH",
+        )
+    try:
+        result = subprocess.run(
+            [bwrap_path, "--dev-bind", "/", "/", "--", "/bin/true"],
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        return BubblewrapProbeResult(ok=False, reason=f"bwrap probe raised: {exc}")
+    if result.returncode == 0:
+        return BubblewrapProbeResult(ok=True)
+    stderr_tail = result.stderr.decode("utf-8", errors="replace").strip()[-400:]
+    return BubblewrapProbeResult(
+        ok=False,
+        reason=f"bwrap probe exit={result.returncode}: {stderr_tail}",
+    )
 
 
 def build_argv(config: SandboxConfig) -> list[str]:

@@ -9,6 +9,7 @@ from auspexai_worker.sandbox import (
     SandboxNotAvailableError,
     build_argv,
     check_bubblewrap_available,
+    probe_bubblewrap,
 )
 
 
@@ -49,3 +50,20 @@ class TestBubblewrap:
     def test_missing_bwrap_raises(self) -> None:
         with pytest.raises(SandboxNotAvailableError):
             build_argv(_config(use_bubblewrap=True, bwrap_path="bwrap-that-does-not-exist"))
+
+
+class TestProbeBubblewrap:
+    def test_missing_binary_returns_not_ok(self) -> None:
+        result = probe_bubblewrap(bwrap_path="bwrap-that-does-not-exist")
+        assert result.ok is False
+        assert "not found on PATH" in (result.reason or "")
+
+    def test_present_binary_probes_real_namespace(self) -> None:
+        if not check_bubblewrap_available():
+            pytest.skip("bubblewrap not installed on this host")
+        result = probe_bubblewrap()
+        # On the test host this should succeed (sysctl was flipped during
+        # M4 verification). If the test fails on a CI host without the
+        # workaround, the user will see exactly the same actionable error
+        # the daemon would surface.
+        assert result.ok is True, f"bwrap probe failed unexpectedly: {result.reason}"
