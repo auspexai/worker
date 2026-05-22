@@ -255,20 +255,7 @@ class AssignmentAuditRepository:
             "FROM assignment_audit ORDER BY id DESC LIMIT ?",
             (limit,),
         ).fetchall()
-        return [
-            AssignmentAuditRow(
-                id=r["id"],
-                occurred_at=_parse_ts(r["occurred_at"]),
-                assignment_id=r["assignment_id"],
-                coordinator_experiment_id=r["coordinator_experiment_id"],
-                tenant_id=r["tenant_id"],
-                unit_id=r["unit_id"],
-                manifest_sha256=r["manifest_sha256"],
-                action=r["action"],
-                reason=r["reason"],
-            )
-            for r in rows
-        ]
+        return [_row_to_audit_row(r) for r in rows]
 
     def by_unit(self, unit_id: str) -> list[AssignmentAuditRow]:
         rows = self._db.connection.execute(
@@ -277,23 +264,59 @@ class AssignmentAuditRepository:
             "FROM assignment_audit WHERE unit_id = ? ORDER BY id DESC",
             (unit_id,),
         ).fetchall()
-        return [
-            AssignmentAuditRow(
-                id=r["id"],
-                occurred_at=_parse_ts(r["occurred_at"]),
-                assignment_id=r["assignment_id"],
-                coordinator_experiment_id=r["coordinator_experiment_id"],
-                tenant_id=r["tenant_id"],
-                unit_id=r["unit_id"],
-                manifest_sha256=r["manifest_sha256"],
-                action=r["action"],
-                reason=r["reason"],
-            )
-            for r in rows
-        ]
+        return [_row_to_audit_row(r) for r in rows]
+
+    def query(
+        self,
+        *,
+        since: datetime | None = None,
+        unit_id: str | None = None,
+        action: str | None = None,
+        limit: int = 200,
+    ) -> list[AssignmentAuditRow]:
+        """Filtered query for the M5 `auspexai-worker log` CLI."""
+        where_clauses: list[str] = []
+        params: list[object] = []
+
+        if since is not None:
+            where_clauses.append("occurred_at >= ?")
+            params.append(since.isoformat())
+
+        if unit_id is not None:
+            where_clauses.append("unit_id = ?")
+            params.append(unit_id)
+
+        if action is not None:
+            where_clauses.append("action = ?")
+            params.append(action)
+
+        where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+        params.append(limit)
+
+        rows = self._db.connection.execute(
+            "SELECT id, occurred_at, assignment_id, coordinator_experiment_id, "
+            "tenant_id, unit_id, manifest_sha256, action, reason "
+            f"FROM assignment_audit {where_sql} ORDER BY occurred_at DESC, id DESC LIMIT ?",
+            params,
+        ).fetchall()
+        return [_row_to_audit_row(r) for r in rows]
 
 
-# ---- submitted_results (M4) ----------------------------------------------
+def _row_to_audit_row(r) -> AssignmentAuditRow:
+    return AssignmentAuditRow(
+        id=r["id"],
+        occurred_at=_parse_ts(r["occurred_at"]),
+        assignment_id=r["assignment_id"],
+        coordinator_experiment_id=r["coordinator_experiment_id"],
+        tenant_id=r["tenant_id"],
+        unit_id=r["unit_id"],
+        manifest_sha256=r["manifest_sha256"],
+        action=r["action"],
+        reason=r["reason"],
+    )
+
+
+# ---- submitted_results (M4 row, M5 receipt extensions) -------------------
 
 
 @dataclass(frozen=True)
@@ -309,10 +332,34 @@ class SubmittedResult:
     coord_completions_so_far: int | None
     coord_replication_target: int | None
     payload_json: str
+    receipt_status: str
+    canonical_blob: bytes | None
+    canonical_format: str | None
+    canonical_fetched_at: datetime | None
+
+
+# All columns selected by every receipt-reading method, kept in one place so
+# the schema stays in sync across queries.
+_SUBMITTED_RESULTS_COLUMNS = (
+    "id, unit_id, assignment_id, result_id, exit_code, completed_at, "
+    "submitted_at, coord_unit_status_after, coord_completions_so_far, "
+    "coord_replication_target, payload_json, "
+    "receipt_status, canonical_blob, canonical_format, canonical_fetched_at"
+)
 
 
 class SubmittedResultRepository:
-    """Local record of results the worker submitted to the coordinator (M4)."""
+    """Local record of results the worker submitted to the coordinator.
+
+    M4 introduced the table with one row per submitted result. M5 added the
+    receipt-canonical columns (`receipt_status`, `canonical_blob`,
+    `canonical_format`, `canonical_fetched_at`) so the same row is both the
+    "I submitted this" record AND the worker's local receipt store — single
+    source of truth per the 2026-05-22 design decision in
+    `worker_daemon_design.md` §10. M7 will fill the canonical_* columns via
+    `set_canonical()` once the coordinator ships canonical CBOR+COSE
+    receipts.
+    """
 
     def __init__(self, db: Database) -> None:
         self._db = db
@@ -330,6 +377,8 @@ class SubmittedResultRepository:
         coord_replication_target: int | None,
         payload_json: str,
     ) -> None:
+        # `receipt_status` defaults to 'placeholder' via the M5 migration's
+        # NOT NULL DEFAULT; canonical_* columns default to NULL.
         with self._db.transaction() as conn:
             conn.execute(
                 "INSERT INTO submitted_results "
@@ -352,26 +401,96 @@ class SubmittedResultRepository:
 
     def get_by_unit(self, unit_id: str) -> list[SubmittedResult]:
         rows = self._db.connection.execute(
-            "SELECT id, unit_id, assignment_id, result_id, exit_code, "
-            "completed_at, submitted_at, coord_unit_status_after, "
-            "coord_completions_so_far, coord_replication_target, payload_json "
+            f"SELECT {_SUBMITTED_RESULTS_COLUMNS} "
             "FROM submitted_results WHERE unit_id = ? ORDER BY id DESC",
             (unit_id,),
         ).fetchall()
         return [_row_to_submitted_result(r) for r in rows]
 
+    def get_by_result_id(self, result_id: str) -> SubmittedResult | None:
+        row = self._db.connection.execute(
+            f"SELECT {_SUBMITTED_RESULTS_COLUMNS} FROM submitted_results WHERE result_id = ?",
+            (result_id,),
+        ).fetchone()
+        return _row_to_submitted_result(row) if row is not None else None
+
     def recent(self, *, limit: int = 50) -> list[SubmittedResult]:
         rows = self._db.connection.execute(
-            "SELECT id, unit_id, assignment_id, result_id, exit_code, "
-            "completed_at, submitted_at, coord_unit_status_after, "
-            "coord_completions_so_far, coord_replication_target, payload_json "
-            "FROM submitted_results ORDER BY id DESC LIMIT ?",
+            f"SELECT {_SUBMITTED_RESULTS_COLUMNS} FROM submitted_results ORDER BY id DESC LIMIT ?",
             (limit,),
         ).fetchall()
         return [_row_to_submitted_result(r) for r in rows]
 
+    def list_receipts(
+        self,
+        *,
+        since: datetime | None = None,
+        tenant_id: str | None = None,
+        limit: int = 100,
+    ) -> list[SubmittedResult]:
+        """List receipts ordered by submitted_at DESC.
+
+        `since` filters to receipts submitted at or after that timestamp.
+        `tenant_id` filters via a subquery against assignment_audit (the
+        only place tenant_id lives on the worker side) — pre-M5 rows whose
+        audit rows lack tenant_id will be excluded from tenant-filtered
+        results, which is acceptable for the placeholder phase.
+        """
+        where_clauses: list[str] = []
+        params: list[object] = []
+
+        if since is not None:
+            where_clauses.append("submitted_at >= ?")
+            params.append(since.isoformat())
+
+        if tenant_id is not None:
+            where_clauses.append(
+                "unit_id IN ("
+                "  SELECT DISTINCT unit_id FROM assignment_audit "
+                "  WHERE tenant_id = ? AND unit_id IS NOT NULL"
+                ")"
+            )
+            params.append(tenant_id)
+
+        where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+        params.append(limit)
+
+        rows = self._db.connection.execute(
+            f"SELECT {_SUBMITTED_RESULTS_COLUMNS} "
+            f"FROM submitted_results {where_sql} "
+            "ORDER BY submitted_at DESC, id DESC LIMIT ?",
+            params,
+        ).fetchall()
+        return [_row_to_submitted_result(r) for r in rows]
+
+    def set_canonical(
+        self,
+        *,
+        result_id: str,
+        canonical_blob: bytes,
+        canonical_format: str,
+        fetched_at: datetime,
+    ) -> bool:
+        """Promote a placeholder receipt to canonical (M7 fetch path).
+
+        Returns True if a row was updated, False if no row matched the
+        given result_id.
+        """
+        with self._db.transaction() as conn:
+            cur = conn.execute(
+                "UPDATE submitted_results SET "
+                "receipt_status = 'canonical', "
+                "canonical_blob = ?, "
+                "canonical_format = ?, "
+                "canonical_fetched_at = ? "
+                "WHERE result_id = ?",
+                (canonical_blob, canonical_format, fetched_at.isoformat(), result_id),
+            )
+        return cur.rowcount > 0
+
 
 def _row_to_submitted_result(row) -> SubmittedResult:
+    canonical_fetched_at_raw = row["canonical_fetched_at"]
     return SubmittedResult(
         id=row["id"],
         unit_id=row["unit_id"],
@@ -384,6 +503,12 @@ def _row_to_submitted_result(row) -> SubmittedResult:
         coord_completions_so_far=row["coord_completions_so_far"],
         coord_replication_target=row["coord_replication_target"],
         payload_json=row["payload_json"],
+        receipt_status=row["receipt_status"],
+        canonical_blob=row["canonical_blob"],
+        canonical_format=row["canonical_format"],
+        canonical_fetched_at=(
+            _parse_ts(canonical_fetched_at_raw) if canonical_fetched_at_raw else None
+        ),
     )
 
 

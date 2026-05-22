@@ -7,10 +7,12 @@ heartbeat / assignment loop arrives in M2 / M3.
 
 from __future__ import annotations
 
+import json
 import logging
 import signal
 import sys
 import threading
+from datetime import datetime
 from pathlib import Path
 
 import click
@@ -523,6 +525,163 @@ def tenant_list(ctx: click.Context) -> None:
                 click.echo(f"  {t}")
         else:
             click.echo("  (empty)")
+    finally:
+        db.close()
+
+
+_DATETIME_FORMATS = ["%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S%z"]
+
+
+@cli.group(help="Inspect locally-stored receipts (one row per submitted result).")
+def receipts() -> None:
+    pass
+
+
+@receipts.command("list", help="List receipts, optionally filtered by --since or --tenant.")
+@click.option(
+    "--since",
+    type=click.DateTime(formats=_DATETIME_FORMATS),
+    default=None,
+    help="Only show receipts submitted at or after this timestamp.",
+)
+@click.option(
+    "--tenant",
+    "tenant_id",
+    type=str,
+    default=None,
+    help="Filter to receipts associated with this tenant_id (looked up via assignment_audit).",
+)
+@click.option("--limit", type=int, default=50, help="Show at most N rows (default 50).")
+@click.pass_context
+def receipts_list(
+    ctx: click.Context,
+    since: datetime | None,
+    tenant_id: str | None,
+    limit: int,
+) -> None:
+    config: WorkerConfig = ctx.obj["config"]
+    db, _ = initialize_state(config)
+    try:
+        rows = SubmittedResultRepository(db).list_receipts(
+            since=since, tenant_id=tenant_id, limit=limit
+        )
+        if not rows:
+            if since is None and tenant_id is None:
+                click.echo("no receipts yet")
+            else:
+                click.echo("no receipts match the given filters")
+            return
+        for row in rows:
+            ts = row.submitted_at.isoformat(timespec="seconds")
+            click.echo(
+                f"{ts}  unit={row.unit_id}  result={row.result_id}  "
+                f"exit={row.exit_code}  status={row.receipt_status}"
+            )
+    finally:
+        db.close()
+
+
+@receipts.command(
+    "show",
+    help="Pretty-print one receipt. Identifier may be a result_id or a unit_id "
+    "(result_id matched first; unit_id falls back to most-recent submission).",
+)
+@click.argument("identifier")
+@click.pass_context
+def receipts_show(ctx: click.Context, identifier: str) -> None:
+    config: WorkerConfig = ctx.obj["config"]
+    db, _ = initialize_state(config)
+    try:
+        repo = SubmittedResultRepository(db)
+        match = repo.get_by_result_id(identifier)
+        if match is None:
+            by_unit = repo.get_by_unit(identifier)
+            match = by_unit[0] if by_unit else None
+        if match is None:
+            click.echo(f"no receipt found for identifier {identifier!r}", err=True)
+            sys.exit(1)
+
+        click.echo(f"unit_id:        {match.unit_id}")
+        click.echo(f"result_id:      {match.result_id}")
+        click.echo(f"assignment_id:  {match.assignment_id or '-'}")
+        click.echo(f"submitted_at:   {match.submitted_at.isoformat(timespec='seconds')}")
+        click.echo(f"completed_at:   {match.completed_at}")
+        click.echo(f"exit_code:      {match.exit_code}")
+        click.echo(f"receipt_status: {match.receipt_status}")
+        if match.canonical_format is not None:
+            blob_bytes = len(match.canonical_blob) if match.canonical_blob else 0
+            fetched = (
+                match.canonical_fetched_at.isoformat(timespec="seconds")
+                if match.canonical_fetched_at
+                else "-"
+            )
+            click.echo(
+                f"canonical:      format={match.canonical_format} "
+                f"size={blob_bytes}B fetched={fetched}"
+            )
+        if match.coord_unit_status_after is not None:
+            click.echo(
+                f"coord_state:    unit_status={match.coord_unit_status_after} "
+                f"completions={match.coord_completions_so_far}/"
+                f"{match.coord_replication_target}"
+            )
+        click.echo("")
+        click.echo("payload:")
+        try:
+            payload = json.loads(match.payload_json)
+            click.echo(json.dumps(payload, indent=2, sort_keys=True))
+        except json.JSONDecodeError:
+            click.echo(match.payload_json)
+    finally:
+        db.close()
+
+
+@cli.command(help="Filtered audit-log query (assignment_audit table).")
+@click.option(
+    "--since",
+    type=click.DateTime(formats=_DATETIME_FORMATS),
+    default=None,
+    help="Only show audit rows from at or after this timestamp.",
+)
+@click.option(
+    "--unit",
+    "unit_id",
+    type=str,
+    default=None,
+    help="Filter to a specific unit_id.",
+)
+@click.option(
+    "--action",
+    type=str,
+    default=None,
+    help="Filter to a specific action label (e.g., 'assignment.accept').",
+)
+@click.option("--limit", type=int, default=100, help="Show at most N rows (default 100).")
+@click.pass_context
+def log(
+    ctx: click.Context,
+    since: datetime | None,
+    unit_id: str | None,
+    action: str | None,
+    limit: int,
+) -> None:
+    config: WorkerConfig = ctx.obj["config"]
+    db, _ = initialize_state(config)
+    try:
+        rows = AssignmentAuditRepository(db).query(
+            since=since, unit_id=unit_id, action=action, limit=limit
+        )
+        if not rows:
+            click.echo("no audit rows match the given filters")
+            return
+        for row in rows:
+            ts = row.occurred_at.isoformat(timespec="seconds")
+            unit = row.unit_id or "-"
+            tenant = row.tenant_id or "-"
+            line = f"{ts}  {row.action:<35}  unit={unit}  tenant={tenant}"
+            if row.reason:
+                line += f"  ({row.reason})"
+            click.echo(line)
     finally:
         db.close()
 
