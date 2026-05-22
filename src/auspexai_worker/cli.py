@@ -24,13 +24,26 @@ from .capabilities import DeclaredCaps
 from .capabilities import collect as collect_capabilities
 from .config import WorkerConfig
 from .coordinator import (
+    BindingTokenConsumedError,
+    BindingTokenExpiredError,
+    BindingTokenNotFoundError,
     CoordinatorClient,
     CoordinatorError,
+    InvalidAccessTokenError,
     PubkeyAlreadyEnrolledError,
     PubkeyAlreadyTenantError,
+    UnsupportedIdpError,
+    WorkerNotFoundError,
 )
 from .daemon import AssignmentPoller, HeartbeatLoop
 from .daemon.dispatch import RunnerDispatcher
+from .oauth import (
+    AccessDeniedError,
+    DeviceCode,
+    DeviceFlowError,
+    ExpiredTokenError,
+    run_device_flow,
+)
 from .sandbox import probe_bubblewrap
 from .state import (
     AcceptedSensitiveRepository,
@@ -684,6 +697,180 @@ def log(
             click.echo(line)
     finally:
         db.close()
+
+
+def _print_device_code(code: DeviceCode) -> None:
+    """Default on_code callback for the login flow."""
+    click.echo("")
+    click.echo("To complete login, open the following URL in any browser:")
+    click.echo(f"    {code.verification_uri}")
+    click.echo("")
+    click.echo(f"Enter this code on the GitHub page:  {code.user_code}")
+    click.echo("")
+    click.echo("Waiting for authorization... (Ctrl+C to cancel)")
+
+
+@cli.command(help="Bind this worker to a GitHub account (T0 → T1).")
+@click.pass_context
+def login(ctx: click.Context) -> None:
+    config: WorkerConfig = ctx.obj["config"]
+    db, repo = initialize_state(config)
+    try:
+        worker = repo.get()
+        if worker is None:
+            click.echo("not enrolled yet — run `auspexai-worker bootstrap` first", err=True)
+            sys.exit(1)
+        if worker.trust_tier >= 1:
+            click.echo(f"already T{worker.trust_tier}; nothing to do")
+            return
+
+        click.echo("starting GitHub Device Flow...")
+        try:
+            access_token = run_device_flow(on_code=_print_device_code)
+        except AccessDeniedError:
+            click.echo("login cancelled: GitHub authorization denied", err=True)
+            sys.exit(1)
+        except ExpiredTokenError as exc:
+            click.echo(f"login timed out: {exc}", err=True)
+            sys.exit(1)
+        except DeviceFlowError as exc:
+            click.echo(f"device flow failed: {exc}", err=True)
+            sys.exit(1)
+
+        click.echo("GitHub authorization received; exchanging with coordinator...")
+        keystore = open_keystore(config)
+        signer = build_signer(keystore)
+        try:
+            with CoordinatorClient(base_url=config.coordinator_url, signer=signer) as client:
+                exchange = client.oauth_exchange(idp="github", access_token=access_token)
+                status_after = client.upgrade_worker(
+                    worker_id=worker.worker_id,
+                    binding_token=exchange.binding_token,
+                )
+        except UnsupportedIdpError as exc:
+            click.echo(f"coordinator does not accept GitHub IdP: {exc}", err=True)
+            sys.exit(1)
+        except InvalidAccessTokenError as exc:
+            click.echo(f"coordinator rejected GitHub token: {exc}", err=True)
+            sys.exit(1)
+        except BindingTokenExpiredError as exc:
+            click.echo(f"binding token expired before upgrade: {exc}", err=True)
+            sys.exit(1)
+        except BindingTokenNotFoundError as exc:
+            click.echo(f"binding token unknown to coordinator: {exc}", err=True)
+            sys.exit(1)
+        except BindingTokenConsumedError as exc:
+            click.echo(f"binding token already used: {exc}", err=True)
+            sys.exit(1)
+        except CoordinatorError as exc:
+            click.echo(f"coordinator call failed: {exc}", err=True)
+            sys.exit(1)
+
+        binding_payload = json.dumps(
+            {
+                "idp": "github",
+                "account_id": exchange.account_id,
+                "bound_at": exchange.expires_at.isoformat(),
+                "is_new_account": exchange.is_new_account,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        repo.update_after_upgrade(
+            new_tier=status_after.trust_tier,
+            account_binding_json=binding_payload,
+        )
+
+        click.echo("")
+        click.echo(f"login successful: T0 → T{status_after.trust_tier}")
+        click.echo(f"account_id: {exchange.account_id}")
+        if exchange.is_new_account:
+            click.echo("(new AuspexAI account created on first login)")
+    finally:
+        db.close()
+
+
+@cli.command(help="Retire this worker, purge local state, optionally uninstall.")
+@click.option(
+    "--yes",
+    "confirmed",
+    is_flag=True,
+    default=False,
+    help="Skip the interactive confirmation prompt (for non-interactive use).",
+)
+@click.pass_context
+def withdraw(ctx: click.Context, confirmed: bool) -> None:
+    config: WorkerConfig = ctx.obj["config"]
+    db, repo = initialize_state(config)
+    db_path = config.state_db_path
+    try:
+        worker = repo.get()
+        if worker is None:
+            click.echo("not enrolled — nothing to withdraw")
+            return
+
+        if not confirmed:
+            click.echo("")
+            click.echo("Withdrawal will:")
+            click.echo("  - Tell the coordinator to retire this worker")
+            click.echo("  - Delete the local state DB (audit log + receipts)")
+            click.echo("  - Delete the worker's Ed25519 keypair from the keystore")
+            click.echo("")
+            click.echo("Receipts already issued by the coordinator REMAIN in the")
+            click.echo("coordinator's transparency log. Per §5.15, the receipts")
+            click.echo("remain signed and verifiable but become unattributed.")
+            click.echo("")
+            confirm_input = click.prompt(
+                "Type the word 'withdraw' to confirm", type=str, default="", show_default=False
+            )
+            if confirm_input.strip().lower() != "withdraw":
+                click.echo("aborted")
+                sys.exit(1)
+
+        click.echo("calling coordinator to retire worker...")
+        keystore = open_keystore(config)
+        signer = build_signer(keystore)
+        try:
+            with CoordinatorClient(base_url=config.coordinator_url, signer=signer) as client:
+                client.retire_worker(worker_id=worker.worker_id)
+        except WorkerNotFoundError:
+            click.echo(
+                "coordinator already had no record of this worker; continuing with local purge"
+            )
+        except CoordinatorError as exc:
+            click.echo(f"coordinator retire call failed: {exc}", err=True)
+            click.echo(
+                "Continuing with local purge anyway — withdrawal is volunteer-initiated and "
+                "local state should be removed even if the coordinator is unreachable.",
+                err=True,
+            )
+    finally:
+        db.close()
+
+    # Purge local state. Order matters: close DB connection first (done in
+    # the finally above), then delete the file, then drop the keystore key.
+    if db_path.exists():
+        db_path.unlink()
+    # WAL/SHM sidecars from sqlite WAL mode.
+    for suffix in ("-wal", "-shm"):
+        sidecar = db_path.with_name(db_path.name + suffix)
+        if sidecar.exists():
+            sidecar.unlink()
+
+    keystore = open_keystore(config)
+    try:
+        keystore.delete()
+    except Exception as exc:
+        click.echo(f"keystore deletion failed: {exc}", err=True)
+        click.echo(
+            "Local DB has been purged. Manually remove the keystore entry if needed.",
+            err=True,
+        )
+
+    click.echo("")
+    click.echo("worker withdrawn. Local state purged.")
+    click.echo("To complete uninstall, run your package manager's uninstall command")
+    click.echo("(e.g., `apt remove auspexai-worker` or `pipx uninstall auspexai-worker`).")
 
 
 def main() -> None:

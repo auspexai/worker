@@ -82,6 +82,24 @@ class WorkerSelfRepository:
                 (new_tier,),
             )
 
+    def update_after_upgrade(
+        self,
+        *,
+        new_tier: int,
+        account_binding_json: str,
+    ) -> None:
+        """Promote the singleton worker row after a successful upgrade.
+
+        Both columns move together in one transaction — there should never
+        be a state where trust_tier was bumped but the binding is missing
+        (or vice versa).
+        """
+        with self._db.transaction() as conn:
+            conn.execute(
+                "UPDATE worker_self SET trust_tier = ?, account_binding_json = ? WHERE id = 1",
+                (new_tier, account_binding_json),
+            )
+
     def record_heartbeat(self, at: datetime) -> None:
         with self._db.transaction() as conn:
             conn.execute(

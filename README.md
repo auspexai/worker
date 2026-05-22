@@ -26,8 +26,8 @@ What's live:
 - 157 tests on Python 3.11 + 3.12; ruff check + format-check clean.
 
 Subsequent milestones (per design doc §14):
-- **M5** — Receipts store + `receipts list/show` + `log` CLI.
-- **M6** — T1 upgrade via OAuth Device Flow + `withdraw` flow.
+- **M5** ✅ Receipts store on `submitted_results` + `receipts list/show` + `log` CLI (SQLite-as-canonical-store per 2026-05-22 design update).
+- **M6** ✅ T1 upgrade via OAuth Device Flow (`auspexai-worker login`) + `withdraw` flow (`auspexai-worker withdraw`).
 - **M7** — Cosign-signed `.deb` + source tarball as GitHub release artifacts.
 
 Full design rationale: `Documentation/AuspexAI/v0.1.0/worker_daemon_design.md` (ratified into principles doc §5.19 on 2026-05-20).
@@ -44,6 +44,44 @@ The Worker:
 - Maintains a local audit log of what it ran, when, and for which manifest hash (M3+)
 
 Worker trust tiers (T0 anonymous through T4 maintainer) govern work eligibility and quorum weight; see the AuspexAI Principles & Scope §6 for the trust model.
+
+## Identity binding (T0 → T1)
+
+A fresh install enrolls as **T0 anonymous** with no user interaction. To bind the worker to a verifiable identity and unlock higher-trust roles (vouching, Approver eligibility, unique work-unit assignments) run:
+
+```
+auspexai-worker login
+```
+
+This launches an [OAuth 2.0 Device Authorization Flow](https://datatracker.ietf.org/doc/html/rfc8628) against GitHub:
+
+1. The worker prints a short code and a verification URL (`github.com/login/device`).
+2. Open the URL in any browser (any device — phone, laptop, the same machine — your choice), sign in to GitHub, enter the code.
+3. GitHub returns an access token to the worker; the worker hands it to the AuspexAI coordinator, which verifies it with GitHub and mints a one-shot binding token; the worker then exchanges that binding token for a T1 upgrade. The access token is **never stored** on the worker — it's discarded as soon as the binding completes.
+
+The `read:user` scope is the only scope ever requested. Subsequent worker↔coordinator authentication continues to use the worker's own Ed25519 keypair, not the GitHub token.
+
+### Email-fallback for institutional contexts
+
+Phase 1 is **GitHub-only** for the OAuth IdP. Institutional volunteers, researchers, or workers running in environments where GitHub Device Flow isn't usable can request an alternative binding path by emailing **contact@auspexai.network**. A formal email-based binding path is on the Phase 2 roadmap (per principles doc §5.10 + §9 Q5); pre-Phase-2 accommodations are case-by-case under the Maintainer's discretion.
+
+## Withdrawal
+
+To retire a worker and remove its local state:
+
+```
+auspexai-worker withdraw
+```
+
+The command prints what will be deleted, prompts for explicit confirmation (you must type the word `withdraw`), then:
+
+1. Calls the coordinator's retire endpoint so the scheduler stops handing it work.
+2. Deletes the local SQLite state DB (`worker.db`) — audit log, manifest pins, receipts, tenant lists, consent rows.
+3. Deletes the worker's Ed25519 keypair from the keystore.
+
+**Receipts already issued by the coordinator REMAIN in the coordinator's transparency log per Principles & Scope §5.15.** They stay signed and verifiable but become unattributed (severable-PII pattern). The CLI prints this verbatim at the confirmation prompt so the volunteer is reminded of the consent terms at the moment of withdrawal.
+
+After withdrawal completes, follow up with your package manager (`apt remove auspexai-worker`, `pipx uninstall auspexai-worker`, etc.) to finish the uninstall.
 
 ## Development
 

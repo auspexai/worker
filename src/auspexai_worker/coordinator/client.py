@@ -72,6 +72,26 @@ class UnauthorizedError(CoordinatorError):
     the keyid resolved to nothing, or the credential class wasn't allowed."""
 
 
+class UnsupportedIdpError(CoordinatorError):
+    """400 unsupported_idp — coordinator doesn't accept this identity provider."""
+
+
+class InvalidAccessTokenError(CoordinatorError):
+    """401 invalid_access_token — IdP rejected the access token at verify time."""
+
+
+class BindingTokenNotFoundError(CoordinatorError):
+    """404 binding_token_not_found — the upgrade call's binding token is unknown."""
+
+
+class BindingTokenExpiredError(CoordinatorError):
+    """400 binding_token_expired — the binding token has aged out (5-min TTL)."""
+
+
+class BindingTokenConsumedError(CoordinatorError):
+    """409 binding_token_consumed — binding tokens are one-shot; already used."""
+
+
 @dataclass(frozen=True)
 class EnrollmentResponse:
     worker_id: str
@@ -90,6 +110,20 @@ class WorkerStatusResponse:
     registered_at: datetime | None
     last_heartbeat_at: datetime | None
     retired_at: datetime | None
+
+
+@dataclass(frozen=True)
+class OAuthExchangeResponse:
+    """Coordinator's reply to POST /accounts/oauth/exchange. The binding_token
+    is a one-shot 5-minute token consumed by POST /workers/{id}/upgrade.
+    account_id is informational for the caller; the worker doesn't otherwise
+    need it (the worker stores the binding the coordinator records, not the
+    account_id itself)."""
+
+    account_id: str
+    binding_token: str
+    expires_at: datetime
+    is_new_account: bool
 
 
 @dataclass(frozen=True)
@@ -395,6 +429,127 @@ class CoordinatorClient:
             f"refuse_assignment: unexpected status {response.status_code}: {response.text[:500]}"
         )
 
+    # ---- /accounts/oauth/exchange (anonymous-public) -------------------
+
+    def oauth_exchange(self, *, idp: str, access_token: str) -> OAuthExchangeResponse:
+        """POST /api/v0/accounts/oauth/exchange. Anonymous-public.
+
+        Hand the IdP's access token to the coordinator; the coordinator
+        verifies it with the IdP and mints a one-shot binding token to be
+        consumed by `upgrade_worker`. The access_token is never persisted on
+        the worker — pass it straight from `oauth.run_device_flow()` into
+        this method.
+
+        Raises:
+            UnsupportedIdpError: 400 — IdP not enabled.
+            InvalidAccessTokenError: 401 — IdP rejected the token.
+        """
+        try:
+            response = self._client.post(
+                "/api/v0/accounts/oauth/exchange",
+                json={"idp": idp, "access_token": access_token},
+            )
+        except httpx.HTTPError as exc:
+            raise CoordinatorError(f"oauth_exchange: HTTP transport error: {exc}") from exc
+
+        if response.status_code == 200:
+            return _parse_oauth_exchange(response.json())
+        code = _error_code(response)
+        if response.status_code == 400 and code == "unsupported_idp":
+            raise UnsupportedIdpError(_error_message(response))
+        if response.status_code == 401 and code == "invalid_access_token":
+            raise InvalidAccessTokenError(_error_message(response))
+        raise CoordinatorError(
+            f"oauth_exchange: unexpected status {response.status_code}: {response.text[:500]}"
+        )
+
+    # ---- /workers/{id}/upgrade (signed) --------------------------------
+
+    def upgrade_worker(self, *, worker_id: str, binding_token: str) -> WorkerStatusResponse:
+        """POST /api/v0/workers/{worker_id}/upgrade. Worker-credentialed.
+
+        Consumes a one-shot binding_token from `oauth_exchange` and promotes
+        the worker from T0 to T1. The returned status's trust_tier should be 1.
+
+        Raises:
+            BindingTokenNotFoundError: 404, token unknown.
+            BindingTokenExpiredError: 400, token aged out (>5min).
+            BindingTokenConsumedError: 409, token already used.
+            WorkerIdMismatchError: 403, signer's worker doesn't match URL.
+            UnauthorizedError: 401/403 on signature/credential failure.
+            WorkerNotFoundError: 404, worker has been retired.
+        """
+        if self._signer is None:
+            raise CoordinatorError(
+                "upgrade_worker requires a signer; CoordinatorClient was constructed without one"
+            )
+        response = self._signed_request(
+            method="POST",
+            path=f"/api/v0/workers/{worker_id}/upgrade",
+            json_body={"binding_token": binding_token},
+        )
+        if response.status_code == 200:
+            return _parse_worker_status(response.json())
+        code = _error_code(response)
+        if response.status_code == 400 and code == "binding_token_expired":
+            raise BindingTokenExpiredError(_error_message(response))
+        if response.status_code == 404 and code == "binding_token_not_found":
+            raise BindingTokenNotFoundError(_error_message(response))
+        if response.status_code == 409 and code == "binding_token_consumed":
+            raise BindingTokenConsumedError(_error_message(response))
+        if response.status_code == 403:
+            if code == "worker_id_mismatch":
+                raise WorkerIdMismatchError(_error_message(response))
+            raise UnauthorizedError(_error_message(response))
+        if response.status_code == 401:
+            raise UnauthorizedError(_error_message(response))
+        if response.status_code == 404:
+            raise WorkerNotFoundError(_error_message(response))
+        raise CoordinatorError(
+            f"upgrade_worker: unexpected status {response.status_code}: {response.text[:500]}"
+        )
+
+    # ---- /workers/{id}/actions/retire (signed) -------------------------
+
+    def retire_worker(self, *, worker_id: str) -> WorkerStatusResponse:
+        """POST /api/v0/workers/{worker_id}/actions/retire. Worker-credentialed.
+
+        The withdrawal call. Coordinator marks the worker retired and the
+        scheduler stops handing it work. The coordinator-side `retired_keys`
+        registry that prevents re-binding the same key (per §5.15) lands in
+        coordinator M7; until then, retire is effective for scheduling but
+        re-enroll with the same key isn't yet forbidden — the worker still
+        purges its local state regardless of that property.
+
+        Raises:
+            WorkerNotFoundError: 404, worker doesn't exist (or already retired).
+            WorkerIdMismatchError: 403, signer's worker doesn't match URL.
+            UnauthorizedError: 401/403 on signature/credential failure.
+        """
+        if self._signer is None:
+            raise CoordinatorError(
+                "retire_worker requires a signer; CoordinatorClient was constructed without one"
+            )
+        response = self._signed_request(
+            method="POST",
+            path=f"/api/v0/workers/{worker_id}/actions/retire",
+            json_body=None,
+        )
+        if response.status_code == 200:
+            return _parse_worker_status(response.json())
+        if response.status_code == 403:
+            code = _error_code(response)
+            if code == "worker_id_mismatch":
+                raise WorkerIdMismatchError(_error_message(response))
+            raise UnauthorizedError(_error_message(response))
+        if response.status_code == 401:
+            raise UnauthorizedError(_error_message(response))
+        if response.status_code == 404:
+            raise WorkerNotFoundError(_error_message(response))
+        raise CoordinatorError(
+            f"retire_worker: unexpected status {response.status_code}: {response.text[:500]}"
+        )
+
     # ---- internals ------------------------------------------------------
 
     def _signed_request(
@@ -520,6 +675,22 @@ def _parse_worker_status(payload: dict[str, Any]) -> WorkerStatusResponse:
         registered_at=_parse_optional_datetime(payload.get("registered_at")),
         last_heartbeat_at=_parse_optional_datetime(payload.get("last_heartbeat_at")),
         retired_at=_parse_optional_datetime(payload.get("retired_at")),
+    )
+
+
+def _parse_oauth_exchange(payload: dict[str, Any]) -> OAuthExchangeResponse:
+    try:
+        account_id = payload["account_id"]
+        binding_token = payload["binding_token"]
+        expires_at = _parse_datetime(payload["expires_at"])
+        is_new_account = payload["is_new_account"]
+    except KeyError as exc:
+        raise CoordinatorError(f"oauth_exchange response missing field: {exc}") from exc
+    return OAuthExchangeResponse(
+        account_id=str(account_id),
+        binding_token=str(binding_token),
+        expires_at=expires_at,
+        is_new_account=bool(is_new_account),
     )
 
 
