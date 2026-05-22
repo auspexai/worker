@@ -463,6 +463,20 @@ class SubmittedResultRepository:
         ).fetchall()
         return [_row_to_submitted_result(r) for r in rows]
 
+    def list_pending_canonical(self, *, limit: int = 100) -> list[SubmittedResult]:
+        """Rows whose canonical-receipt fetch has not yet succeeded (M7-tail).
+
+        `receipt_status='placeholder'` is the M5 default; the M7-tail
+        background fetch loop walks these rows and calls the coord's
+        canonical-receipt endpoint for each.
+        """
+        rows = self._db.connection.execute(
+            f"SELECT {_SUBMITTED_RESULTS_COLUMNS} FROM submitted_results "
+            "WHERE receipt_status = 'placeholder' ORDER BY id ASC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [_row_to_submitted_result(r) for r in rows]
+
     def set_canonical(
         self,
         *,

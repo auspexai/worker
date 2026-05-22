@@ -9,6 +9,7 @@ unsigned (anonymous-public per coordinator §5.18).
 
 from __future__ import annotations
 
+import base64
 import json as _json
 from dataclasses import dataclass
 from datetime import datetime
@@ -179,6 +180,21 @@ class RefuseResponse:
     unit_id: str
     refused_at: datetime | None
     refused_kind: str | None
+
+
+@dataclass(frozen=True)
+class CanonicalReceiptResponse:
+    """Coordinator's response to GET /workers/{id}/results/{result_id}/canonical-receipt.
+
+    The `cose_signed_blob` is the canonical COSE-Sign1 bytes the worker
+    stores in `submitted_results.canonical_blob`. The other fields are
+    metadata the worker logs but doesn't otherwise persist.
+    """
+
+    receipt_id: str
+    experiment_id: str
+    cose_signed_blob: bytes
+    signing_key_pubkey_hex: str
 
 
 @dataclass(frozen=True)
@@ -577,6 +593,55 @@ class CoordinatorClient:
             raise WorkerNotFoundError(_error_message(response))
         raise CoordinatorError(
             f"retire_worker: unexpected status {response.status_code}: {response.text[:500]}"
+        )
+
+    def get_canonical_receipt(
+        self, *, worker_id: str, result_id: str
+    ) -> CanonicalReceiptResponse | None:
+        """GET /api/v0/workers/{worker_id}/results/{result_id}/canonical-receipt.
+
+        Worker-credentialed. Used by the M7-tail background fetch loop to
+        populate this worker's local `submitted_results.canonical_blob`
+        cache.
+
+        Returns None on 404 (`receipt_not_issued` — most often because the
+        unit's quorum disagreed; the worker should leave the row as
+        placeholder and stop retrying after a reasonable bound). Raises on
+        unexpected statuses.
+        """
+        if self._signer is None:
+            raise CoordinatorError(
+                "get_canonical_receipt requires a signer; CoordinatorClient "
+                "was constructed without one"
+            )
+        response = self._signed_request(
+            method="GET",
+            path=f"/api/v0/workers/{worker_id}/results/{result_id}/canonical-receipt",
+            json_body=None,
+        )
+        if response.status_code == 200:
+            payload = response.json()
+            cose_b64 = payload.get("cose_signed_blob_b64")
+            if not isinstance(cose_b64, str):
+                raise CoordinatorError(
+                    f"get_canonical_receipt: 200 response missing "
+                    f"cose_signed_blob_b64 ({list(payload.keys())})"
+                )
+            return CanonicalReceiptResponse(
+                receipt_id=str(payload.get("receipt_id", "")),
+                experiment_id=str(payload.get("experiment_id", "")),
+                cose_signed_blob=base64.b64decode(cose_b64),
+                signing_key_pubkey_hex=str(payload.get("signing_key_pubkey_hex", "")),
+            )
+        if response.status_code == 404:
+            return None
+        if response.status_code == 403:
+            raise UnauthorizedError(_error_message(response))
+        if response.status_code == 401:
+            raise UnauthorizedError(_error_message(response))
+        raise CoordinatorError(
+            f"get_canonical_receipt: unexpected status {response.status_code}: "
+            f"{response.text[:500]}"
         )
 
     # ---- internals ------------------------------------------------------

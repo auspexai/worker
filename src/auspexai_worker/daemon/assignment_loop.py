@@ -146,6 +146,14 @@ class AssignmentPoller:
                     # SUBMIT_FAILED_TRANSIENT outcomes leave the row pending
                     # for the next tick — no stat change.
 
+            # M7-tail: fetch canonical receipts for placeholder rows. Cheap
+            # if there's nothing pending (single SQL count); idempotent
+            # against 404s; bounded by max_per_tick.
+            try:
+                self._dispatcher.fetch_pending_canonical()
+            except Exception:
+                logger.exception("fetch_pending_canonical raised; continuing with new-work poll")
+
         self._stats.polls_attempted += 1
         try:
             response = self._coordinator.get_assignment(worker_id=self._worker_id)

@@ -500,6 +500,64 @@ class RunnerDispatcher:
             result_response=submission,
         )
 
+    def fetch_pending_canonical(self, *, max_per_tick: int = 5) -> int:
+        """M7-tail: pull canonical-receipt blobs for submitted results that
+        still have placeholder receipts.
+
+        For each `receipt_status='placeholder'` row, ask the coord for the
+        canonical bytes via `get_canonical_receipt`. On 200 → `set_canonical`
+        promotes the row to `canonical`. On 404 → leave as placeholder (the
+        unit's quorum may have disagreed, or M7c issuance hasn't fired yet;
+        we'll try again next tick). Transport errors are logged but don't
+        propagate — the fetch loop is best-effort, never blocking.
+
+        Returns the count of rows promoted to canonical this tick.
+        """
+        promoted = 0
+        try:
+            pending = self._submitted.list_pending_canonical(limit=max_per_tick)
+        except Exception:
+            logger.exception("fetch_pending_canonical: failed to list pending rows")
+            return 0
+
+        for row in pending:
+            try:
+                resp = self._coordinator.get_canonical_receipt(
+                    worker_id=self._worker_id,
+                    result_id=row.result_id,
+                )
+            except Exception:
+                logger.debug(
+                    "fetch_pending_canonical: coord call failed for %s; leaving as placeholder",
+                    row.result_id,
+                )
+                continue
+            if resp is None:
+                # 404 — receipt not (yet) issued. Leave as placeholder; try
+                # again on a future tick.
+                continue
+            try:
+                updated = self._submitted.set_canonical(
+                    result_id=row.result_id,
+                    canonical_blob=resp.cose_signed_blob,
+                    canonical_format="cose-sign1-cbor-receipt-v0.1",
+                    fetched_at=datetime.now(UTC),
+                )
+            except Exception:
+                logger.exception(
+                    "fetch_pending_canonical: set_canonical failed for %s",
+                    row.result_id,
+                )
+                continue
+            if updated:
+                promoted += 1
+                logger.info(
+                    "promoted local receipt for result %s to canonical (receipt_id=%s)",
+                    row.result_id,
+                    resp.receipt_id,
+                )
+        return promoted
+
 
 def datetime_iso_now() -> str:
     """Convenience: ISO 8601 UTC timestamp for now() — used by tests."""
