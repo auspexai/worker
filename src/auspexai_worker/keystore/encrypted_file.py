@@ -7,8 +7,13 @@ The encryption key is derived via HKDF-SHA256 from a host fingerprint:
 This is the §5.11 "encrypted file with passphrase derived from machine ID +
 user" fallback. The volunteer never types a passphrase; the host fingerprint
 binds the file to this machine + user so a copy of the file alone is
-non-trivial to use elsewhere. Power users can opt into a real passphrase
-later via Q-W5 — not in M1.
+non-trivial to use elsewhere. Phase 1 lab-acceptable: a passive file-copy
+attacker who also captured `/etc/machine-id` (e.g. via a `$HOME`-inclusive
+backup) can decrypt offline. Phase 2 will replace this fallback with a
+`systemd-creds`-backed Tier B keystore (root-only host-key derivation
+closes the offline-decrypt gap) and `python-keyring` as the cross-platform
+abstraction layer; an optional `[identity] keystore_passphrase` power-user
+opt-in lands in the same pass.
 
 File format: `magic(4) || version(1) || nonce(12) || ciphertext+tag`.
 """
