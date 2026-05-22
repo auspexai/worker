@@ -128,6 +128,24 @@ class AssignmentPoller:
     # ---- internals ------------------------------------------------------
 
     def _poll_once(self) -> None:
+        # M6-tail: drain any queued pending submissions before pulling new
+        # work. Submits that failed transiently on a previous tick get
+        # another shot here. Bounded by max_per_tick so a long backlog
+        # doesn't starve the assignment poll.
+        if self._dispatcher is not None:
+            try:
+                retry_outcomes = self._dispatcher.retry_pending()
+            except Exception:
+                logger.exception("retry_pending raised; continuing with new-work poll")
+            else:
+                for outcome in retry_outcomes:
+                    if outcome.kind == DispatchOutcomeKind.SUBMITTED:
+                        self._stats.units_submitted += 1
+                    elif outcome.kind == DispatchOutcomeKind.SUBMIT_FAILED_TERMINAL:
+                        self._stats.units_dispatch_failed += 1
+                    # SUBMIT_FAILED_TRANSIENT outcomes leave the row pending
+                    # for the next tick — no stat change.
+
         self._stats.polls_attempted += 1
         try:
             response = self._coordinator.get_assignment(worker_id=self._worker_id)
@@ -223,11 +241,16 @@ class AssignmentPoller:
         # Anything else is a failed dispatch — record locally and tell the
         # coordinator we refused so the assignment row doesn't dangle.
         self._stats.units_dispatch_failed += 1
-        action_tag = (
-            "submit_failed"
-            if outcome.kind == DispatchOutcomeKind.SUBMIT_FAILED
-            else outcome.kind  # runner_failed / sandbox_unavailable
+        submit_failed_kinds = (
+            DispatchOutcomeKind.SUBMIT_FAILED_TRANSIENT,
+            DispatchOutcomeKind.SUBMIT_FAILED_TERMINAL,
         )
+        if outcome.kind == DispatchOutcomeKind.SUBMIT_FAILED_TRANSIENT:
+            action_tag = "submit_failed_transient"
+        elif outcome.kind == DispatchOutcomeKind.SUBMIT_FAILED_TERMINAL:
+            action_tag = "submit_failed_terminal"
+        else:
+            action_tag = outcome.kind  # runner_failed / sandbox_unavailable
         self._audit.append(
             action=action_tag,
             assignment_id=response.assignment_id,
@@ -237,10 +260,13 @@ class AssignmentPoller:
             manifest_sha256=unit.manifest_sha256,
             reason=outcome.reason,
         )
-        if outcome.kind == DispatchOutcomeKind.SUBMIT_FAILED:
-            # Coordinator-side state may be inconsistent (result possibly
-            # received); don't double-refuse if the submit itself partially
-            # succeeded. Operator can untangle from audit + assignments table.
+        if outcome.kind in submit_failed_kinds:
+            # Per M6-tail: a SUBMIT_FAILED outcome means the Result is in
+            # the pending_submissions queue. The transient case will retry
+            # on the next tick; the terminal case sits for operator review.
+            # In neither case do we double-refuse: the coordinator may or
+            # may not have received the result, and an explicit refuse here
+            # would tell it to free the slot we may have already filled.
             return
         # Runner crashed or sandbox unavailable — tell coordinator to free
         # the slot.

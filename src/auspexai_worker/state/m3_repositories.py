@@ -520,3 +520,161 @@ def _parse_ts(raw: str) -> datetime:
     if raw.endswith("Z"):
         raw = raw[:-1] + "+00:00"
     return datetime.fromisoformat(raw)
+
+
+# ---- pending_submissions (M6-tail) ----------------------------------------
+
+
+@dataclass(frozen=True)
+class PendingSubmission:
+    id: int
+    unit_id: str
+    assignment_id: str | None
+    completed_at: str
+    exit_code: int
+    payload_json: str
+    worker_signature: str
+    worker_pubkey: str
+    queued_at: datetime
+    last_attempt_at: datetime | None
+    attempt_count: int
+    failure_kind: str | None  # 'transient' / 'terminal' / None
+    failure_reason: str | None
+
+
+_PENDING_COLUMNS = (
+    "id, unit_id, assignment_id, completed_at, exit_code, payload_json, "
+    "worker_signature, worker_pubkey, queued_at, last_attempt_at, "
+    "attempt_count, failure_kind, failure_reason"
+)
+
+
+class PendingSubmissionRepository:
+    """Write-before-submit queue for result submissions.
+
+    Per M6-tail design (2026-05-22): the worker writes the signed Result here
+    BEFORE attempting `coord.submit_result`, so a coordinator outage doesn't
+    drop the result on the floor. On submit success, the row is atomically
+    moved to `submitted_results` (and removed from this table). On transient
+    failure, the row remains for retry by the next dispatch tick. On terminal
+    4xx (other than 409), the row is marked 'terminal' so it surfaces to the
+    operator instead of being silently retried forever.
+    """
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    def queue(
+        self,
+        *,
+        unit_id: str,
+        assignment_id: str | None,
+        completed_at: str,
+        exit_code: int,
+        payload_json: str,
+        worker_signature: str,
+        worker_pubkey: str,
+    ) -> None:
+        """Add a Result to the write-before-submit queue.
+
+        Raises an exception if a pending row already exists for this unit_id
+        (the UNIQUE constraint should never be hit in normal operation since
+        the M6d scheduler creates at most one (unit_id, worker_id) assignment
+        per worker — this guards against logic bugs).
+        """
+        with self._db.transaction() as conn:
+            conn.execute(
+                "INSERT INTO pending_submissions "
+                "(unit_id, assignment_id, completed_at, exit_code, payload_json, "
+                " worker_signature, worker_pubkey) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    unit_id,
+                    assignment_id,
+                    completed_at,
+                    exit_code,
+                    payload_json,
+                    worker_signature,
+                    worker_pubkey,
+                ),
+            )
+
+    def get_by_unit(self, unit_id: str) -> PendingSubmission | None:
+        row = self._db.connection.execute(
+            f"SELECT {_PENDING_COLUMNS} FROM pending_submissions WHERE unit_id = ?",
+            (unit_id,),
+        ).fetchone()
+        return _row_to_pending(row) if row is not None else None
+
+    def list_retryable(self, *, limit: int = 10) -> list[PendingSubmission]:
+        """Return up to N pending rows eligible for retry, oldest first.
+
+        Eligible = `failure_kind IS NULL` (never tried) OR
+        `failure_kind = 'transient'` (last attempt was retryable).
+        `terminal` rows are excluded — operator handles those.
+        """
+        rows = self._db.connection.execute(
+            f"SELECT {_PENDING_COLUMNS} FROM pending_submissions "
+            "WHERE failure_kind IS NULL OR failure_kind = 'transient' "
+            "ORDER BY queued_at ASC, id ASC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [_row_to_pending(r) for r in rows]
+
+    def list_all(self) -> list[PendingSubmission]:
+        """All pending rows, including terminal — used by the CLI surface."""
+        rows = self._db.connection.execute(
+            f"SELECT {_PENDING_COLUMNS} FROM pending_submissions ORDER BY queued_at ASC, id ASC"
+        ).fetchall()
+        return [_row_to_pending(r) for r in rows]
+
+    def mark_attempt(
+        self,
+        *,
+        unit_id: str,
+        failure_kind: str,
+        failure_reason: str,
+        attempted_at: datetime,
+    ) -> None:
+        """Record an attempt that left the row pending — transient or terminal."""
+        if failure_kind not in ("transient", "terminal"):
+            raise ValueError(
+                f"failure_kind must be 'transient' or 'terminal', got {failure_kind!r}"
+            )
+        with self._db.transaction() as conn:
+            conn.execute(
+                "UPDATE pending_submissions SET "
+                "last_attempt_at = ?, "
+                "attempt_count = attempt_count + 1, "
+                "failure_kind = ?, "
+                "failure_reason = ? "
+                "WHERE unit_id = ?",
+                (attempted_at.isoformat(), failure_kind, failure_reason, unit_id),
+            )
+
+    def remove(self, unit_id: str) -> None:
+        """Delete a pending row. Used after the row has been drained to
+        submitted_results (success or 409 idempotent path)."""
+        with self._db.transaction() as conn:
+            conn.execute(
+                "DELETE FROM pending_submissions WHERE unit_id = ?",
+                (unit_id,),
+            )
+
+
+def _row_to_pending(row) -> PendingSubmission:
+    return PendingSubmission(
+        id=row["id"],
+        unit_id=row["unit_id"],
+        assignment_id=row["assignment_id"],
+        completed_at=row["completed_at"],
+        exit_code=row["exit_code"],
+        payload_json=row["payload_json"],
+        worker_signature=row["worker_signature"],
+        worker_pubkey=row["worker_pubkey"],
+        queued_at=_parse_ts(row["queued_at"]),
+        last_attempt_at=_parse_ts(row["last_attempt_at"]) if row["last_attempt_at"] else None,
+        attempt_count=row["attempt_count"],
+        failure_kind=row["failure_kind"],
+        failure_reason=row["failure_reason"],
+    )

@@ -56,7 +56,23 @@ class AssignmentAlreadyResolvedError(CoordinatorError):
 
 
 class ResultAlreadySubmittedError(CoordinatorError):
-    """409 result_already_submitted — this assignment already has a result."""
+    """409 result_already_submitted — this assignment already has a result.
+
+    The coordinator includes `existing_assignment_id` and `existing_result_id`
+    in the 409 details so a worker retrying after a transient submit failure
+    can reconcile its local state instead of losing the submission record.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        existing_assignment_id: str | None = None,
+        existing_result_id: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.existing_assignment_id = existing_assignment_id
+        self.existing_result_id = existing_result_id
 
 
 class UnitIdMismatchError(CoordinatorError):
@@ -374,7 +390,20 @@ class CoordinatorClient:
         if response.status_code == 404:
             raise AssignmentNotFoundError(_error_message(response))
         if response.status_code == 409:
-            raise ResultAlreadySubmittedError(_error_message(response))
+            details = _error_details(response)
+            raise ResultAlreadySubmittedError(
+                _error_message(response),
+                existing_assignment_id=(
+                    details.get("assignment_id")
+                    if isinstance(details.get("assignment_id"), str)
+                    else None
+                ),
+                existing_result_id=(
+                    details.get("existing_result_id")
+                    if isinstance(details.get("existing_result_id"), str)
+                    else None
+                ),
+            )
         raise CoordinatorError(
             f"submit_result: unexpected status {response.status_code}: {response.text[:500]}"
         )
@@ -719,6 +748,21 @@ def _error_code(response: httpx.Response) -> str | None:
         return None
     code = err.get("code")
     return code if isinstance(code, str) else None
+
+
+def _error_details(response: httpx.Response) -> dict[str, Any]:
+    """Extract the `error.details` dict from a FastAPI error response."""
+    try:
+        detail = response.json().get("detail", {})
+    except ValueError:
+        return {}
+    if not isinstance(detail, dict):
+        return {}
+    err = detail.get("error")
+    if not isinstance(err, dict):
+        return {}
+    details = err.get("details")
+    return details if isinstance(details, dict) else {}
 
 
 def _error_message(response: httpx.Response) -> str:

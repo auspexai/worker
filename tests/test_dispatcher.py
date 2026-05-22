@@ -24,6 +24,7 @@ from auspexai_worker.signing import Rfc9421Signer, verify_result_signature
 from auspexai_worker.state import (
     Database,
     MigrationRunner,
+    PendingSubmissionRepository,
     SubmittedResultRepository,
 )
 from auspexai_worker.workspace import WorkspaceManager
@@ -104,6 +105,7 @@ class TestRunUnitHappyPath:
                 privkey=privkey,
                 workspace_manager=WorkspaceManager(tmp_path / "runs"),
                 submitted_repo=SubmittedResultRepository(db),
+                pending_repo=PendingSubmissionRepository(db),
                 use_bubblewrap=False,
                 runner_bin=_runner_bin(),
             )
@@ -149,6 +151,7 @@ class TestRunUnitFailurePaths:
                 privkey=privkey,
                 workspace_manager=WorkspaceManager(tmp_path / "runs"),
                 submitted_repo=SubmittedResultRepository(db),
+                pending_repo=PendingSubmissionRepository(db),
                 use_bubblewrap=False,
                 runner_bin="auspexai-worker-runner-DOES-NOT-EXIST",
             )
@@ -169,6 +172,7 @@ class TestRunUnitFailurePaths:
                 privkey=privkey,
                 workspace_manager=WorkspaceManager(tmp_path / "runs"),
                 submitted_repo=SubmittedResultRepository(db),
+                pending_repo=PendingSubmissionRepository(db),
                 use_bubblewrap=False,
                 runner_bin=_runner_bin(),
             )
@@ -203,6 +207,7 @@ class TestWorkspaceCleanup:
                 privkey=privkey,
                 workspace_manager=WorkspaceManager(tmp_path / "runs"),
                 submitted_repo=SubmittedResultRepository(db),
+                pending_repo=PendingSubmissionRepository(db),
                 use_bubblewrap=False,
                 runner_bin=_runner_bin(),
             )

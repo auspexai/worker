@@ -32,14 +32,23 @@ from datetime import UTC, datetime
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from auspexai_worker.coordinator import (
+    AssignmentNotFoundError,
     AssignmentResponse,
     CoordinatorClient,
     CoordinatorError,
+    ResultAlreadySubmittedError,
     ResultSubmissionResponse,
+    UnauthorizedError,
+    UnitIdMismatchError,
+    WorkerIdMismatchError,
+    WorkerPubkeyMismatchError,
 )
 from auspexai_worker.sandbox import SandboxConfig, SandboxNotAvailableError, build_argv
 from auspexai_worker.signing import sign_result
-from auspexai_worker.state import SubmittedResultRepository
+from auspexai_worker.state import (
+    PendingSubmissionRepository,
+    SubmittedResultRepository,
+)
 from auspexai_worker.workspace import RunnerWorkspace, WorkspaceManager
 
 logger = logging.getLogger(__name__)
@@ -48,8 +57,13 @@ logger = logging.getLogger(__name__)
 class DispatchOutcomeKind:
     SUBMITTED = "submitted"
     RUNNER_CRASH = "runner_failed"
-    SUBMIT_FAILED = "submit_failed"
+    SUBMIT_FAILED_TRANSIENT = "submit_failed_transient"  # queued for retry
+    SUBMIT_FAILED_TERMINAL = "submit_failed_terminal"  # surfaced to operator
     SANDBOX_UNAVAILABLE = "sandbox_unavailable"
+    # Back-compat: previous code used a single SUBMIT_FAILED constant. Tests
+    # and external callers can still check that value as a substring match
+    # if needed; the more specific variants above are preferred.
+    SUBMIT_FAILED = "submit_failed_transient"
 
 
 @dataclass(frozen=True)
@@ -73,10 +87,12 @@ class RunnerDispatcher:
         privkey: Ed25519PrivateKey,
         workspace_manager: WorkspaceManager,
         submitted_repo: SubmittedResultRepository,
+        pending_repo: PendingSubmissionRepository,
         use_bubblewrap: bool,
         runner_bin: str = "auspexai-worker-runner",
         runner_timeout_seconds: float | None = None,
         on_runner_spawned=None,  # Callable[[int], None] — receives PID
+        max_pending_attempts: int = 100,
     ) -> None:
         self._coordinator = coordinator
         self._worker_id = worker_id
@@ -84,10 +100,12 @@ class RunnerDispatcher:
         self._privkey = privkey
         self._workspaces = workspace_manager
         self._submitted = submitted_repo
+        self._pending = pending_repo
         self._use_bubblewrap = use_bubblewrap
         self._runner_bin = runner_bin
         self._runner_timeout_seconds = runner_timeout_seconds
         self._on_runner_spawned = on_runner_spawned
+        self._max_pending_attempts = max_pending_attempts
 
     def run_unit(self, response: AssignmentResponse) -> DispatchOutcome:
         """Execute the assigned unit and submit the result. Always cleans
@@ -234,38 +252,243 @@ class RunnerDispatcher:
             payload=result_payload,
         )
 
+        payload_json = json.dumps(result_payload, separators=(",", ":"), sort_keys=True)
+
+        # Write-before-submit (M6-tail): persist the signed Result to the
+        # pending queue BEFORE the network call. If the submit fails or the
+        # process exits between submit and local record, the next dispatch
+        # tick will retry from the queue. The row is removed atomically
+        # alongside the submitted_results insert on success.
+        self._pending.queue(
+            unit_id=unit.unit_id,
+            assignment_id=response.assignment_id,
+            completed_at=completed_at,
+            exit_code=runner_exit_code,
+            payload_json=payload_json,
+            worker_signature=worker_signature,
+            worker_pubkey=self._worker_pubkey,
+        )
+
+        return self._attempt_submit_pending(
+            unit_id=unit.unit_id,
+            assignment_id=response.assignment_id,
+            completed_at=completed_at,
+            exit_code=runner_exit_code,
+            payload=result_payload,
+            payload_json=payload_json,
+            worker_signature=worker_signature,
+        )
+
+    def retry_pending(self, *, max_per_tick: int = 5) -> list[DispatchOutcome]:
+        """Attempt to submit any queued pending results.
+
+        Called at the top of the dispatch tick, before pulling a new
+        assignment, so a coord that was unreachable earlier has a chance to
+        accept the result before more work is taken on.
+
+        Returns one DispatchOutcome per attempted row (in queued order).
+        Terminal-marked rows are skipped — they sit until the operator
+        intervenes via `auspexai-worker pending` (TBD CLI verb) or until
+        the local DB is reset.
+        """
+        outcomes: list[DispatchOutcome] = []
+        for pending in self._pending.list_retryable(limit=max_per_tick):
+            if pending.attempt_count >= self._max_pending_attempts:
+                # Cap exceeded — promote to terminal so the operator can
+                # see and decide. Don't drop the row; the payload is the
+                # volunteer's contribution and should be preserved until
+                # explicitly cleared.
+                self._pending.mark_attempt(
+                    unit_id=pending.unit_id,
+                    failure_kind="terminal",
+                    failure_reason=(
+                        f"exceeded max_pending_attempts={self._max_pending_attempts}; "
+                        "operator must reconcile manually"
+                    ),
+                    attempted_at=datetime.now(UTC),
+                )
+                outcomes.append(
+                    DispatchOutcome(
+                        kind=DispatchOutcomeKind.SUBMIT_FAILED_TERMINAL,
+                        reason=(
+                            f"unit {pending.unit_id}: exceeded retry cap "
+                            f"({self._max_pending_attempts}); marked terminal"
+                        ),
+                    )
+                )
+                continue
+            try:
+                payload = json.loads(pending.payload_json)
+            except json.JSONDecodeError as exc:
+                # Shouldn't happen — pending_submissions.payload_json comes
+                # from json.dumps. Treat as terminal corruption.
+                self._pending.mark_attempt(
+                    unit_id=pending.unit_id,
+                    failure_kind="terminal",
+                    failure_reason=f"payload_json corrupted: {exc}",
+                    attempted_at=datetime.now(UTC),
+                )
+                outcomes.append(
+                    DispatchOutcome(
+                        kind=DispatchOutcomeKind.SUBMIT_FAILED_TERMINAL,
+                        reason=f"unit {pending.unit_id}: payload corrupted: {exc}",
+                    )
+                )
+                continue
+            outcomes.append(
+                self._attempt_submit_pending(
+                    unit_id=pending.unit_id,
+                    assignment_id=pending.assignment_id,
+                    completed_at=pending.completed_at,
+                    exit_code=pending.exit_code,
+                    payload=payload,
+                    payload_json=pending.payload_json,
+                    worker_signature=pending.worker_signature,
+                )
+            )
+        return outcomes
+
+    def _attempt_submit_pending(
+        self,
+        *,
+        unit_id: str,
+        assignment_id: str | None,
+        completed_at: str,
+        exit_code: int,
+        payload: dict,
+        payload_json: str,
+        worker_signature: str,
+    ) -> DispatchOutcome:
+        """Single submit attempt for an already-queued pending row.
+
+        On success: write submitted_results + delete pending row, atomically
+        from the application's point of view (sequential calls on the same
+        sqlite connection inside the dispatcher's process).
+        On 409 result_already_submitted: idempotent success path — uses the
+        existing_result_id from the coord 409 to write submitted_results,
+        delete pending. Same observable outcome.
+        On transient failure (network / 5xx / generic CoordinatorError):
+        mark_attempt(transient); return SUBMIT_FAILED_TRANSIENT.
+        On 4xx terminal: mark_attempt(terminal); return SUBMIT_FAILED_TERMINAL.
+        """
         try:
             submission = self._coordinator.submit_result(
                 worker_id=self._worker_id,
-                unit_id=unit.unit_id,
+                unit_id=unit_id,
                 worker_pubkey=self._worker_pubkey,
                 completed_at=completed_at,
-                exit_code=runner_exit_code,
-                payload=result_payload,
+                exit_code=exit_code,
+                payload=payload,
                 worker_signature=worker_signature,
             )
-        except CoordinatorError as exc:
-            logger.warning("submit_result failed for unit %s: %s", unit.unit_id, exc)
+        except ResultAlreadySubmittedError as exc:
+            # The coord already has this result. Use the existing_result_id
+            # from the 409 to write a submitted_results row, then remove
+            # from pending. Net effect: full local reconciliation.
+            if exc.existing_result_id is None:
+                # Pre-existing coord build that doesn't include the detail?
+                # Be safe: mark terminal so the operator can investigate.
+                logger.warning(
+                    "unit %s: 409 result_already_submitted with no existing_result_id; "
+                    "marking pending row terminal for operator review",
+                    unit_id,
+                )
+                self._pending.mark_attempt(
+                    unit_id=unit_id,
+                    failure_kind="terminal",
+                    failure_reason=(
+                        "409 result_already_submitted but coord did not return "
+                        "existing_result_id; cannot reconcile locally"
+                    ),
+                    attempted_at=datetime.now(UTC),
+                )
+                return DispatchOutcome(
+                    kind=DispatchOutcomeKind.SUBMIT_FAILED_TERMINAL,
+                    reason=str(exc),
+                )
+            logger.info(
+                "unit %s: 409 result_already_submitted; reconciling with existing_result_id=%s",
+                unit_id,
+                exc.existing_result_id,
+            )
+            self._submitted.record(
+                unit_id=unit_id,
+                assignment_id=exc.existing_assignment_id or assignment_id,
+                result_id=exc.existing_result_id,
+                exit_code=exit_code,
+                completed_at=completed_at,
+                coord_unit_status_after=None,  # Unknown; M7-tail will backfill
+                coord_completions_so_far=None,
+                coord_replication_target=None,
+                payload_json=payload_json,
+            )
+            self._pending.remove(unit_id)
             return DispatchOutcome(
-                kind=DispatchOutcomeKind.SUBMIT_FAILED,
+                kind=DispatchOutcomeKind.SUBMITTED,
+                reason=f"reconciled-via-409 (existing_result_id={exc.existing_result_id})",
+            )
+        except (
+            UnitIdMismatchError,
+            WorkerPubkeyMismatchError,
+            WorkerIdMismatchError,
+            UnauthorizedError,
+            AssignmentNotFoundError,
+        ) as exc:
+            # Terminal — these can't be fixed by retrying. Keep the pending
+            # row so the operator can see it; don't repeatedly hammer the
+            # coord with a request guaranteed to fail.
+            logger.error(
+                "unit %s: submit failed terminally (%s); marking pending row for operator review",
+                unit_id,
+                type(exc).__name__,
+            )
+            self._pending.mark_attempt(
+                unit_id=unit_id,
+                failure_kind="terminal",
+                failure_reason=f"{type(exc).__name__}: {exc}",
+                attempted_at=datetime.now(UTC),
+            )
+            return DispatchOutcome(
+                kind=DispatchOutcomeKind.SUBMIT_FAILED_TERMINAL,
+                reason=str(exc),
+            )
+        except CoordinatorError as exc:
+            # Generic CoordinatorError covers transport errors (DNS, TCP,
+            # TLS, timeout) and any unexpected status codes. Assume transient
+            # until proven otherwise — the next dispatch tick will retry.
+            logger.warning(
+                "unit %s: submit failed transiently (%s); will retry next tick",
+                unit_id,
+                exc,
+            )
+            self._pending.mark_attempt(
+                unit_id=unit_id,
+                failure_kind="transient",
+                failure_reason=str(exc),
+                attempted_at=datetime.now(UTC),
+            )
+            return DispatchOutcome(
+                kind=DispatchOutcomeKind.SUBMIT_FAILED_TRANSIENT,
                 reason=str(exc),
             )
 
+        # Success path: write submitted_results + remove from pending.
         self._submitted.record(
-            unit_id=unit.unit_id,
-            assignment_id=response.assignment_id,
+            unit_id=unit_id,
+            assignment_id=assignment_id,
             result_id=submission.result_id,
-            exit_code=runner_exit_code,
+            exit_code=exit_code,
             completed_at=completed_at,
             coord_unit_status_after=submission.unit_status_after,
             coord_completions_so_far=submission.completions_so_far,
             coord_replication_target=submission.replication_target,
-            payload_json=json.dumps(result_payload, separators=(",", ":"), sort_keys=True),
+            payload_json=payload_json,
         )
+        self._pending.remove(unit_id)
 
         logger.info(
             "submitted result for unit %s (result_id=%s, unit_status=%s, completions=%d/%d)",
-            unit.unit_id,
+            unit_id,
             submission.result_id,
             submission.unit_status_after,
             submission.completions_so_far,

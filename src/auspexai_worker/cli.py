@@ -49,6 +49,7 @@ from .state import (
     AcceptedSensitiveRepository,
     AssignmentAuditRepository,
     ManifestPinRepository,
+    PendingSubmissionRepository,
     SubmittedResultRepository,
     TenantListRepository,
 )
@@ -227,6 +228,7 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
     tenant_lists = TenantListRepository(db)
     audit = AssignmentAuditRepository(db)
     submitted_results = SubmittedResultRepository(db)
+    pending_submissions = PendingSubmissionRepository(db)
 
     runs_dir = workspace_runs_dir(config.state_dir)
     workspace_manager = WorkspaceManager(runs_dir)
@@ -240,6 +242,7 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
             privkey=privkey,
             workspace_manager=workspace_manager,
             submitted_repo=submitted_results,
+            pending_repo=pending_submissions,
             use_bubblewrap=config.sandbox_use_bubblewrap,
             runner_timeout_seconds=config.runner_timeout_seconds,
         )
