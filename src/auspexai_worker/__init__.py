@@ -6,4 +6,4 @@ the coordinator, and exposes a minimal CLI. See
 `Documentation/AuspexAI/v0.1.0/worker_daemon_design.md` and principles doc §5.19.
 """
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"

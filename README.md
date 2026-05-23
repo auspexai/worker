@@ -140,13 +140,30 @@ Requires Python 3.11+. Quick start:
 uv venv
 uv pip install -e ".[dev]"
 auspexai-worker status                              # shows "not enrolled"
-AUSPEXAI_COORDINATOR_URL=http://127.0.0.1:8080 \
-  auspexai-worker bootstrap                         # enrolls against a local coordinator
-AUSPEXAI_COORDINATOR_URL=http://127.0.0.1:8080 \
-  auspexai-worker daemon --max-ticks=3              # run 3 heartbeats then exit
-pytest                                              # 157 tests
+auspexai-worker bootstrap                           # enrolls against the
+                                                    # public coord (default
+                                                    # since v0.1.2)
+auspexai-worker daemon --max-ticks=3                # run 3 heartbeats then exit
+pytest
 ruff check src tests
 ruff format --check src tests
+```
+
+Running against a coordinator on your own machine (lab mode) — override
+the default `https://coord.auspexai.network`:
+
+```bash
+AUSPEXAI_COORDINATOR_URL=http://127.0.0.1:8080 \
+  auspexai-worker bootstrap
+AUSPEXAI_COORDINATOR_URL=http://127.0.0.1:8080 \
+  auspexai-worker daemon --max-ticks=3
+```
+
+Or persist via TOML at `~/.config/auspexai-worker/worker.toml`:
+
+```toml
+[coordinator]
+url = "http://127.0.0.1:8080"
 ```
 
 ## Conduct on the network

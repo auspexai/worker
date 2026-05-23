@@ -14,7 +14,11 @@ def _write(cfg_path: Path, body: str) -> None:
 class TestConfigDefaults:
     def test_defaults_when_no_files(self, tmp_path: Path) -> None:
         cfg = WorkerConfig.load(config_path=tmp_path / "missing.toml", env={})
-        assert cfg.coordinator_url == "http://127.0.0.1:8080"
+        # v0.1.2 flipped this default to the public coord URL. The
+        # original lab default `http://127.0.0.1:8080` still works as
+        # an override via AUSPEXAI_COORDINATOR_URL env or `[coordinator]
+        # url` in worker.toml.
+        assert cfg.coordinator_url == "https://coord.auspexai.network"
         assert cfg.heartbeat_interval_seconds == 60
         assert cfg.max_ram_gb is None
         assert cfg.declared_gpus.is_empty() is True

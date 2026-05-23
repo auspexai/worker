@@ -90,7 +90,15 @@ class WorkerConfig:
         env = dict(env if env is not None else os.environ)
 
         defaults: dict[str, object] = {
-            "coordinator_url": "http://127.0.0.1:8080",
+            # The public AuspexAI coordinator (Phase 2 closed-beta lab
+            # deployment on rage, Cloudflare-Tunneled at coord.auspexai
+            # .network). Lab operators running their own coordinator on
+            # localhost should override via `[coordinator] url` in
+            # worker.toml or AUSPEXAI_COORDINATOR_URL env. v0.1.0 +
+            # v0.1.1 used http://127.0.0.1:8080 as the default per the
+            # original Q-W8 lab-altitude resolution; v0.1.2 flips this
+            # now that a publicly-reachable coord exists.
+            "coordinator_url": "https://coord.auspexai.network",
             "heartbeat_interval_seconds": 60,
             "assignment_poll_interval_seconds": 30,
             "state_dir": str(_xdg_state_home() / "auspexai-worker"),

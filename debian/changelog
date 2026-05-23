@@ -1,3 +1,20 @@
+auspexai-worker (0.1.2) UNRELEASED; urgency=medium
+
+  * Flip compile-time coordinator URL default to the public coord
+    - WorkerConfig defaults now point at https://coord.auspexai.network
+      (the Phase 2 closed-beta coordinator on rage, Cloudflare-Tunneled).
+      Previously http://127.0.0.1:8080 — appropriate when the only
+      coordinator was a local lab process; obsolete once a publicly-
+      reachable coord exists for invited volunteers.
+    - Override paths unchanged: AUSPEXAI_COORDINATOR_URL env var or
+      `[coordinator] url` in worker.toml. README updated to show the
+      lab-mode override snippet for operators running their own coord.
+    - Closes the Q-W8 follow-up flagged at M1 ("the compile-time
+      default needs to flip when packaging artifacts ship to outside
+      volunteers").
+
+ -- AuspexAI Maintainers <contact@auspexai.network>  Sat, 23 May 2026 14:00:00 +0000
+
 auspexai-worker (0.1.1) UNRELEASED; urgency=high
 
   * Fix broken venv interpreter path (v0.1.0 ship-blocker)
