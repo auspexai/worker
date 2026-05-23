@@ -1,3 +1,25 @@
+auspexai-worker (0.1.1) UNRELEASED; urgency=high
+
+  * Fix broken venv interpreter path (v0.1.0 ship-blocker)
+    - debian/rules previously selected the build-host Python via
+      `command -v python3.12`, which is PATH-dependent. On the GitHub
+      Actions release runner, an earlier `uv python install 3.12` step
+      prepended a uv-managed Python (`/home/runner/.local/share/uv/
+      python/.../bin/python3.12`) to PATH. dh-virtualenv embedded that
+      path as the venv's `executable=` in pyvenv.cfg and as the
+      `bin/python3.12` symlink target. End-user hosts have no
+      `/home/runner/...` directory, so the symlink dangles, the
+      `auspexai-worker` shebang fails, and every install exits non-zero
+      at postinst (rolled back by dpkg).
+    - Fix: hardcode `/usr/bin/python3.12` (with `/usr/bin/python3.11`
+      fallback) in debian/rules. Pre-Depends ensures the package is
+      installed at build time, so the path is guaranteed.
+    - v0.1.0 release yanked (marked pre-release on GitHub) with a
+      broken-venv notice. Rekor entries for v0.1.0 signing remain
+      permanent per the transparency-log property.
+
+ -- AuspexAI Maintainers <contact@auspexai.network>  Sat, 23 May 2026 12:00:00 +0000
+
 auspexai-worker (0.1.0) UNRELEASED; urgency=medium
 
   * M7 — initial .deb packaging

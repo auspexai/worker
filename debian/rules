@@ -12,8 +12,16 @@
 export DH_VIRTUALENV_INSTALL_ROOT=/opt
 export PYBUILD_NAME=auspexai-worker
 
-# Pick the highest Python ≥3.11 available on the build host.
-PY := $(shell command -v python3.12 || command -v python3.11)
+# Pick the highest Python ≥3.11 available on the build host. MUST be
+# an absolute /usr/bin/python3.* path — never let PATH influence this.
+# Why: dh-virtualenv records the chosen interpreter path verbatim into
+# the bundled venv's pyvenv.cfg + bin/python3.X symlink. If PATH-based
+# discovery picks up a Python under (e.g.) /home/runner/.local/share/
+# uv/python/.../bin/python3.12 (as happened on the GitHub Actions
+# runner in v0.1.0), the venv becomes a dangling symlink on every
+# end-user machine and the binary fails to launch. v0.1.0 shipped
+# broken for exactly this reason — fix in v0.1.1.
+PY := $(shell test -x /usr/bin/python3.12 && echo /usr/bin/python3.12 || echo /usr/bin/python3.11)
 
 %:
 	dh $@ --with python-virtualenv
