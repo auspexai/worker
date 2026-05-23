@@ -137,3 +137,36 @@ def _make_enrollment_response():
         trust_tier=0,
         registered_at=datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC),
     )
+
+
+class TestSandboxProbeCommand:
+    """`auspexai-worker sandbox probe` exposes the daemon's bwrap check
+    as a standalone subcommand so the .deb postinst can invoke it."""
+
+    def test_probe_returns_ok_when_bwrap_works(self) -> None:
+        from auspexai_worker.sandbox import BubblewrapProbeResult
+
+        runner = CliRunner()
+        with patch(
+            "auspexai_worker.cli.probe_bubblewrap",
+            return_value=BubblewrapProbeResult(ok=True),
+        ):
+            result = runner.invoke(cli, ["sandbox", "probe"])
+        assert result.exit_code == 0, result.output
+        assert "OK" in result.output
+
+    def test_probe_exits_nonzero_when_bwrap_fails(self) -> None:
+        from auspexai_worker.sandbox import BubblewrapProbeResult
+
+        runner = CliRunner()
+        with patch(
+            "auspexai_worker.cli.probe_bubblewrap",
+            return_value=BubblewrapProbeResult(
+                ok=False,
+                reason="bwrap probe exit=1: setting up uid map: Permission denied",
+            ),
+        ):
+            result = runner.invoke(cli, ["sandbox", "probe"])
+        assert result.exit_code == 1
+        assert "FAILED" in result.output
+        assert "Permission denied" in result.output

@@ -1,0 +1,111 @@
+#!/bin/sh
+# postinst for auspexai-worker
+#
+# Per worker_daemon_design.md §14 M7 + Q-W10 Phase 2 resolution:
+# - Reload AppArmor so the dropped profile is enforced before any
+#   bwrap invocation tries to create a user namespace.
+# - Run probe_bubblewrap to verify the sandbox actually works on this
+#   host; refuse to declare the install successful otherwise so the
+#   operator sees the failure at install time, not at unit-execution
+#   time.
+#
+# Hosts without AppArmor at all (uncommon on Ubuntu/Debian, common on
+# some Alpine derivatives) skip the profile reload and rely on the
+# probe to surface a clean error if bubblewrap is broken for any
+# other reason.
+
+set -e
+
+PROFILE=/etc/apparmor.d/auspexai-worker
+WORKER_BIN=/opt/auspexai-worker/bin/auspexai-worker
+
+case "$1" in
+    configure)
+        # 1. Reload AppArmor profile if AppArmor is active on this host.
+        if [ -x /sbin/apparmor_parser ] && [ -d /etc/apparmor.d ] && [ -f "$PROFILE" ]; then
+            if /sbin/apparmor_parser -r -W "$PROFILE" >/dev/null 2>&1; then
+                echo "auspexai-worker: AppArmor profile installed and reloaded."
+            else
+                echo "auspexai-worker: WARNING — AppArmor profile reload failed." >&2
+                echo "  The worker will still install, but runner sandboxing will" >&2
+                echo "  require the Phase 1 sysctl workaround:" >&2
+                echo "    sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0" >&2
+                echo "  See https://github.com/auspexai/worker for details." >&2
+            fi
+        else
+            echo "auspexai-worker: AppArmor not active; skipping profile install."
+        fi
+
+        # 2. Probe bubblewrap as an unprivileged user (`nobody`).
+        #    Running as root would mask the unprivileged-userns
+        #    restriction that motivates this whole exercise (root has
+        #    CAP_SYS_ADMIN, bypasses AppArmor's userns gate), so the
+        #    probe must run as a non-root user to actually exercise
+        #    the path a volunteer hits.
+        #
+        #    The AppArmor profile applies based on the binary path
+        #    (/opt/auspexai-worker/bin/auspexai-worker), so any
+        #    invoking UID hits the same confinement — `nobody` is
+        #    fine here.
+        if [ -x "$WORKER_BIN" ] && getent passwd nobody >/dev/null 2>&1 && command -v runuser >/dev/null 2>&1; then
+            PROBE_CMD="HOME=/tmp $WORKER_BIN sandbox probe"
+            if ! runuser -u nobody -- /bin/sh -c "$PROBE_CMD" \
+                    >/dev/null 2>/tmp/auspexai-worker-probe.log; then
+                echo "" >&2
+                echo "auspexai-worker: sandbox probe FAILED (as user 'nobody')." >&2
+                echo "" >&2
+                cat /tmp/auspexai-worker-probe.log >&2 || true
+                echo "" >&2
+                echo "Fix one of:" >&2
+                echo "  1. (Ubuntu 24.04+ recommended) Confirm the AppArmor profile" >&2
+                echo "     reload above succeeded. Try:" >&2
+                echo "       sudo apparmor_parser -r -W $PROFILE" >&2
+                echo "  2. (Lab / single-operator hosts, Phase 1) flip the sysctl:" >&2
+                echo "       sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0" >&2
+                echo "     and persist with:" >&2
+                echo "       echo 'kernel.apparmor_restrict_unprivileged_userns=0' \\" >&2
+                echo "         | sudo tee /etc/sysctl.d/60-auspexai-userns.conf" >&2
+                echo "  3. (CI / dev hosts only — gives up Phase 1 sandbox isolation) set" >&2
+                echo "     [sandbox] use_bubblewrap = false in worker.toml." >&2
+                echo "" >&2
+                echo "Then: dpkg --configure auspexai-worker" >&2
+                exit 1
+            fi
+            echo "auspexai-worker: sandbox probe OK (as user 'nobody')."
+            rm -f /tmp/auspexai-worker-probe.log
+        elif [ -x "$WORKER_BIN" ]; then
+            echo "auspexai-worker: WARNING — 'nobody' user or runuser missing; skipping probe." >&2
+            echo "  The sandbox will be exercised at first daemon start instead." >&2
+        fi
+
+        # 3. Reload systemd-user units so the new unit is discoverable
+        #    by every running user systemd. (Per-user enable/start is
+        #    still the volunteer's explicit action.)
+        if [ -x /bin/systemctl ]; then
+            /bin/systemctl daemon-reload || true
+        fi
+
+        cat <<'EOF'
+
+auspexai-worker: installed.
+
+To finish setup, each volunteer user runs (as themselves, NOT root):
+
+  systemctl --user enable --now auspexai-worker.service
+  auspexai-worker status      # confirms enrollment
+  auspexai-worker login       # T1 binding (optional but recommended)
+
+Verify the worker is heartbeating:
+
+  journalctl --user -u auspexai-worker -f
+
+EOF
+        ;;
+
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

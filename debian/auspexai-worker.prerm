@@ -1,0 +1,35 @@
+#!/bin/sh
+# prerm for auspexai-worker
+#
+# We cannot stop the daemon from here — it runs as `systemctl --user`
+# under each volunteer's session, and prerm runs as root. Each
+# volunteer must run `systemctl --user disable --now auspexai-worker`
+# themselves; we print a reminder.
+#
+# On `remove` / `purge`, the AppArmor profile and systemd unit are
+# removed by dpkg via the .install manifest; nothing to do here.
+
+set -e
+
+case "$1" in
+    remove|deconfigure)
+        cat <<'EOF'
+auspexai-worker: NOTE — this only removes the system binaries.
+
+Each volunteer user should run (as themselves):
+
+  systemctl --user disable --now auspexai-worker.service
+  auspexai-worker withdraw    # severs the coordinator binding
+
+Per-user state under ~/.local/state/auspexai-worker/ and
+~/.local/share/auspexai-worker/ is NOT touched by this uninstall.
+EOF
+        ;;
+
+    upgrade|failed-upgrade)
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

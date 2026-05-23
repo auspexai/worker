@@ -1,0 +1,116 @@
+# /etc/apparmor.d/auspexai-worker
+#
+# AppArmor profile for the AuspexAI worker daemon.
+#
+# Purpose (Q-W10 Phase 2 durable fix): grant the daemon's bubblewrap
+# child the `userns` capability needed to create unprivileged user
+# namespaces on Ubuntu 24.04+, WITHOUT affecting other bwrap users
+# on the host (flatpak, Steam, etc.). Replaces the Phase 1 host-wide
+# sysctl flip (`kernel.apparmor_restrict_unprivileged_userns=0`).
+#
+# Scoping mechanism: the daemon binary is confined by this profile;
+# bwrap-as-child-of-the-daemon transitions to the `bwrap_sandbox`
+# sub-profile (`cx ->`); the sub-profile grants `userns,`. Other bwrap
+# invocations on the host (started by anything other than the
+# auspexai-worker daemon) keep the system-default bwrap policy and
+# remain userns-restricted.
+#
+# Phase 1 permissive posture: the daemon profile itself uses broad
+# rules (no narrow path enumeration) matching §5.17 ("Phase 1 ships
+# the architecture; Phase 2 turns the policy knobs"). The bwrap
+# sub-profile uses `flags=(unconfined)` because the actual security
+# boundary is the namespace bwrap constructs, not AppArmor's
+# confinement of bwrap itself — the namespace is what isolates the
+# tenant code in the runner.
+
+abi <abi/4.0>,
+
+include <tunables/global>
+
+profile auspexai-worker /opt/auspexai-worker/bin/auspexai-worker {
+  include <abstractions/base>
+  include <abstractions/python>
+  include <abstractions/nameservice>
+  include <abstractions/ssl_certs>
+
+  # Daemon's own venv tree
+  /opt/auspexai-worker/** mr,
+  /opt/auspexai-worker/bin/auspexai-worker rix,
+  /opt/auspexai-worker/bin/auspexai-worker-runner rix,
+  /opt/auspexai-worker/bin/python* rix,
+
+  # System Python (for shebang resolution / interpreter inheritance)
+  /usr/bin/python3* rix,
+  /usr/lib/python3* r,
+  /usr/lib/python3*/** mr,
+
+  # Per-user worker state under XDG dirs
+  owner @{HOME}/.local/state/auspexai-worker/ rw,
+  owner @{HOME}/.local/state/auspexai-worker/** rwk,
+  owner @{HOME}/.local/share/auspexai-worker/ rw,
+  owner @{HOME}/.local/share/auspexai-worker/** rwk,
+  owner @{HOME}/.config/auspexai-worker/ r,
+  owner @{HOME}/.config/auspexai-worker/** r,
+
+  # Runtime user dir (XDG_RUNTIME_DIR)
+  owner /run/user/*/auspexai-worker/** rwk,
+  owner /run/user/*/auspexai-worker/ rw,
+
+  # systemd-managed paths
+  /run/systemd/userdb/ r,
+  /run/systemd/userdb/** r,
+
+  # Read-only system config
+  /etc/auspexai-worker/ r,
+  /etc/auspexai-worker/** r,
+  /etc/machine-id r,
+  /etc/os-release r,
+
+  # libsecret / Secret Service over D-Bus (keystore primary path)
+  dbus send
+       bus=session
+       path=/org/freedesktop/secrets/**
+       interface=org.freedesktop.Secret.*
+       peer=(label=unconfined),
+  dbus receive
+       bus=session
+       interface=org.freedesktop.Secret.*
+       peer=(label=unconfined),
+  dbus send
+       bus=session
+       path=/org/freedesktop/DBus
+       interface=org.freedesktop.DBus
+       member={Hello,AddMatch,RemoveMatch,GetNameOwner,NameHasOwner,StartServiceByName},
+  /run/user/*/bus rw,
+
+  # Network — HTTPS to the coordinator
+  network inet stream,
+  network inet6 stream,
+  network unix stream,
+  network unix dgram,
+
+  # Process management for the runner subprocess
+  signal (send) set=(term, kill) peer=auspexai-worker//bwrap_sandbox,
+  signal (receive) set=(term, kill, int, hup),
+
+  # Hand off bwrap invocations to the sub-profile
+  /usr/bin/bwrap cx -> bwrap_sandbox,
+
+  # Sub-profile applied to bwrap when started by this daemon. Grants
+  # userns (the Q-W10 fix) plus the broad capabilities bwrap needs to
+  # construct namespaces. flags=(unconfined) lets bwrap do its job
+  # without enumerating every syscall — the actual sandbox boundary
+  # for the runner is bwrap's own namespace, not AppArmor here.
+  profile bwrap_sandbox flags=(unconfined) {
+    userns,
+
+    /usr/bin/bwrap mr,
+    /opt/auspexai-worker/bin/auspexai-worker-runner rix,
+
+    # Workspaces created by the daemon for each work unit
+    owner @{HOME}/.local/share/auspexai-worker/workspaces/ rw,
+    owner @{HOME}/.local/share/auspexai-worker/workspaces/** rwlk,
+    /tmp/auspexai-worker-*/ rw,
+    /tmp/auspexai-worker-*/** rwlk,
+  }
+}

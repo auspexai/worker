@@ -1,0 +1,167 @@
+name: Release
+
+# Fires on version tags (e.g., v0.1.0). The tag is the trigger; the
+# Maintainer is expected to push it from a state where the main-branch
+# CI was green.
+#
+# Outputs a GitHub release with:
+#   - auspexai_worker-<version>-py3-none-any.whl  (pipx-installable Python wheel)
+#   - auspexai_worker-<version>.tar.gz             (source distribution)
+#   - auspexai-worker_<version>_amd64.deb          (Debian package)
+#   - <artifact>.sig + <artifact>.cert per artifact (Sigstore keyless via OIDC)
+#   - SHA256SUMS                                   (legacy checksum file)
+#
+# Trust path: see auspexai/.github/security/AUTHORIZED_SIGNERS.md.
+# Verification: cosign verify-blob with --certificate-identity-regexp
+# scoped to the auspexai org. Per Principles & Scope §5.16.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write   # create the GitHub release + upload assets
+  id-token: write   # OIDC token for Sigstore keyless signing
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build, sign, and publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout source at tag
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Sanity check — tag matches pyproject version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PYPROJECT_VERSION=$(grep -m1 '^version' pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          if [ "$TAG_VERSION" != "$PYPROJECT_VERSION" ]; then
+            echo "::error::Tag version ($TAG_VERSION) does not match pyproject.toml version ($PYPROJECT_VERSION)."
+            exit 1
+          fi
+          echo "version=$TAG_VERSION" >> "$GITHUB_ENV"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      - name: Build Python wheel + sdist
+        run: |
+          uv build
+          ls -la dist/
+
+      - name: Install Debian build toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            dh-virtualenv debhelper devscripts dpkg-dev \
+            python3-venv python3-dev python3.12-venv python3.12-dev \
+            python3-pip build-essential
+
+      - name: Build .deb
+        run: |
+          dpkg-buildpackage -us -uc -b
+          ls -la ../auspexai-worker_*.deb
+
+      - name: Stage artifacts into dist/
+        run: |
+          mv ../auspexai-worker_*.deb dist/
+          mv ../auspexai-worker_*.buildinfo dist/ 2>/dev/null || true
+          mv ../auspexai-worker_*.changes dist/ 2>/dev/null || true
+          ls -la dist/
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: 'v2.5.0'
+
+      - name: Sign artifacts (Sigstore keyless via GitHub OIDC)
+        run: |
+          shopt -s nullglob
+          for artifact in dist/auspexai_worker-*.whl \
+                          dist/auspexai_worker-*.tar.gz \
+                          dist/auspexai-worker_*.deb; do
+            echo "::group::Signing $(basename "$artifact")"
+            cosign sign-blob --yes \
+              --output-signature "$artifact.sig" \
+              --output-certificate "$artifact.cert" \
+              "$artifact"
+            echo "::endgroup::"
+          done
+          ls -la dist/
+
+      - name: Compute SHA256SUMS
+        run: |
+          (cd dist && sha256sum auspexai* | grep -vE '\.(sig|cert)$' > SHA256SUMS)
+          cat dist/SHA256SUMS
+
+      - name: Verify own signatures (self-check)
+        run: |
+          shopt -s nullglob
+          for artifact in dist/auspexai_worker-*.whl \
+                          dist/auspexai_worker-*.tar.gz \
+                          dist/auspexai-worker_*.deb; do
+            echo "::group::Verifying $(basename "$artifact")"
+            cosign verify-blob \
+              --certificate-identity-regexp='^https://github\.com/auspexai/.+/\.github/workflows/.+@.+$' \
+              --certificate-oidc-issuer='https://token.actions.githubusercontent.com' \
+              --signature "$artifact.sig" \
+              --certificate "$artifact.cert" \
+              "$artifact"
+            echo "::endgroup::"
+          done
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ env.version }}
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/auspexai_worker-*.whl
+            dist/auspexai_worker-*.tar.gz
+            dist/auspexai-worker_*.deb
+            dist/*.sig
+            dist/*.cert
+            dist/SHA256SUMS
+          body: |
+            AuspexAI Worker ${{ env.version }}.
+
+            ## Install
+
+            ```bash
+            # Debian / Ubuntu (Phase 1 supported target: Ubuntu 24.04+)
+            sudo apt install ./auspexai-worker_${{ env.version }}_amd64.deb
+
+            # Or via pipx (Linux x86_64 + ARM64)
+            pipx install auspexai_worker-${{ env.version }}-py3-none-any.whl
+            ```
+
+            ## Verify before installing
+
+            ```bash
+            cosign verify-blob \
+              --certificate-identity-regexp='^https://github\.com/auspexai/.+/\.github/workflows/.+@.+$' \
+              --certificate-oidc-issuer='https://token.actions.githubusercontent.com' \
+              --signature auspexai-worker_${{ env.version }}_amd64.deb.sig \
+              --certificate auspexai-worker_${{ env.version }}_amd64.deb.cert \
+              auspexai-worker_${{ env.version }}_amd64.deb
+            ```
+
+            The signature chain anchors at the AuspexAI Maintainer's GitHub
+            OIDC identity. Trust roster: [AUTHORIZED_SIGNERS.md](https://github.com/auspexai/.github/blob/main/security/AUTHORIZED_SIGNERS.md).
+            Receipt verification (separate signing chain): per [Principles & Scope §5.16](https://github.com/auspexai).

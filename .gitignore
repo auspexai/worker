@@ -33,3 +33,16 @@ coverage.xml
 *.db-wal
 *.db-shm
 worker.toml.local
+
+# Debian build artifacts (dpkg-buildpackage outputs to parent dir by default)
+debian/auspexai-worker/
+debian/.debhelper/
+debian/debhelper-build-stamp
+debian/files
+debian/*.substvars
+debian/*.log
+../auspexai-worker_*.deb
+../auspexai-worker_*.buildinfo
+../auspexai-worker_*.changes
+../auspexai-worker_*.dsc
+../auspexai-worker_*.tar.*

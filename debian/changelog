@@ -1,0 +1,12 @@
+auspexai-worker (0.1.0) UNRELEASED; urgency=medium
+
+  * M7 — initial .deb packaging
+    - dh-virtualenv venv layout at /opt/auspexai-worker/
+    - System-wide systemd user-unit at /etc/systemd/user/auspexai-worker.service
+    - AppArmor profile granting bwrap (as child of the daemon) the userns
+      capability required for runner sandboxing on Ubuntu 24.04+ (Q-W10
+      Phase 2 durable fix; replaces the host-wide sysctl flip)
+    - Postinst runs probe_bubblewrap to verify the sandbox before
+      declaring install successful
+
+ -- AuspexAI Maintainers <contact@auspexai.network>  Sat, 23 May 2026 09:00:00 +0000

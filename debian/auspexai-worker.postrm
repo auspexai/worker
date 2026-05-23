@@ -1,0 +1,23 @@
+#!/bin/sh
+# postrm for auspexai-worker
+
+set -e
+
+case "$1" in
+    remove|purge)
+        # Reload AppArmor so the removed profile is no longer in force.
+        if [ -x /sbin/apparmor_parser ] && [ "$1" = "purge" ]; then
+            /sbin/apparmor_parser -R /etc/apparmor.d/auspexai-worker 2>/dev/null || true
+        fi
+        if [ -x /bin/systemctl ]; then
+            /bin/systemctl daemon-reload || true
+        fi
+        ;;
+
+    upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

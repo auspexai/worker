@@ -489,6 +489,27 @@ def abort(ctx: click.Context, unit_id: str, grace_seconds: float) -> None:
         db.close()
 
 
+@cli.group(help="Sandbox-related operations.")
+def sandbox() -> None:
+    pass
+
+
+@sandbox.command("probe", help="Verify bubblewrap can create a user namespace on this host.")
+def sandbox_probe() -> None:
+    """Standalone bwrap probe.
+
+    Exposes the same probe the daemon runs at startup, as a one-shot
+    command suitable for invocation from the .deb postinst or by an
+    operator debugging a sandbox failure. Exits 0 on success, 1 on
+    failure (with the probe reason on stderr).
+    """
+    result = probe_bubblewrap()
+    if not result.ok:
+        click.echo(f"bubblewrap probe FAILED: {result.reason}", err=True)
+        sys.exit(1)
+    click.echo("bubblewrap probe OK")
+
+
 @cli.group(help="Manage tenant allow/deny lists.")
 def tenant() -> None:
     pass

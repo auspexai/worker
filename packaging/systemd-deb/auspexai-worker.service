@@ -1,0 +1,47 @@
+; AuspexAI worker — systemd user service unit, .deb install variant.
+;
+; This file is installed at /etc/systemd/user/auspexai-worker.service by
+; the auspexai-worker .deb. Each volunteer user enables it with:
+;
+;   systemctl --user enable --now auspexai-worker.service
+;
+; The pip / uv install variant lives at packaging/systemd/auspexai-worker.service
+; and points at %h/.local/bin/auspexai-worker; this one points at the
+; .deb-installed venv at /opt/auspexai-worker/bin/auspexai-worker.
+;
+; Phase 1 hardening directives mirror the user-install variant; §5.17
+; phasing applies equally to both.
+
+[Unit]
+Description=AuspexAI volunteer worker (Phase 1, .deb install)
+Documentation=https://github.com/auspexai/worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/auspexai-worker/bin/auspexai-worker daemon
+Restart=on-failure
+RestartSec=10
+; Hardening per §5.17 — applied at the daemon (trusted) tier. Phase 1
+; permissive defaults; Phase 2 narrows further via config without
+; altering the unit body.
+PrivateTmp=true
+ProtectHome=read-only
+ProtectSystem=strict
+NoNewPrivileges=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+; Worker writes its state DB and the encrypted-file keystore fallback
+; under XDG_STATE_HOME / XDG_DATA_HOME — both under %h. ProtectHome=
+; read-only would block those writes, so the standard XDG subdirs are
+; explicitly read-write. /opt/auspexai-worker/ is the venv install
+; root and stays read-only.
+ReadWritePaths=%S/auspexai-worker %h/.local/state/auspexai-worker %h/.local/share/auspexai-worker
+
+[Install]
+WantedBy=default.target

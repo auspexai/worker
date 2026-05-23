@@ -1,0 +1,44 @@
+Source: auspexai-worker
+Section: science
+Priority: optional
+Maintainer: AuspexAI Maintainers <contact@auspexai.network>
+Build-Depends:
+ debhelper-compat (= 13),
+ dh-virtualenv (>= 1.2.2),
+ python3.12 | python3.11,
+ python3-venv,
+ python3-dev,
+Standards-Version: 4.6.2
+Homepage: https://auspexai.network
+Vcs-Browser: https://github.com/auspexai/worker
+Vcs-Git: https://github.com/auspexai/worker.git
+Rules-Requires-Root: no
+
+Package: auspexai-worker
+Architecture: any
+Pre-Depends: dpkg (>= 1.16.1), python3.12 | python3.11
+Depends:
+ ${misc:Depends},
+ ${shlibs:Depends},
+ bubblewrap (>= 0.6.0),
+ libsystemd0,
+ libsecret-1-0,
+Recommends:
+ apparmor,
+Description: Volunteer worker daemon for the AuspexAI distributed compute network
+ The AuspexAI Worker runs on volunteer machines, executes work units
+ dispatched by the coordinator, and donates compute to AI safety research.
+ .
+ Phase 1 lab-grade release: Linux x86_64 + ARM64 only; Ubuntu 24.04+ /
+ Debian 12+ supported. macOS / WSL2 packaging arrives in Phase 2.
+ .
+ Installs a self-contained Python virtualenv at /opt/auspexai-worker/,
+ a system-wide systemd user-unit template at /etc/systemd/user/, and an
+ AppArmor profile granting the runner subprocess unprivileged
+ user-namespace creation (the Phase 2 durable Q-W10 fix). After install,
+ each volunteer user runs:
+ .
+   systemctl --user enable --now auspexai-worker.service
+   auspexai-worker login
+ .
+ to start the daemon and bind their worker to a GitHub identity (T1).

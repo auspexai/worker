@@ -1,0 +1,38 @@
+#!/usr/bin/make -f
+# Build the auspexai-worker .deb via dh-virtualenv.
+#
+# dh-virtualenv builds a self-contained Python venv at
+# debian/auspexai-worker/opt/auspexai-worker/, installs the worker
+# package and its deps from pyproject.toml, then dh packages it as a
+# regular .deb. At install time the venv lands at /opt/auspexai-worker/.
+#
+# The systemd unit + AppArmor profile are dropped via the .install
+# file. The postinst handles AppArmor reload + bwrap probe.
+
+export DH_VIRTUALENV_INSTALL_ROOT=/opt
+export PYBUILD_NAME=auspexai-worker
+
+# Pick the highest Python ≥3.11 available on the build host.
+PY := $(shell command -v python3.12 || command -v python3.11)
+
+%:
+	dh $@ --with python-virtualenv
+
+override_dh_virtualenv:
+	dh_virtualenv \
+		--python=$(PY) \
+		--builtin-venv \
+		--upgrade-pip \
+		--preinstall="setuptools" \
+		--preinstall="wheel" \
+		--extras=secret-service
+
+# Skip the (host-side) test suite during .deb build — CI runs it
+# separately and the .deb build runs in an environment that may not
+# match Phase 1's CI matrix (different Python minor, no respx, etc.).
+override_dh_auto_test:
+
+# Skip dh_strip_nondeterminism on Python bytecode — dh-virtualenv
+# already handles reproducibility of the bundled venv, and the
+# extra pass can corrupt .pyc files on some toolchains.
+override_dh_strip_nondeterminism:

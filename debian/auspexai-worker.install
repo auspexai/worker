@@ -1,0 +1,2 @@
+packaging/systemd-deb/auspexai-worker.service etc/systemd/user/
+packaging/apparmor/auspexai-worker etc/apparmor.d/

@@ -22,15 +22,64 @@ What's live:
 - RFC 9421 HTTP Message Signature signer (`ed25519`, covered `@method`+`@path`+`@authority`+`content-digest`, label `sig1`, `created` window enforced by the coordinator). Symmetric to the platform's verifier; wire format verified by an inline oracle in the worker's own test suite.
 - Keystore backends: libsecret (Secret Service) primary; encrypted-file (ChaCha20-Poly1305, key derived from `/etc/machine-id` + UID) fallback for headless hosts and containers.
 - Local SQLite state at `$XDG_STATE_HOME/auspexai-worker/worker.db` with a sequential migration framework matching the coordinator's convention. Re-entrant transaction lock so the two daemon threads can write concurrently without colliding on `BEGIN`.
-- `systemd --user` service unit template at `packaging/systemd/auspexai-worker.service` with Phase 1 hardening (`PrivateTmp`, `ProtectHome=read-only`, `ProtectSystem=strict`, `NoNewPrivileges`, `SystemCallFilter=@system-service`). ExecStart runs the daemon.
+- `systemd --user` service unit templates with Phase 1 hardening (`PrivateTmp`, `ProtectHome=read-only`, `ProtectSystem=strict`, `NoNewPrivileges`, `SystemCallFilter=@system-service`). Two variants ship: `packaging/systemd/auspexai-worker.service` for pip/uv installs (ExecStart=`%h/.local/bin/auspexai-worker`); `packaging/systemd-deb/auspexai-worker.service` for `.deb` installs (ExecStart=`/opt/auspexai-worker/bin/auspexai-worker`, installed by the `.deb` to `/etc/systemd/user/auspexai-worker.service`).
 - 157 tests on Python 3.11 + 3.12; ruff check + format-check clean.
 
 Subsequent milestones (per design doc §14):
 - **M5** ✅ Receipts store on `submitted_results` + `receipts list/show` + `log` CLI (SQLite-as-canonical-store per 2026-05-22 design update).
 - **M6** ✅ T1 upgrade via OAuth Device Flow (`auspexai-worker login`) + `withdraw` flow (`auspexai-worker withdraw`).
-- **M7** — Cosign-signed `.deb` + source tarball as GitHub release artifacts.
+- **M7** ✅ SHIPPED 2026-05-23 — Cosign-signed `.deb` + source tarball + wheel as GitHub release artifacts. `dh-virtualenv`-built `/opt/auspexai-worker/` venv; system-installed user-unit at `/etc/systemd/user/`; AppArmor profile confining the daemon with a `cx -> bwrap_sandbox` child profile that grants `userns,` scoped to bwrap-as-child-of-the-daemon (Q-W10 Phase 2 durable fix); postinst probes the sandbox as `nobody` before declaring install successful. Release pipeline at `.github/workflows/release.yml` signs via Sigstore keyless GitHub Actions OIDC (no manual cosign step per release). See `AUTHORIZED_SIGNERS.md` for the trust roster.
 
 Full design rationale: `Documentation/AuspexAI/v0.1.0/worker_daemon_design.md` (ratified into principles doc §5.19 on 2026-05-20).
+
+## Install
+
+Phase 1 supported target: **Ubuntu 24.04+ / Debian 12+, x86_64**. ARM64 + Ubuntu 22.04 land in Phase 2.
+
+### Via `.deb` release artifact (recommended)
+
+Download the `.deb` and its Cosign signature/cert from the [latest release](https://github.com/auspexai/worker/releases/latest). **Verify before installing** (the signature anchors at the Maintainer's GitHub OIDC identity via Sigstore — no long-lived signing key to compromise):
+
+```bash
+# One-time: install cosign if you don't already have it
+# (https://docs.sigstore.dev/cosign/installation)
+
+# Verify the .deb
+cosign verify-blob \
+  --certificate-identity-regexp='^https://github\.com/auspexai/.+/\.github/workflows/.+@.+$' \
+  --certificate-oidc-issuer='https://token.actions.githubusercontent.com' \
+  --signature auspexai-worker_<version>_amd64.deb.sig \
+  --certificate auspexai-worker_<version>_amd64.deb.cert \
+  auspexai-worker_<version>_amd64.deb
+
+# Install
+sudo apt install ./auspexai-worker_<version>_amd64.deb
+```
+
+The postinst will reload the AppArmor profile and probe the sandbox as user `nobody`. If the probe fails, the install fails with an actionable error pointing at either the sysctl bridge (`kernel.apparmor_restrict_unprivileged_userns=0` for lab use) or the AppArmor profile path (durable fix on Ubuntu 24.04+).
+
+After install, **each volunteer user runs (as themselves, not root):**
+
+```bash
+systemctl --user enable --now auspexai-worker.service
+auspexai-worker status       # confirms enrollment (T0 anonymous)
+auspexai-worker login        # binds to GitHub identity (T1)
+```
+
+Tail the daemon: `journalctl --user -u auspexai-worker -f`.
+
+### Trust roster
+
+The list of identities authorized to sign release artifacts and contribution receipts lives at [`auspexai/.github/security/AUTHORIZED_SIGNERS.md`](https://github.com/auspexai/.github/blob/main/security/AUTHORIZED_SIGNERS.md). Verifiers should match the cosign `--certificate-identity-regexp` against the entries in that file.
+
+### Build the `.deb` from source
+
+```bash
+packaging/build-deb.sh            # builds in a podman/docker Ubuntu 24.04 container
+packaging/build-deb.sh --test     # also install-tests in a second clean container
+```
+
+Outputs land at `/tmp/auspexai-deb-build/auspexai-worker_<version>_amd64.deb`.
 
 ## Scope
 
