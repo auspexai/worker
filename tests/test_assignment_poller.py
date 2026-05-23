@@ -261,3 +261,92 @@ class TestPollerErrorResilience:
         assert stats.polls_attempted == 2
         assert stats.polls_failed == 1
         assert stats.polls_succeeded == 1
+
+
+class TestPollerQuarantineHandling:
+    """v0.1.3 — graceful handling of maintainer-applied quarantine (HTTP 423).
+
+    Quarantine is NOT an error condition: it's a maintainer-initiated pause
+    that the worker should observe via stats and continue polling. The next
+    tick after `unquarantine` should resume normal operation.
+    """
+
+    _QUARANTINED_AT = "2026-05-23T14:00:00+00:00"
+
+    def _quarantine_response(self) -> httpx.Response:
+        return httpx.Response(
+            423,
+            json={
+                "detail": {
+                    "error": {
+                        "code": "worker_quarantined",
+                        "message": "this worker is quarantined; contact the operator",
+                        "details": {"quarantined_at": self._QUARANTINED_AT},
+                    }
+                }
+            },
+        )
+
+    def test_quarantine_increments_polls_quarantined_and_records_timestamp(
+        self, db: Database
+    ) -> None:
+        responses = [self._quarantine_response()]
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return responses.pop(0)
+
+        poller, client = _make_poller(db, handler)
+        try:
+            stats = poller.run(max_polls=1)
+        finally:
+            client.close()
+        assert stats.polls_attempted == 1
+        assert stats.polls_quarantined == 1
+        assert stats.polls_succeeded == 0
+        assert stats.polls_failed == 0
+        assert stats.quarantined_at == self._QUARANTINED_AT
+        # Quarantine is NOT logged into the general error buffer — it's not
+        # an error from the worker's perspective.
+        assert stats.errors == []
+        assert stats.last_error is None
+
+    def test_unquarantine_next_tick_clears_quarantined_at(self, db: Database) -> None:
+        responses = [
+            self._quarantine_response(),  # first poll: quarantined
+            httpx.Response(200, json=_no_work_response()),  # second poll: cleared
+        ]
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return responses.pop(0)
+
+        poller, client = _make_poller(db, handler)
+        try:
+            stats = poller.run(max_polls=2)
+        finally:
+            client.close()
+        assert stats.polls_attempted == 2
+        assert stats.polls_quarantined == 1
+        assert stats.polls_succeeded == 1
+        # quarantined_at is cleared on next successful poll.
+        assert stats.quarantined_at is None
+
+    def test_quarantine_does_not_kill_loop(self, db: Database) -> None:
+        # Three quarantine responses in a row — the poller should keep
+        # going, accumulate the count, and not bail.
+        responses = [
+            self._quarantine_response(),
+            self._quarantine_response(),
+            self._quarantine_response(),
+        ]
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return responses.pop(0)
+
+        poller, client = _make_poller(db, handler)
+        try:
+            stats = poller.run(max_polls=3)
+        finally:
+            client.close()
+        assert stats.polls_attempted == 3
+        assert stats.polls_quarantined == 3
+        assert stats.quarantined_at == self._QUARANTINED_AT

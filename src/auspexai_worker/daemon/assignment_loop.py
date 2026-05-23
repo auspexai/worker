@@ -27,6 +27,7 @@ from auspexai_worker.coordinator import (
     AssignmentResponse,
     CoordinatorClient,
     CoordinatorError,
+    WorkerQuarantinedError,
 )
 from auspexai_worker.daemon.dispatch import (
     DispatchOutcome,
@@ -48,6 +49,7 @@ class AssignmentStats:
     polls_attempted: int = 0
     polls_succeeded: int = 0
     polls_failed: int = 0
+    polls_quarantined: int = 0  # 423 worker_quarantined responses (maintainer pause)
     units_accepted: int = 0
     units_refused: int = 0
     units_submitted: int = 0  # M4: dispatched + run + submitted ok
@@ -55,6 +57,7 @@ class AssignmentStats:
     no_work_polls: int = 0
     refuse_calls_succeeded: int = 0
     refuse_calls_failed: int = 0
+    quarantined_at: str | None = None  # ISO timestamp from coord's 423 details
     last_error: str | None = None
     errors: list[str] = field(default_factory=list)
 
@@ -158,6 +161,22 @@ class AssignmentPoller:
         try:
             response = self._coordinator.get_assignment(worker_id=self._worker_id)
             self._stats.polls_succeeded += 1
+            # Clear any prior quarantine state — we got an actual 200, which
+            # means the maintainer has lifted the quarantine.
+            self._stats.quarantined_at = None
+        except WorkerQuarantinedError as exc:
+            # Maintainer-applied pause. Not an error condition — log at INFO
+            # and let the next tick try again. The quarantined_at timestamp
+            # surfaces to the operator via stats for diagnostic purposes.
+            self._stats.polls_quarantined += 1
+            self._stats.quarantined_at = exc.quarantined_at
+            logger.info(
+                "assignment poll: worker quarantined by maintainer at %s; "
+                "will retry next tick (poll=%d)",
+                exc.quarantined_at or "<unknown>",
+                self._stats.polls_attempted,
+            )
+            return
         except CoordinatorError as exc:
             self._stats.polls_failed += 1
             self._stats.last_error = str(exc)

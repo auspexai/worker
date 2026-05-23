@@ -28,6 +28,7 @@ from .client import (
     WorkerIdMismatchError,
     WorkerNotFoundError,
     WorkerPubkeyMismatchError,
+    WorkerQuarantinedError,
     WorkerStatusResponse,
     WorkUnitEnvelope,
 )
@@ -56,5 +57,6 @@ __all__ = [
     "WorkerIdMismatchError",
     "WorkerNotFoundError",
     "WorkerPubkeyMismatchError",
+    "WorkerQuarantinedError",
     "WorkerStatusResponse",
 ]

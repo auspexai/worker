@@ -1,3 +1,27 @@
+auspexai-worker (0.1.3) UNRELEASED; urgency=medium
+
+  * Graceful handling of HTTP 423 worker_quarantined (B3 follow-on)
+    - New WorkerQuarantinedError exception subclass on
+      auspexai_worker.coordinator. Raised by CoordinatorClient.
+      get_assignment when the coordinator returns 423 (maintainer-
+      applied pause). Carries the `quarantined_at` timestamp from
+      the coordinator's error details.
+    - AssignmentPoller catches it BEFORE the generic CoordinatorError
+      branch and logs at INFO ("worker quarantined by maintainer at
+      <ts>; will retry next tick") instead of WARNING. Quarantine is
+      not an error condition — it's a maintainer-initiated state.
+    - AssignmentStats gains polls_quarantined counter and
+      quarantined_at timestamp. quarantined_at clears automatically
+      on the first successful (200) poll after unquarantine.
+    - The poller continues polling at normal cadence. No backoff
+      added in v0.1.3; can revisit if the maintenance load becomes
+      visible.
+    - 3 new tests in test_assignment_poller.py covering: quarantine
+      increments + records timestamp, unquarantine clears state,
+      repeated quarantine doesn't kill the loop.
+
+ -- AuspexAI Maintainers <contact@auspexai.network>  Sat, 23 May 2026 15:00:00 +0000
+
 auspexai-worker (0.1.2) UNRELEASED; urgency=medium
 
   * Flip compile-time coordinator URL default to the public coord

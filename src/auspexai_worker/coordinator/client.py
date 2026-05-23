@@ -48,6 +48,20 @@ class WorkerNotFoundError(CoordinatorError):
     """404 worker_not_found — the worker has been retired or never existed."""
 
 
+class WorkerQuarantinedError(CoordinatorError):
+    """423 worker_quarantined — the maintainer has paused this worker.
+
+    Reversible: the maintainer can unquarantine, after which assignment
+    fetches resume normally. Carries the quarantined_at timestamp the
+    coordinator includes in the error details — useful for the worker
+    to log when the pause started (operator-secret reason text is NOT
+    included; that surface is operator-only)."""
+
+    def __init__(self, message: str, *, quarantined_at: str | None = None) -> None:
+        super().__init__(message)
+        self.quarantined_at = quarantined_at
+
+
 class AssignmentNotFoundError(CoordinatorError):
     """404 assignment_not_found — no assignment exists for this (unit, worker)."""
 
@@ -346,6 +360,18 @@ class CoordinatorClient:
             raise UnauthorizedError(_error_message(response))
         if response.status_code == 404:
             raise WorkerNotFoundError(_error_message(response))
+        if response.status_code == 423:
+            # Maintainer-applied pause. Extract quarantined_at from the
+            # error details if present so the caller can surface it.
+            try:
+                details = response.json().get("detail", {}).get("error", {}).get("details", {})
+                quarantined_at = details.get("quarantined_at")
+            except (ValueError, AttributeError):
+                quarantined_at = None
+            raise WorkerQuarantinedError(
+                _error_message(response),
+                quarantined_at=quarantined_at,
+            )
         raise CoordinatorError(
             f"get_assignment: unexpected status {response.status_code}: {response.text[:500]}"
         )
