@@ -1,0 +1,2 @@
+opt/auspexai-worker/bin/auspexai-worker usr/local/bin/auspexai-worker
+opt/auspexai-worker/bin/auspexai-worker-runner usr/local/bin/auspexai-worker-runner

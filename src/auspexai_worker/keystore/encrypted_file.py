@@ -42,8 +42,12 @@ def _read_machine_id() -> str:
     """Read the host's machine-id. Linux only.
 
     Raises:
-        KeystoreError: if neither standard path is present (extremely rare —
-            even minimal containers ship one).
+        KeystoreError: if neither standard path is present. Real Ubuntu /
+            Debian hosts always have one (created at first boot via
+            systemd-machine-id-setup). The failure surfaces on minimal
+            containers built without systemd ever running, and on some
+            stripped embedded distributions. The error message includes
+            the standard remediation.
     """
     for path in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
         try:
@@ -53,8 +57,20 @@ def _read_machine_id() -> str:
         if content:
             return content
     raise KeystoreError(
-        "no machine-id found at /etc/machine-id or /var/lib/dbus/machine-id; "
-        "cannot derive EncryptedFileKeystore key on this host"
+        "no machine-id found at /etc/machine-id or /var/lib/dbus/machine-id "
+        "(both empty or missing). Real Ubuntu / Debian hosts always have one "
+        "— this typically surfaces only on minimal containers / dev images "
+        "where systemd-machine-id-setup hasn't run.\n"
+        "\n"
+        "Fix (run once, as root):\n"
+        "    sudo systemd-machine-id-setup\n"
+        "  OR\n"
+        "    cat /proc/sys/kernel/random/uuid | tr -d - | sudo tee /etc/machine-id\n"
+        "\n"
+        "The machine-id is the host-specific entropy that protects the "
+        "encrypted-file keystore from being usable on a different host; "
+        "we don't fall back to a non-host-specific value because that "
+        "would invalidate the security property."
     )
 
 

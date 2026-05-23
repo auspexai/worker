@@ -64,6 +64,13 @@ class WorkerConfig:
     # Maximum wall-clock seconds a runner subprocess can take. None = no
     # timeout (Phase 1 synthetic-tenant work is bounded by trivial logic).
     runner_timeout_seconds: float | None = None
+    # [dashboard] — Phase 2 §5.14 "Layer B" local volunteer-transparency
+    # surface. Default-on, localhost-only. Disable with
+    # `[dashboard] enabled = false` if the volunteer doesn't want the
+    # local HTTP server running.
+    dashboard_enabled: bool = True
+    dashboard_host: str = "127.0.0.1"
+    dashboard_port: int = 7799
 
     @property
     def state_db_path(self) -> Path:
@@ -115,6 +122,9 @@ class WorkerConfig:
             "declared_gpu_amd_model": None,
             "sandbox_use_bubblewrap": True,
             "runner_timeout_seconds": None,
+            "dashboard_enabled": True,
+            "dashboard_host": "127.0.0.1",
+            "dashboard_port": 7799,
         }
 
         if config_path is not None:
@@ -168,6 +178,13 @@ class WorkerConfig:
                 merged["sandbox_use_bubblewrap"] = sandbox_block["use_bubblewrap"]
             if "runner_timeout_seconds" in sandbox_block:
                 merged["runner_timeout_seconds"] = sandbox_block["runner_timeout_seconds"]
+            dashboard_block = data.get("dashboard") or {}
+            if "enabled" in dashboard_block:
+                merged["dashboard_enabled"] = dashboard_block["enabled"]
+            if "host" in dashboard_block:
+                merged["dashboard_host"] = dashboard_block["host"]
+            if "port" in dashboard_block:
+                merged["dashboard_port"] = dashboard_block["port"]
             # [tenants], [models], [telemetry] are reserved for later
             # milestones; tolerated here without consumption.
 
@@ -180,6 +197,13 @@ class WorkerConfig:
             merged["data_dir"] = env["AUSPEXAI_WORKER_DATA_DIR"]
         if "AUSPEXAI_WORKER_KEYSTORE_BACKEND" in env:
             merged["keystore_backend"] = env["AUSPEXAI_WORKER_KEYSTORE_BACKEND"] or None
+        if "AUSPEXAI_WORKER_DASHBOARD_ENABLED" in env:
+            merged["dashboard_enabled"] = env["AUSPEXAI_WORKER_DASHBOARD_ENABLED"].lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
 
         return cls(
             coordinator_url=str(merged["coordinator_url"]).rstrip("/"),
@@ -203,6 +227,9 @@ class WorkerConfig:
             ),
             sandbox_use_bubblewrap=bool(merged.get("sandbox_use_bubblewrap", True)),
             runner_timeout_seconds=_opt_float(merged.get("runner_timeout_seconds")),
+            dashboard_enabled=bool(merged.get("dashboard_enabled", True)),
+            dashboard_host=str(merged.get("dashboard_host", "127.0.0.1")),
+            dashboard_port=int(merged.get("dashboard_port", 7799)),
         )
 
 

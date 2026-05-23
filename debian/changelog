@@ -1,3 +1,42 @@
+auspexai-worker (0.1.4) UNRELEASED; urgency=medium
+
+  * Local volunteer dashboard (§5.14 Layer B; closes the deferred
+    Phase 2 "local volunteer dashboard" deliverable)
+    - New module auspexai_worker/dashboard/ with FastAPI app + uvicorn
+      server thread. Runs as a third daemon thread alongside heartbeat
+      + assignment-poll loops. Localhost-only bind by default
+      (127.0.0.1:7799); configurable via [dashboard] block in
+      worker.toml or AUSPEXAI_WORKER_DASHBOARD_ENABLED env.
+    - Four read-only HTML pages: Overview (identity + activity
+      counters), Activity (last 50 assignment_audit rows), Receipts
+      (last 50 submitted_results with status badges), Config
+      (loaded WorkerConfig values).
+    - Plus /api/stats JSON endpoint for future polling refresh.
+    - Read-only by design — withdrawal, tier upgrades, etc. remain
+      CLI-only (irreversible / sensitive operations stay where the
+      volunteer must explicitly run them).
+    - Server-rendered HTML, vanilla CSS, no JS framework, no build
+      step. Adds fastapi + uvicorn to runtime deps.
+    - Skipped on bounded --max-ticks runs (CI/test mode).
+    - 9 new tests in test_dashboard.py.
+  * Issue #1: /usr/local/bin/auspexai-worker symlink so the CLI is on
+    $PATH for volunteer users after .deb install. Previously the
+    binary lived only at /opt/auspexai-worker/bin/; the systemd unit
+    used the absolute path so the daemon worked but volunteers
+    running `auspexai-worker status` per the README hit "command not
+    found". debian/auspexai-worker.links covers both auspexai-worker
+    and auspexai-worker-runner.
+  * Issue #2: friendly error when /etc/machine-id missing. The
+    encrypted-file keystore needs machine-id (host-specific entropy
+    that protects the key from being usable on a different host).
+    Real Ubuntu/Debian hosts always have one; minimal containers /
+    embedded systems do not. The error now includes the standard
+    remediation (sudo systemd-machine-id-setup or kernel-random-uuid
+    one-liner). Caught in CLI bootstrap to surface as a clean error
+    instead of a KeystoreError traceback.
+
+ -- AuspexAI Maintainers <contact@auspexai.network>  Sat, 23 May 2026 16:00:00 +0000
+
 auspexai-worker (0.1.3) UNRELEASED; urgency=medium
 
   * Graceful handling of HTTP 423 worker_quarantined (B3 follow-on)

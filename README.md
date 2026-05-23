@@ -68,6 +68,24 @@ auspexai-worker login        # binds to GitHub identity (T1)
 
 Tail the daemon: `journalctl --user -u auspexai-worker -f`.
 
+Open the local dashboard in a browser (since v0.1.4):
+
+```
+http://localhost:7799
+```
+
+Read-only view of your worker's identity, activity log, receipts, and loaded config. Localhost-only by design — bound to `127.0.0.1` and never exposed externally. Disable with `[dashboard] enabled = false` in `~/.config/auspexai-worker/worker.toml` or `AUSPEXAI_WORKER_DASHBOARD_ENABLED=0` if you'd rather not have the local HTTP server running.
+
+### Container / minimal host caveat
+
+The encrypted-file keystore needs `/etc/machine-id` for host-specific entropy. Real Ubuntu / Debian / Fedora hosts always have one; minimal containers or stripped embedded images may not. If `auspexai-worker bootstrap` complains, seed it once:
+
+```bash
+sudo systemd-machine-id-setup
+# or, if that's not available:
+cat /proc/sys/kernel/random/uuid | tr -d - | sudo tee /etc/machine-id
+```
+
 ### Trust roster
 
 The list of identities authorized to sign release artifacts and contribution receipts lives at [`auspexai/.github/security/AUTHORIZED_SIGNERS.md`](https://github.com/auspexai/.github/blob/main/security/AUTHORIZED_SIGNERS.md). Verifiers should match the cosign `--certificate-identity-regexp` against the entries in that file.

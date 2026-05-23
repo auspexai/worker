@@ -37,6 +37,7 @@ from .coordinator import (
 )
 from .daemon import AssignmentPoller, HeartbeatLoop
 from .daemon.dispatch import RunnerDispatcher
+from .keystore import KeystoreError
 from .oauth import (
     AccessDeniedError,
     DeviceCode,
@@ -102,6 +103,12 @@ def bootstrap(ctx: click.Context) -> None:
     config: WorkerConfig = ctx.obj["config"]
     try:
         result = bootstrap_worker(config)
+    except KeystoreError as exc:
+        # The encrypted-file keystore needs /etc/machine-id. Surface the
+        # rich error message verbatim (it includes remediation) rather
+        # than letting it surface as a Python traceback.
+        click.echo(f"ERROR: keystore initialization failed:\n\n{exc}", err=True)
+        sys.exit(2)
     except PubkeyAlreadyTenantError as exc:
         click.echo(
             "ERROR: this worker's public key collides with a registered tenant maintainer.\n"
@@ -267,10 +274,28 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
             dispatcher=dispatcher,
         )
 
+        # Dashboard server — third thread alongside heartbeat + poller.
+        # Localhost-only per §5.14; disabled if config.dashboard_enabled
+        # is false OR if --max-ticks is set (treating bounded runs as
+        # CI/test mode where the HTTP surface adds noise without value).
+        dashboard: DashboardServer | None = None
+        if config.dashboard_enabled and max_ticks is None:
+            from .dashboard import DashboardServer, build_app
+
+            dashboard_app = build_app(db=db, config=config)
+            dashboard = DashboardServer(
+                app=dashboard_app,
+                host=config.dashboard_host,
+                port=config.dashboard_port,
+            )
+            dashboard.start()
+
         def _on_signal(signum: int, _frame: object) -> None:
             click.echo(f"received signal {signum}, shutting down", err=True)
             heartbeat.stop()
             poller.stop()
+            if dashboard is not None:
+                dashboard.stop()
 
         signal.signal(signal.SIGTERM, _on_signal)
         signal.signal(signal.SIGINT, _on_signal)
@@ -291,6 +316,12 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
         poller_thread.start()
         heartbeat_thread.join()
         poller_thread.join()
+
+        # For bounded --max-ticks runs the dashboard wasn't started; for
+        # unbounded runs, stop it after the worker threads exit so the
+        # process doesn't hang on uvicorn's thread.
+        if dashboard is not None:
+            dashboard.stop()
 
         hstats = heartbeat.stats
         pstats = poller.stats
