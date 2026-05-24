@@ -147,6 +147,27 @@ def build_app(*, db: Database, config: WorkerConfig) -> FastAPI:
         ]
         kv = render_kv(rows)
 
+        progress = results_repo.progress_summary()
+        progress_html = f"""    <h2>Progress</h2>
+    <dl class="kv">
+      <dt>work units completed</dt><dd>{progress["completed_units"]}</dd>
+      <dt>distinct experiments</dt><dd>{progress["distinct_experiments"]}</dd>
+    </dl>"""
+
+        upgrade_html = ""
+        if (
+            worker is not None
+            and int(worker.trust_tier) == 0
+            and config.upgrade_prompt_enabled
+            and progress["completed_units"] >= config.upgrade_prompt_threshold
+        ):
+            upgrade_html = (
+                '    <div class="notice">'
+                "You've contributed enough to build a portable track record. "
+                "Run <code>auspexai-worker login</code> to claim your contributions."
+                "</div>\n"
+            )
+
         counts = f"""    <h2>Activity</h2>
     <dl class="kv">
       <dt>receipts earned</dt><dd>{stats["receipts_count"]}</dd>
@@ -155,7 +176,7 @@ def build_app(*, db: Database, config: WorkerConfig) -> FastAPI:
       <dt>tenant allow / deny</dt><dd>{stats["tenant_allow_count"]} / {stats["tenant_deny_count"]}</dd>
     </dl>"""
 
-        body = "    <h2>Identity</h2>\n" + kv + "\n" + counts
+        body = "    <h2>Identity</h2>\n" + kv + "\n" + upgrade_html + progress_html + "\n" + counts
         return render_page(title="Overview", body=body, active_nav="/")
 
     @app.get("/activity", response_class=HTMLResponse)

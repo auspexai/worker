@@ -477,6 +477,20 @@ class SubmittedResultRepository:
         ).fetchall()
         return [_row_to_submitted_result(r) for r in rows]
 
+    def progress_summary(self) -> dict[str, int]:
+        """Count completed units and distinct experiments for T0 progress signal."""
+        row = self._db.connection.execute(
+            "SELECT COUNT(*) AS total, "
+            "COUNT(DISTINCT aa.coordinator_experiment_id) AS experiments "
+            "FROM submitted_results sr "
+            "LEFT JOIN assignment_audit aa ON sr.unit_id = aa.unit_id "
+            "  AND aa.action = 'assignment.accepted'",
+        ).fetchone()
+        return {
+            "completed_units": row["total"] if row else 0,
+            "distinct_experiments": row["experiments"] if row else 0,
+        }
+
     def set_canonical(
         self,
         *,

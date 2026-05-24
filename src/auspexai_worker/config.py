@@ -71,6 +71,8 @@ class WorkerConfig:
     dashboard_enabled: bool = True
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = 7799
+    upgrade_prompt_enabled: bool = True
+    upgrade_prompt_threshold: int = 10
 
     @property
     def state_db_path(self) -> Path:
@@ -125,6 +127,8 @@ class WorkerConfig:
             "dashboard_enabled": True,
             "dashboard_host": "127.0.0.1",
             "dashboard_port": 7799,
+            "upgrade_prompt_enabled": True,
+            "upgrade_prompt_threshold": 10,
         }
 
         if config_path is not None:
@@ -185,6 +189,12 @@ class WorkerConfig:
                 merged["dashboard_host"] = dashboard_block["host"]
             if "port" in dashboard_block:
                 merged["dashboard_port"] = dashboard_block["port"]
+
+            upgrade_block = data.get("upgrade_prompt") or {}
+            if "enabled" in upgrade_block:
+                merged["upgrade_prompt_enabled"] = upgrade_block["enabled"]
+            if "threshold" in upgrade_block:
+                merged["upgrade_prompt_threshold"] = upgrade_block["threshold"]
             # [tenants], [models], [telemetry] are reserved for later
             # milestones; tolerated here without consumption.
 
@@ -230,6 +240,8 @@ class WorkerConfig:
             dashboard_enabled=bool(merged.get("dashboard_enabled", True)),
             dashboard_host=str(merged.get("dashboard_host", "127.0.0.1")),
             dashboard_port=int(merged.get("dashboard_port", 7799)),
+            upgrade_prompt_enabled=bool(merged.get("upgrade_prompt_enabled", True)),
+            upgrade_prompt_threshold=int(merged.get("upgrade_prompt_threshold", 10)),
         )
 
 

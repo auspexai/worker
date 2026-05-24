@@ -12,7 +12,7 @@ import logging
 import signal
 import sys
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import click
@@ -72,13 +72,17 @@ def cli(ctx: click.Context, config_path: Path | None) -> None:
     ctx.obj["config"] = WorkerConfig.load(config_path=config_path)
 
 
-@cli.command(help="Show worker identity, tier, and configured coordinator URL.")
+@cli.command(help="Show worker identity, tier, progress, and configured coordinator URL.")
 @click.pass_context
 def status(ctx: click.Context) -> None:
     config: WorkerConfig = ctx.obj["config"]
     db, repo = initialize_state(config)
     try:
         worker = repo.get()
+        if worker is not None:
+            progress = SubmittedResultRepository(db).progress_summary()
+        else:
+            progress = {"completed_units": 0, "distinct_experiments": 0}
     finally:
         db.close()
 
@@ -95,6 +99,20 @@ def status(ctx: click.Context) -> None:
     click.echo(f"enrolled-at: {worker.enrolled_at.isoformat()}")
     if worker.last_heartbeat_at is not None:
         click.echo(f"last-beat:   {worker.last_heartbeat_at.isoformat()}")
+    click.echo(
+        f"progress:    {progress['completed_units']} units completed "
+        f"across {progress['distinct_experiments']} experiments"
+    )
+    if (
+        worker.trust_tier == 0
+        and config.upgrade_prompt_enabled
+        and progress["completed_units"] >= config.upgrade_prompt_threshold
+    ):
+        click.echo("")
+        click.echo(
+            "You've contributed enough to build a portable track record. "
+            "Run `auspexai-worker login` to claim your contributions."
+        )
 
 
 @cli.command(help="Generate identity and enroll with the coordinator (T0 anonymous).")
@@ -700,6 +718,71 @@ def receipts_show(ctx: click.Context, identifier: str) -> None:
             click.echo(json.dumps(payload, indent=2, sort_keys=True))
         except json.JSONDecodeError:
             click.echo(match.payload_json)
+    finally:
+        db.close()
+
+
+@receipts.command(
+    "export",
+    help="Export all receipts as a JSON archive. T0 placeholder receipts are "
+    "local attestations — not coordinator-signed portable credentials.",
+)
+@click.option(
+    "--output",
+    "-o",
+    "output_path",
+    type=click.Path(),
+    default=None,
+    help="Write to file instead of stdout.",
+)
+@click.pass_context
+def receipts_export(ctx: click.Context, output_path: str | None) -> None:
+    config: WorkerConfig = ctx.obj["config"]
+    db, repo = initialize_state(config)
+    try:
+        worker = repo.get()
+        rows = SubmittedResultRepository(db).list_receipts(limit=100000)
+        if not rows:
+            click.echo("no receipts to export")
+            return
+
+        export = {
+            "auspexai_receipt_export": {
+                "version": 1,
+                "worker_id": worker.worker_id if worker else None,
+                "trust_tier": worker.trust_tier if worker else None,
+                "is_account_linked": worker is not None and worker.trust_tier >= 1,
+                "exported_at": datetime.now(timezone.utc).isoformat(),
+                "note": (
+                    "These are local attestations of work performed. "
+                    "T0 placeholder receipts are not coordinator-signed and are "
+                    "not portable credentials. Login with `auspexai-worker login` "
+                    "to link your contributions to an account."
+                    if (worker is not None and worker.trust_tier == 0)
+                    else "Account-linked receipts. Canonical receipts (receipt_status=canonical) "
+                    "are coordinator-signed and independently verifiable."
+                ),
+            },
+            "receipts": [
+                {
+                    "unit_id": r.unit_id,
+                    "result_id": r.result_id,
+                    "exit_code": r.exit_code,
+                    "completed_at": r.completed_at,
+                    "submitted_at": r.submitted_at.isoformat(),
+                    "receipt_status": r.receipt_status,
+                    "canonical_format": r.canonical_format,
+                }
+                for r in rows
+            ],
+        }
+
+        output_text = json.dumps(export, indent=2)
+        if output_path:
+            Path(output_path).write_text(output_text)
+            click.echo(f"exported {len(rows)} receipts to {output_path}")
+        else:
+            click.echo(output_text)
     finally:
         db.close()
 
