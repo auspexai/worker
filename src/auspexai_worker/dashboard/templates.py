@@ -38,6 +38,8 @@ th { color: #9ca3af; font-weight: 500; }
 .muted { color: #6b7280; }
 code { font-family: ui-monospace, monospace; background: #1a1e2a; padding: 0.1em 0.35em; border-radius: 3px; font-size: 0.85em; }
 .empty { color: #6b7280; font-style: italic; padding: 1em 0; }
+.notice { background: #1e3a5f; border: 1px solid #3b82f6; border-radius: 6px; padding: 0.75em 1em; margin: 1em 0; color: #93c5fd; }
+.notice code { background: #0a0e1a; }
 """
 
 _NAV_ITEMS = [

@@ -55,10 +55,9 @@ def _fmt_relative(when: datetime | None) -> str:
 def _tier_badge(tier: int) -> str:
     names = {
         0: "T0 anonymous",
-        1: "T1 verified",
-        2: "T2 vouched",
-        3: "T3 institutional",
-        4: "T4 maintainer",
+        1: "T1 authenticated",
+        2: "T2 trusted",
+        3: "T3 vetted",
     }
     label = html.escape(names.get(tier, f"T{tier}"))
     return f'<span class="badge tier-{tier}">{label}</span>'
@@ -285,6 +284,18 @@ def build_app(*, db: Database, config: WorkerConfig) -> FastAPI:
             (
                 "runner timeout",
                 f"{config.runner_timeout_seconds}s",
+                False,
+            ),
+            (
+                "dashboard",
+                f"{'enabled' if config.dashboard_enabled else 'disabled'} at "
+                f"{config.dashboard_host}:{config.dashboard_port}",
+                False,
+            ),
+            (
+                "upgrade prompt",
+                f"{'enabled' if config.upgrade_prompt_enabled else 'disabled'}"
+                f" (threshold: {config.upgrade_prompt_threshold} units)",
                 False,
             ),
         ]
