@@ -84,18 +84,75 @@ fetch_release() {
 
 # ── Main ─────────────────────────────────────────────────────────────
 
+do_uninstall() {
+    info "Uninstalling AuspexAI worker …"
+
+    # Stop and disable systemd unit
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl --user stop auspexai-worker.service 2>/dev/null || true
+        systemctl --user disable auspexai-worker.service 2>/dev/null || true
+    fi
+
+    # Withdraw from coordinator if enrolled
+    if [ -x "${INSTALL_PREFIX}/bin/auspexai-worker" ]; then
+        local enrolled
+        enrolled=$("${INSTALL_PREFIX}/bin/auspexai-worker" status 2>&1 | grep -c "worker-id:" || true)
+        if [ "$enrolled" != "0" ]; then
+            printf 'De-enroll from coordinator before removing? [Y/n] '
+            read -r reply </dev/tty
+            case "$reply" in
+                n|N|no|NO) ;;
+                *) "${INSTALL_PREFIX}/bin/auspexai-worker" withdraw --yes 2>/dev/null || warn "withdraw failed; continuing with local removal" ;;
+            esac
+        fi
+    fi
+
+    # Check if installed via deb
+    if dpkg -s auspexai-worker >/dev/null 2>&1; then
+        info "Removing .deb package …"
+        sudo apt remove -y auspexai-worker
+    else
+        # Remove pip-installed artifacts
+        info "Removing ${INSTALL_PREFIX} …"
+        sudo rm -rf "${INSTALL_PREFIX}"
+        sudo rm -f /usr/local/bin/auspexai-worker
+        sudo rm -f "${SYSTEMD_UNIT_DIR}/auspexai-worker.service"
+        sudo rm -f "${APPARMOR_DIR}/auspexai-worker"
+        if [ -x /sbin/apparmor_parser ]; then
+            sudo apparmor_parser -R "${APPARMOR_DIR}/auspexai-worker" 2>/dev/null || true
+        fi
+    fi
+
+    # Reload systemd
+    if command -v systemctl >/dev/null 2>&1; then
+        sudo systemctl daemon-reload 2>/dev/null || true
+    fi
+
+    info "Uninstalled."
+    echo ""
+    echo "Local state at ~/.local/state/auspexai-worker/ was NOT removed."
+    echo "To remove it: rm -rf ~/.local/state/auspexai-worker ~/.local/share/auspexai-worker"
+}
+
 main() {
     local requested_version=""
 
     while [ $# -gt 0 ]; do
         case "$1" in
             --version) requested_version="$2"; shift 2 ;;
+            --uninstall)
+                do_uninstall
+                exit 0
+                ;;
             --help|-h)
-                echo "Usage: install.sh [--version VERSION]"
+                echo "Usage: install.sh [--version VERSION] [--uninstall]"
                 echo ""
                 echo "Installs the AuspexAI worker from the latest GitHub release."
                 echo "If a .deb exists for this architecture, it is preferred."
                 echo "Otherwise, a pip-based install into /opt/auspexai-worker/ is used."
+                echo ""
+                echo "  --uninstall   Stop, de-enroll, and remove the worker"
+                echo "  --version V   Install a specific version instead of latest"
                 exit 0
                 ;;
             *) fail "unknown option: $1" ;;
