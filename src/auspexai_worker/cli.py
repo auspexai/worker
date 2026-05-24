@@ -115,16 +115,36 @@ def status(ctx: click.Context) -> None:
         )
 
 
+def _enable_and_start_service() -> None:
+    """Enable and start the systemd user service."""
+    import shutil
+    import subprocess
+
+    systemctl = shutil.which("systemctl")
+    if not systemctl:
+        click.echo("systemctl not found; enable the service manually.")
+        return
+
+    click.echo("enabling auspexai-worker.service …")
+    r = subprocess.run(
+        [systemctl, "--user", "enable", "--now", "auspexai-worker.service"],
+        capture_output=True, text=True,
+    )
+    if r.returncode == 0:
+        click.echo("service started.")
+    else:
+        click.echo(f"service start failed: {r.stderr.strip()}", err=True)
+        click.echo("try manually: systemctl --user enable --now auspexai-worker.service")
+
+
 @cli.command(help="Generate identity and enroll with the coordinator (T0 anonymous).")
+@click.option("--start", is_flag=True, help="Enable and start the systemd user service after enrollment.")
 @click.pass_context
-def bootstrap(ctx: click.Context) -> None:
+def bootstrap(ctx: click.Context, start: bool) -> None:
     config: WorkerConfig = ctx.obj["config"]
     try:
         result = bootstrap_worker(config)
     except KeystoreError as exc:
-        # The encrypted-file keystore needs /etc/machine-id. Surface the
-        # rich error message verbatim (it includes remediation) rather
-        # than letting it surface as a Python traceback.
         click.echo(f"ERROR: keystore initialization failed:\n\n{exc}", err=True)
         sys.exit(2)
     except PubkeyAlreadyTenantError as exc:
@@ -154,6 +174,9 @@ def bootstrap(ctx: click.Context) -> None:
         click.echo(f"pubkey:   {worker.pubkey_hex}")
     else:
         click.echo(f"already enrolled: {worker.worker_id} (T{worker.trust_tier})")
+
+    if start:
+        _enable_and_start_service()
 
 
 @cli.command(help="Run the worker daemon (heartbeat loop).")
