@@ -112,7 +112,7 @@ main() {
         current=$("${INSTALL_PREFIX}/bin/auspexai-worker" --version 2>/dev/null || echo "unknown")
         warn "existing install detected at ${INSTALL_PREFIX} (${current})"
         printf '    Continue and upgrade? [y/N] '
-        read -r reply
+        read -r reply </dev/tty
         case "$reply" in
             y|Y|yes|YES) ;;
             *) echo "Aborted."; exit 0 ;;
@@ -350,7 +350,7 @@ APPARMOR
         if [ "$enrolled" = "0" ]; then
             echo ""
             printf 'Bootstrap now? This generates a keypair and enrolls with the coordinator. [Y/n] '
-            read -r reply
+            read -r reply </dev/tty
             case "$reply" in
                 n|N|no|NO) ;;
                 *)
@@ -362,7 +362,7 @@ APPARMOR
             info "Already enrolled — skipping bootstrap"
             echo ""
             printf 'Start the service now? [Y/n] '
-            read -r reply
+            read -r reply </dev/tty
             case "$reply" in
                 n|N|no|NO) ;;
                 *)
