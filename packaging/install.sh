@@ -412,7 +412,10 @@ APPARMOR
                 n|N|no|NO) ;;
                 *)
                     info "Bootstrapping …"
-                    "${INSTALL_PREFIX}/bin/auspexai-worker" bootstrap --start
+                    "${INSTALL_PREFIX}/bin/auspexai-worker" bootstrap
+                    info "Starting service …"
+                    systemctl --user enable --now auspexai-worker.service 2>/dev/null \
+                        || warn "could not start service; try: systemctl --user enable --now auspexai-worker.service"
                     ;;
             esac
         else
