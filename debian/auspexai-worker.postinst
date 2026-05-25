@@ -21,8 +21,10 @@ WORKER_BIN=/opt/auspexai-worker/bin/auspexai-worker
 
 case "$1" in
     configure)
-        # 1. Reload AppArmor profile if AppArmor is active on this host.
-        if [ -x /sbin/apparmor_parser ] && [ -d /etc/apparmor.d ] && [ -f "$PROFILE" ]; then
+        # 1. Reload AppArmor profile if AppArmor is enabled at kernel level.
+        if [ -x /sbin/apparmor_parser ] && [ -d /etc/apparmor.d ] && [ -f "$PROFILE" ] && \
+           [ -f /sys/module/apparmor/parameters/enabled ] && \
+           [ "$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null)" = "Y" ]; then
             if /sbin/apparmor_parser -r -W "$PROFILE" >/dev/null 2>&1; then
                 echo "auspexai-worker: AppArmor profile installed and reloaded."
             else

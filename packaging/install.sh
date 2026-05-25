@@ -118,7 +118,8 @@ do_uninstall() {
         sudo rm -f /usr/local/bin/auspexai-worker
         sudo rm -f "${SYSTEMD_UNIT_DIR}/auspexai-worker.service"
         sudo rm -f "${APPARMOR_DIR}/auspexai-worker"
-        if [ -x /sbin/apparmor_parser ]; then
+        if [ -x /sbin/apparmor_parser ] && [ -f /sys/module/apparmor/parameters/enabled ] && \
+           [ "$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null)" = "Y" ]; then
             sudo apparmor_parser -R "${APPARMOR_DIR}/auspexai-worker" 2>/dev/null || true
         fi
     fi
@@ -285,8 +286,10 @@ NoNewPrivileges=true
 WantedBy=default.target
 UNIT
 
-        # Install AppArmor profile if AppArmor is active
-        if [ -x /sbin/apparmor_parser ] && [ -d "${APPARMOR_DIR}" ]; then
+        # Install AppArmor profile if AppArmor is enabled at kernel level
+        if [ -x /sbin/apparmor_parser ] && [ -d "${APPARMOR_DIR}" ] && \
+           [ -f /sys/module/apparmor/parameters/enabled ] && \
+           [ "$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null)" = "Y" ]; then
             info "Installing AppArmor profile …"
             sudo tee "${APPARMOR_DIR}/auspexai-worker" >/dev/null <<'APPARMOR'
 abi <abi/4.0>,
