@@ -1,0 +1,10 @@
+name = "getworker-installer"
+main = "cloudflare-worker.js"
+compatibility_date = "2024-01-01"
+
+# Disable the default .workers.dev route — only serve via the custom domain.
+workers_dev = false
+
+[[routes]]
+pattern = "getworker.auspexai.network/*"
+zone_name = "auspexai.network"
