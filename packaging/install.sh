@@ -398,7 +398,17 @@ APPARMOR
         echo "    Install it with: sudo apt install bubblewrap"
     fi
 
-    # ── Next steps ───────────────────────────────────────────────────
+    # ── Enable linger so user service survives logout ─────────────
+
+    if command -v loginctl >/dev/null 2>&1; then
+        local current_user
+        current_user=$(id -un)
+        if [ "$(loginctl show-user "$current_user" -p Linger --value 2>/dev/null)" != "yes" ]; then
+            info "Enabling loginctl linger for ${current_user} (keeps worker running after logout) …"
+            sudo loginctl enable-linger "$current_user" 2>/dev/null \
+                || warn "could not enable linger; worker may stop when you log out"
+        fi
+    fi
 
     # ── Bootstrap + start ───────────────────────────────────────────
 
