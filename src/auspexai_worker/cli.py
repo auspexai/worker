@@ -12,7 +12,7 @@ import logging
 import signal
 import sys
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import click
@@ -128,7 +128,8 @@ def _enable_and_start_service() -> None:
     click.echo("enabling auspexai-worker.service …")
     r = subprocess.run(
         [systemctl, "--user", "enable", "--now", "auspexai-worker.service"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if r.returncode == 0:
         click.echo("service started.")
@@ -138,7 +139,9 @@ def _enable_and_start_service() -> None:
 
 
 @cli.command(help="Generate identity and enroll with the coordinator (T0 anonymous).")
-@click.option("--start", is_flag=True, help="Enable and start the systemd user service after enrollment.")
+@click.option(
+    "--start", is_flag=True, help="Enable and start the systemd user service after enrollment."
+)
 @click.pass_context
 def bootstrap(ctx: click.Context, start: bool) -> None:
     config: WorkerConfig = ctx.obj["config"]
@@ -775,7 +778,7 @@ def receipts_export(ctx: click.Context, output_path: str | None) -> None:
                 "worker_id": worker.worker_id if worker else None,
                 "trust_tier": worker.trust_tier if worker else None,
                 "is_account_linked": worker is not None and worker.trust_tier >= 1,
-                "exported_at": datetime.now(timezone.utc).isoformat(),
+                "exported_at": datetime.now(UTC).isoformat(),
                 "note": (
                     "These are local attestations of work performed. "
                     "T0 placeholder receipts are not coordinator-signed and are "
