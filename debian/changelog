@@ -1,4 +1,4 @@
-auspexai-worker (0.1.7) UNRELEASED; urgency=medium
+auspexai-worker (0.1.8) UNRELEASED; urgency=medium
 
   * Daemon file logging — always writes to
     ~/.local/state/auspexai-worker/daemon.log via RotatingFileHandler
@@ -10,6 +10,10 @@ auspexai-worker (0.1.7) UNRELEASED; urgency=medium
   * Install script: stop running daemon before upgrade (systemd or bare
     process via pkill). Fall back to nohup if systemd user service is
     unavailable (headless SSH).
+  * __version__ now derived from importlib.metadata (single source of
+    truth in pyproject.toml; no more hardcoded string to forget).
+  * Install script wipes old site-packages/auspexai_worker* before pip
+    reinstall to prevent stale overlay files from previous versions.
 
  -- AuspexAI Maintainers <contact@auspexai.network>  Tue, 27 May 2026 22:00:00 +0000
 
