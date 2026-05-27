@@ -175,6 +175,16 @@ main() {
             y|Y|yes|YES) ;;
             *) echo "Aborted."; exit 0 ;;
         esac
+
+        # Stop the running daemon before overwriting binaries
+        if systemctl --user is-active auspexai-worker.service >/dev/null 2>&1; then
+            info "Stopping systemd service …"
+            systemctl --user stop auspexai-worker.service
+        elif pgrep -f 'auspexai-worker daemon' >/dev/null 2>&1; then
+            info "Stopping running daemon (pid $(pgrep -f 'auspexai-worker daemon')) …"
+            pkill -f 'auspexai-worker daemon' 2>/dev/null || true
+            sleep 1
+        fi
     fi
 
     # ── Find Python ──────────────────────────────────────────────────
@@ -427,8 +437,11 @@ APPARMOR
                     info "Bootstrapping …"
                     "${INSTALL_PREFIX}/bin/auspexai-worker" bootstrap
                     info "Starting service …"
-                    systemctl --user enable --now auspexai-worker.service 2>/dev/null \
-                        || warn "could not start service; try: systemctl --user enable --now auspexai-worker.service"
+                    if ! systemctl --user enable --now auspexai-worker.service 2>/dev/null; then
+                        info "systemd user service unavailable; starting daemon directly …"
+                        nohup "${INSTALL_PREFIX}/bin/auspexai-worker" daemon </dev/null >/dev/null 2>&1 &
+                        info "daemon started (pid $!); logs at: auspexai-worker logs -f"
+                    fi
                     ;;
             esac
         else
@@ -440,8 +453,11 @@ APPARMOR
                 n|N|no|NO) ;;
                 *)
                     info "Starting service …"
-                    systemctl --user enable --now auspexai-worker.service 2>/dev/null \
-                        || warn "could not start service; try: systemctl --user enable --now auspexai-worker.service"
+                    if ! systemctl --user enable --now auspexai-worker.service 2>/dev/null; then
+                        info "systemd user service unavailable; starting daemon directly …"
+                        nohup "${INSTALL_PREFIX}/bin/auspexai-worker" daemon </dev/null >/dev/null 2>&1 &
+                        info "daemon started (pid $!); logs at: auspexai-worker logs -f"
+                    fi
                     ;;
             esac
         fi
