@@ -1,3 +1,15 @@
+auspexai-worker (0.1.6) UNRELEASED; urgency=medium
+
+  * Daemon file logging — always writes to
+    ~/.local/state/auspexai-worker/daemon.log via RotatingFileHandler
+    (5 MB, 3 backups). Ensures logs are available regardless of how the
+    daemon was started (systemd, headless SSH, manual foreground).
+  * New `auspexai-worker logs` CLI command — tails the daemon log file.
+    Supports -f (follow) and -n (line count). Install script post-install
+    notice updated to reference `logs -f` instead of journalctl.
+
+ -- AuspexAI Maintainers <contact@auspexai.network>  Tue, 27 May 2026 22:00:00 +0000
+
 auspexai-worker (0.1.4) UNRELEASED; urgency=medium
 
   * Local volunteer dashboard (§5.14 Layer B; closes the deferred
