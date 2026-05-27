@@ -3,8 +3,8 @@
 # AuspexAI worker installer
 #
 # Usage:
-#   curl -sSL https://get.auspexai.network | bash
-#   curl -sSL https://get.auspexai.network | bash -s -- --version 0.1.5
+#   curl -sSL https://getworker.auspexai.network | bash
+#   curl -sSL https://getworker.auspexai.network | bash -s -- --version 0.1.5
 #
 # What this does:
 #   1. Checks prerequisites (Python 3.11+, bubblewrap)
