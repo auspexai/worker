@@ -266,6 +266,10 @@ main() {
             sudo "$python" -m venv "${INSTALL_PREFIX}"
         fi
 
+        # Wipe old package dir before reinstall — pip overlays without
+        # cleaning, so stale .py files from the previous version survive.
+        sudo rm -rf "${INSTALL_PREFIX}"/lib/python*/site-packages/auspexai_worker*
+
         info "Installing wheel (this may compile native extensions) …"
         sudo "${INSTALL_PREFIX}/bin/pip" install --upgrade pip setuptools wheel 2>/dev/null
         sudo "${INSTALL_PREFIX}/bin/pip" install "${tmpdir}/${whl_pattern}"
