@@ -452,8 +452,8 @@ APPARMOR
 Done. Useful commands:
 
   auspexai-worker status       # identity, tier, progress
+  auspexai-worker logs -f      # watch daemon activity in real time
   auspexai-worker login        # optional: bind GitHub identity for T1 trust
-  journalctl --user -u auspexai-worker -f   # watch logs
 
 EOF
 }

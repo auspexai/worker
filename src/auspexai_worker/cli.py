@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import json
 import logging
+import logging.handlers
 import signal
+import subprocess
 import sys
 import threading
 from datetime import UTC, datetime
@@ -115,6 +117,27 @@ def status(ctx: click.Context) -> None:
         )
 
 
+@cli.command(help="Tail the daemon log file.")
+@click.option("--lines", "-n", type=int, default=50, help="Number of lines to show (default 50).")
+@click.option("--follow", "-f", is_flag=True, help="Follow the log in real time (like tail -f).")
+@click.pass_context
+def logs(ctx: click.Context, lines: int, follow: bool) -> None:
+    config: WorkerConfig = ctx.obj["config"]
+    log_file = config.state_dir / "daemon.log"
+    if not log_file.exists():
+        click.echo(f"no log file at {log_file}")
+        click.echo("the daemon has not run yet, or state_dir is misconfigured")
+        sys.exit(1)
+    cmd = ["tail", f"-n{lines}"]
+    if follow:
+        cmd.append("-f")
+    cmd.append(str(log_file))
+    try:
+        subprocess.run(cmd)
+    except KeyboardInterrupt:
+        pass
+
+
 def _enable_and_start_service() -> None:
     """Enable and start the systemd user service."""
     import shutil
@@ -199,13 +222,21 @@ def bootstrap(ctx: click.Context, start: bool) -> None:
 @click.pass_context
 def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
     config: WorkerConfig = ctx.obj["config"]
+    log_fmt = "%(asctime)s %(levelname)s %(name)s: %(message)s"
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        format=log_fmt,
     )
-    # Per Q-W6: httpx logs one INFO line per request; the heartbeat loop fires
-    # every 60s by default, so unfiltered httpx INFO floods journald. Pin
-    # httpx to WARNING unless --verbose is set.
+
+    log_file = config.state_dir / "daemon.log"
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_file, maxBytes=5 * 1024 * 1024, backupCount=3,
+    )
+    file_handler.setFormatter(logging.Formatter(log_fmt))
+    file_handler.setLevel(logging.INFO)
+    logging.getLogger().addHandler(file_handler)
+
     if not verbose:
         logging.getLogger("httpx").setLevel(logging.WARNING)
 
