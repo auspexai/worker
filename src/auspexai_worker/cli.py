@@ -231,7 +231,9 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
     log_file = config.state_dir / "daemon.log"
     log_file.parent.mkdir(parents=True, exist_ok=True)
     file_handler = logging.handlers.RotatingFileHandler(
-        log_file, maxBytes=5 * 1024 * 1024, backupCount=3,
+        log_file,
+        maxBytes=5 * 1024 * 1024,
+        backupCount=3,
     )
     file_handler.setFormatter(logging.Formatter(log_fmt))
     file_handler.setLevel(logging.INFO)
