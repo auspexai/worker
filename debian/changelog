@@ -1,4 +1,4 @@
-auspexai-worker (0.1.6) UNRELEASED; urgency=medium
+auspexai-worker (0.1.7) UNRELEASED; urgency=medium
 
   * Daemon file logging — always writes to
     ~/.local/state/auspexai-worker/daemon.log via RotatingFileHandler
@@ -7,6 +7,9 @@ auspexai-worker (0.1.6) UNRELEASED; urgency=medium
   * New `auspexai-worker logs` CLI command — tails the daemon log file.
     Supports -f (follow) and -n (line count). Install script post-install
     notice updated to reference `logs -f` instead of journalctl.
+  * Install script: stop running daemon before upgrade (systemd or bare
+    process via pkill). Fall back to nohup if systemd user service is
+    unavailable (headless SSH).
 
  -- AuspexAI Maintainers <contact@auspexai.network>  Tue, 27 May 2026 22:00:00 +0000
 
