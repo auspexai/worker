@@ -34,7 +34,12 @@ dev = [
     "pytest>=7.4",
     "pytest-cov>=4.1",
     "respx>=0.21",
-    "ruff>=0.6",
+    "ruff==0.15.15",
+    # Pinned for the test env: starlette>=1.2 deprecates httpx in TestClient,
+    # which trips filterwarnings=error during test collection. fastapi 0.115.6
+    # pulls a compatible starlette<0.42. Dependabot will propose bumps.
+    "fastapi==0.115.6",
+    "starlette<0.42",
 ]
 # Optional libsecret/Secret Service backend. Skipped on headless CI / containers
 # without a running Secret Service provider; worker falls back to encrypted file.
