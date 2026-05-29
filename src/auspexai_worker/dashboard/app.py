@@ -19,6 +19,7 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from auspexai_worker import __version__
 from auspexai_worker.config import WorkerConfig
 from auspexai_worker.state import (
     AssignmentAuditRepository,
@@ -76,7 +77,7 @@ def build_app(*, db: Database, config: WorkerConfig) -> FastAPI:
     """
     app = FastAPI(
         title="AuspexAI Worker — local dashboard",
-        version="0.1.4",
+        version=__version__,
         docs_url=None,
         redoc_url=None,
         openapi_url=None,

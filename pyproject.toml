@@ -1,6 +1,6 @@
 [project]
 name = "auspexai-worker"
-version = "0.1.8"
+dynamic = ["version"]
 description = "Volunteer worker daemon for the AuspexAI distributed compute network"
 readme = "README.md"
 license = "AGPL-3.0-only"
@@ -56,8 +56,15 @@ Homepage = "https://auspexai.network"
 Repository = "https://github.com/auspexai/worker"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
+
+# Version derived from git tags (hatch-vcs), stamped at build. Releases are cut
+# from a tag (e.g. v0.1.8) → clean version; builds between tags get a .devN
+# suffix. __init__ already reads it from installed metadata. See
+# version_provenance.md (V-M1).
+[tool.hatch.version]
+source = "vcs"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/auspexai_worker"]
