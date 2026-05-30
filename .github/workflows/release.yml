@@ -40,16 +40,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Sanity check — tag matches pyproject version
-        run: |
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
-          PYPROJECT_VERSION=$(grep -m1 '^version' pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/')
-          if [ "$TAG_VERSION" != "$PYPROJECT_VERSION" ]; then
-            echo "::error::Tag version ($TAG_VERSION) does not match pyproject.toml version ($PYPROJECT_VERSION)."
-            exit 1
-          fi
-          echo "version=$TAG_VERSION" >> "$GITHUB_ENV"
-
       - name: Install uv
         uses: astral-sh/setup-uv@v6
         with:
@@ -63,6 +53,25 @@ jobs:
           uv build
           ls -la dist/
 
+      - name: Guard — version is a clean release matching the tag
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          WHEEL=$(ls dist/auspexai_worker-*.whl)
+          BUILT_VERSION=$(basename "$WHEEL" | cut -d- -f2)
+          echo "tag=$TAG_VERSION  built=$BUILT_VERSION"
+          # hatch-vcs emits a clean X.Y.Z only when HEAD is exactly the tag with
+          # a clean tree; dev/local/dirty builds (e.g. 0.1.9.dev2+gSHA) are
+          # rejected so a non-release artifact can never ship. version_provenance.md.
+          if [ "$BUILT_VERSION" = "0.0.0" ] || ! printf '%s' "$BUILT_VERSION" | grep -qE '^[0-9]+(\.[0-9]+)+$'; then
+            echo "::error::built version '$BUILT_VERSION' is not a clean release (dev/local/dirty, or 0.0.0 version-detection fallback) — the tag must be on HEAD with a clean tree."
+            exit 1
+          fi
+          if [ "$BUILT_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::built version '$BUILT_VERSION' != tag '$TAG_VERSION'."
+            exit 1
+          fi
+          echo "version=$TAG_VERSION" >> "$GITHUB_ENV"
+
       - name: Install Debian build toolchain
         run: |
           sudo apt-get update -qq
@@ -71,10 +80,21 @@ jobs:
             python3-venv python3-dev python3.12-venv python3.12-dev \
             python3-pip build-essential
 
+      - name: Stamp Debian changelog version from the tag
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          # The .deb version comes from debian/changelog (hand-maintained, does
+          # NOT follow hatch-vcs). Stamp it from the tag so the .deb version
+          # matches the wheel/tag. Native package → bare (X.Y.Z). version_provenance.md.
+          sed -i "1s/^auspexai-worker ([^)]*) [A-Za-z]*/auspexai-worker (${TAG_VERSION}) stable/" debian/changelog
+          head -1 debian/changelog
+
       - name: Build .deb
         run: |
           dpkg-buildpackage -us -uc -b
           ls -la ../auspexai-worker_*.deb
+          test -f "../auspexai-worker_${GITHUB_REF_NAME#v}_amd64.deb" \
+            || { echo "::error::.deb version does not match tag ${GITHUB_REF_NAME#v}"; exit 1; }
 
       - name: Stage artifacts into dist/
         run: |
