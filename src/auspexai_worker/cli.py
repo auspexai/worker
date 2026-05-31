@@ -416,6 +416,14 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
         f"no_work:{pstats.no_work_polls}",
         err=True,
     )
+    if pstats.quarantined_at is not None:
+        # Maintainer paused this worker; show why (the reason is worker-visible
+        # by design) so the volunteer isn't left guessing.
+        click.echo(
+            f"quarantined:  by maintainer at {pstats.quarantined_at} "
+            f"(reason: {pstats.quarantine_reason or '<none given>'})",
+            err=True,
+        )
 
     failed_total = hstats.ticks_failed + pstats.polls_failed
     succeeded_total = hstats.ticks_succeeded + pstats.polls_succeeded

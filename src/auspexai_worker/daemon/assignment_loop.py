@@ -58,6 +58,7 @@ class AssignmentStats:
     refuse_calls_succeeded: int = 0
     refuse_calls_failed: int = 0
     quarantined_at: str | None = None  # ISO timestamp from coord's 423 details
+    quarantine_reason: str | None = None  # maintainer's reason from coord's 423 details
     last_error: str | None = None
     errors: list[str] = field(default_factory=list)
 
@@ -164,16 +165,20 @@ class AssignmentPoller:
             # Clear any prior quarantine state — we got an actual 200, which
             # means the maintainer has lifted the quarantine.
             self._stats.quarantined_at = None
+            self._stats.quarantine_reason = None
         except WorkerQuarantinedError as exc:
             # Maintainer-applied pause. Not an error condition — log at INFO
             # and let the next tick try again. The quarantined_at timestamp
-            # surfaces to the operator via stats for diagnostic purposes.
+            # and the maintainer's reason surface via stats (and the log) so
+            # the volunteer can see why their machine was paused.
             self._stats.polls_quarantined += 1
             self._stats.quarantined_at = exc.quarantined_at
+            self._stats.quarantine_reason = exc.quarantine_reason
             logger.info(
-                "assignment poll: worker quarantined by maintainer at %s; "
+                "assignment poll: worker quarantined by maintainer at %s (reason: %s); "
                 "will retry next tick (poll=%d)",
                 exc.quarantined_at or "<unknown>",
+                exc.quarantine_reason or "<none given>",
                 self._stats.polls_attempted,
             )
             return

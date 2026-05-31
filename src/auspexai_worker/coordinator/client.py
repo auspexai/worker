@@ -52,14 +52,24 @@ class WorkerQuarantinedError(CoordinatorError):
     """423 worker_quarantined — the maintainer has paused this worker.
 
     Reversible: the maintainer can unquarantine, after which assignment
-    fetches resume normally. Carries the quarantined_at timestamp the
-    coordinator includes in the error details — useful for the worker
-    to log when the pause started (operator-secret reason text is NOT
-    included; that surface is operator-only)."""
+    fetches resume normally. Carries the quarantined_at timestamp and the
+    maintainer's quarantine *reason* from the error details, so the worker
+    can log/show both. The reason is intentionally surfaced to the worker:
+    a volunteer running this machine is entitled to know why it was paused
+    (trust-boundary transparency, ratified 2026-05-30). It is not operator-
+    only — the coordinator only sends it to the worker itself and the
+    worker's own-account researcher, never to third parties."""
 
-    def __init__(self, message: str, *, quarantined_at: str | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        quarantined_at: str | None = None,
+        quarantine_reason: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.quarantined_at = quarantined_at
+        self.quarantine_reason = quarantine_reason
 
 
 class AssignmentNotFoundError(CoordinatorError):
@@ -361,16 +371,21 @@ class CoordinatorClient:
         if response.status_code == 404:
             raise WorkerNotFoundError(_error_message(response))
         if response.status_code == 423:
-            # Maintainer-applied pause. Extract quarantined_at from the
-            # error details if present so the caller can surface it.
+            # Maintainer-applied pause. Extract quarantined_at AND the
+            # maintainer's reason from the error details if present so the
+            # caller can surface both to the worker (the reason is worker-
+            # visible by design — see WorkerQuarantinedError).
             try:
                 details = response.json().get("detail", {}).get("error", {}).get("details", {})
                 quarantined_at = details.get("quarantined_at")
+                quarantine_reason = details.get("quarantine_reason")
             except (ValueError, AttributeError):
                 quarantined_at = None
+                quarantine_reason = None
             raise WorkerQuarantinedError(
                 _error_message(response),
                 quarantined_at=quarantined_at,
+                quarantine_reason=quarantine_reason,
             )
         raise CoordinatorError(
             f"get_assignment: unexpected status {response.status_code}: {response.text[:500]}"

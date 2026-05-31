@@ -272,6 +272,7 @@ class TestPollerQuarantineHandling:
     """
 
     _QUARANTINED_AT = "2026-05-23T14:00:00+00:00"
+    _QUARANTINE_REASON = "suspected bad GPU results — under review"
 
     def _quarantine_response(self) -> httpx.Response:
         return httpx.Response(
@@ -281,7 +282,10 @@ class TestPollerQuarantineHandling:
                     "error": {
                         "code": "worker_quarantined",
                         "message": "this worker is quarantined; contact the operator",
-                        "details": {"quarantined_at": self._QUARANTINED_AT},
+                        "details": {
+                            "quarantined_at": self._QUARANTINED_AT,
+                            "quarantine_reason": self._QUARANTINE_REASON,
+                        },
                     }
                 }
             },
@@ -305,6 +309,9 @@ class TestPollerQuarantineHandling:
         assert stats.polls_succeeded == 0
         assert stats.polls_failed == 0
         assert stats.quarantined_at == self._QUARANTINED_AT
+        # The maintainer's reason is captured and surfaced to the worker
+        # (worker-visible by design, ratified 2026-05-30).
+        assert stats.quarantine_reason == self._QUARANTINE_REASON
         # Quarantine is NOT logged into the general error buffer — it's not
         # an error from the worker's perspective.
         assert stats.errors == []
@@ -327,8 +334,9 @@ class TestPollerQuarantineHandling:
         assert stats.polls_attempted == 2
         assert stats.polls_quarantined == 1
         assert stats.polls_succeeded == 1
-        # quarantined_at is cleared on next successful poll.
+        # quarantined_at and reason are both cleared on next successful poll.
         assert stats.quarantined_at is None
+        assert stats.quarantine_reason is None
 
     def test_quarantine_does_not_kill_loop(self, db: Database) -> None:
         # Three quarantine responses in a row — the poller should keep
