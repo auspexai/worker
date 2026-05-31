@@ -21,10 +21,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
           cache-dependency-glob: "pyproject.toml"
@@ -54,7 +54,7 @@ jobs:
     # of unit-test status so both signal classes are visible per PR.
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Install Debian build toolchain
         run: |
@@ -75,7 +75,7 @@ jobs:
           dpkg -I dist/auspexai-worker_*.deb
 
       - name: Upload .deb as workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: auspexai-worker-deb
           path: dist/*.deb
