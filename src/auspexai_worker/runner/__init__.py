@@ -8,8 +8,8 @@ $AUSPEXAI_OUTPUT_PATH. The daemon signs and submits the Result; the
 runner has no network access in production sandbox config.
 
 M4 ships a *synthetic* executor that echoes the input payload back as
-output. Tenant code (Sentinel-as-tenant, eventually) replaces the
-synthetic executor in a later milestone per §5.3.
+output. Tenant code (the first real tenant Vigiles, eventually) replaces
+the synthetic executor in a later milestone per §5.3.
 """
 
 from __future__ import annotations

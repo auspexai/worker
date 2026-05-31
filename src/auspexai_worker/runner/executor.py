@@ -2,9 +2,9 @@
 
 Echoes the input payload back as the output, with a small annotation so a
 test can tell echoed output from a no-op. Real tenant executors (eventually
-including Sentinel-as-tenant per §5.3) replace this in a later milestone
-by loading executor code from the tenant package — the runner subprocess
-will then dispatch to that code via a published-contract entrypoint.
+including the first real tenant Vigiles per §5.3) replace this in a later
+milestone by loading executor code from the tenant package — the runner
+subprocess will then dispatch to that code via a published-contract entrypoint.
 
 For M4 the synthetic executor lives in this module so:
   - The runner can be exercised end-to-end without any tenant code present
