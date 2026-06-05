@@ -34,7 +34,7 @@ dev = [
     "pytest>=7.4",
     "pytest-cov>=4.1",
     "respx>=0.21",
-    "ruff==0.15.15",
+    "ruff==0.15.16",
     # Test env pinned to current fastapi/starlette. starlette 1.x's TestClient
     # emits a DeprecationWarning that filterwarnings=error would escalate to a
     # collection error — handled by a targeted ignore in [tool.pytest.ini_options]
