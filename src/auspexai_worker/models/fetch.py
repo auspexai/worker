@@ -36,7 +36,7 @@ class ModelFetcher(Protocol):
 
 
 class HfHubFetcher:
-    """Fetch a model snapshot from HuggingFace. Lazily imports huggingface_hub."""
+    """Fetch from HuggingFace. Lazily imports huggingface_hub."""
 
     def fetch(self, entry: ModelCatalogEntry, dest_dir: Path) -> None:
         try:
@@ -51,6 +51,17 @@ class HfHubFetcher:
             local_dir=str(dest_dir),
             allow_patterns=entry.files or None,
         )
+
+    def fetch_file(self, repo: str, filename: str, dest_dir: Path) -> None:
+        """Download a single file (e.g. one GGUF quant) — the HF-direct path."""
+        try:
+            from huggingface_hub import hf_hub_download
+        except ImportError as exc:
+            raise ModelFetchError(
+                "huggingface_hub is not installed. Install the models extra: "
+                "`pip install 'auspexai-worker[models]'`."
+            ) from exc
+        hf_hub_download(repo_id=repo, filename=filename, local_dir=str(dest_dir))
 
 
 def _sha256_of(path: Path) -> str:
@@ -103,6 +114,34 @@ def pull_model(
         fetcher.fetch(entry, staging)
         if entry.sha256:
             _verify(staging, entry.sha256)
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    if dest.exists():
+        shutil.rmtree(dest)
+    staging.rename(dest)
+    return dest
+
+
+def pull_quant(quant, store: ModelStore, fetcher, *, disk_free_bytes: int | None = None) -> Path:
+    """Pull a single HF GGUF quant (`hf_browse.ModelQuant`) into the store under
+    its model_id. Idempotent; atomic `.partial` staging; disk pre-check.
+
+    `fetcher` must expose `fetch_file(repo, filename, dest_dir)` (HfHubFetcher)."""
+    dest = store.path_for(quant.model_id)
+    if store.has(quant.model_id):
+        return dest
+    if disk_free_bytes is not None and quant.size_bytes > disk_free_bytes:
+        raise ModelFetchError(
+            f"insufficient disk: {quant.model_id} needs ~{quant.size_gb:.1f} GB, "
+            f"{disk_free_bytes / 1e9:.1f} GB free"
+        )
+    staging = dest.parent / f"{quant.model_id}.partial"
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True)
+    try:
+        fetcher.fetch_file(quant.repo, quant.filename, staging)
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
         raise

@@ -38,13 +38,21 @@ def _nearest_existing(path: Path) -> Path:
 
 
 def survey_resources(store_root: Path, *, declared_vram_gb: float | None = None) -> WorkerResources:
-    """Probe the resources relevant to model fit. `declared_vram_gb` comes from
-    the worker's GPU declaration (config.declared_gpus.vram_total_gb)."""
+    """Probe the resources relevant to model fit. VRAM comes from a declaration
+    if set, else from general accelerator detection (so even this fallback path
+    recognizes the GPU / unified memory instead of defaulting to 'no GPU')."""
     usage = shutil.disk_usage(_nearest_existing(store_root))
+    vram = declared_vram_gb
+    if vram is None:
+        from auspexai_worker.accelerator import AcceleratorKind, detect_accelerator
+
+        acc = detect_accelerator()
+        if acc.kind is not AcceleratorKind.CPU:
+            vram = acc.memory_budget_gb
     return WorkerResources(
         disk_free_bytes=usage.free,
         ram_gb=detect_ram_total_gb(),
-        vram_gb=declared_vram_gb,
+        vram_gb=vram,
     )
 
 

@@ -20,6 +20,7 @@ from pathlib import Path
 import click
 
 from . import __version__
+from .accelerator import detect_accelerator
 from .bootstrap import bootstrap as bootstrap_worker
 from .bootstrap import build_signer, initialize_state, open_keystore
 from .capabilities import DeclaredCaps
@@ -43,7 +44,8 @@ from .health import ThermalMonitor
 from .keystore import KeystoreError
 from .models import ModelCatalog, ModelStore, recommend, survey_resources
 from .models.catalog import FileCatalogSource
-from .models.fetch import HfHubFetcher, ModelFetchError, pull_model
+from .models.fetch import HfHubFetcher, ModelFetchError, pull_quant
+from .models.hf_browse import HfHubBrowser, quant_fits, runnable_models, usable_budget_gb
 from .models.recommend import parse_selection
 from .oauth import (
     AccessDeniedError,
@@ -184,79 +186,139 @@ def model_list(ctx: click.Context) -> None:
         click.echo(f"{m.id:32} {m.size_bytes / 1e9:6.2f} GB  {m.path}")
 
 
-@model.command("recommend", help="Recommend models that fit this host's resources.")
-@_catalog_opt
-@click.pass_context
-def model_recommend(ctx: click.Context, catalog_path: str | None) -> None:
-    config = ctx.obj["config"]
-    store = ModelStore(config.models_store_path)
+def _recommend_fallback(catalog_path: str | None, store: ModelStore) -> None:
+    """Offline degraded view: the bundled catalog (HuggingFace unavailable)."""
     catalog = _load_catalog(catalog_path)
-    resources = survey_resources(store.root, declared_vram_gb=config.declared_gpus.vram_total_gb)
-    ram = f"{resources.ram_gb:.0f} GB" if resources.ram_gb else "unknown"
-    vram = f"{resources.vram_gb:.0f} GB" if resources.vram_gb else "none declared"
-    click.echo(
-        f"host: {resources.disk_free_bytes / 1e9:.0f} GB disk free · RAM {ram} · VRAM {vram}\n"
-    )
+    resources = survey_resources(store.root)
     for r in recommend(catalog, store, resources):
         tag = "installed" if r.installed else ("fits" if r.fits else "too big")
         click.echo(f"[{tag:9}] {r.entry.id:24} {r.entry.disk_bytes / 1e9:5.1f} GB  {r.entry.note}")
         for b in r.blockers:
             click.echo(f"            ✗ {b}")
-        for n in r.notes:
-            click.echo(f"            · {n}")
 
 
-@model.command("pull", help="Download a model from the catalog into the local store.")
-@click.argument("model_id")
+@model.command("recommend", help="Recommend HuggingFace models that fit this host.")
+@click.option("--limit", default=30, help="How many popular HF models to consider.")
 @_catalog_opt
 @click.pass_context
-def model_pull(ctx: click.Context, model_id: str, catalog_path: str | None) -> None:
+def model_recommend(ctx: click.Context, limit: int, catalog_path: str | None) -> None:
     config = ctx.obj["config"]
     store = ModelStore(config.models_store_path)
-    entry = _load_catalog(catalog_path).get(model_id)
-    if entry is None:
-        click.echo(
-            f"unknown model id {model_id!r}; see `auspexai-worker model recommend`", err=True
-        )
-        sys.exit(1)
-    resources = survey_resources(store.root, declared_vram_gb=config.declared_gpus.vram_total_gb)
-    click.echo(f"pulling {entry.id} from {entry.hf_repo} (~{entry.disk_bytes / 1e9:.1f} GB) …")
+    acc = detect_accelerator()
+    disk_free = survey_resources(store.root).disk_free_bytes
+    click.echo(f"host: {acc.label}  ·  {disk_free / 1e9:.0f} GB disk free\n")
     try:
-        dest = pull_model(entry, store, HfHubFetcher(), resources=resources)
+        runnable = runnable_models(
+            HfHubBrowser(),
+            memory_budget_gb=acc.memory_budget_gb,
+            unified=acc.unified,
+            disk_free_bytes=disk_free,
+            installed_ids=frozenset(store.inventory()),
+            limit=limit,
+        )
+    except Exception as exc:
+        click.echo(f"(HuggingFace unavailable: {exc})")
+        click.echo("Bundled offline fallback:\n")
+        _recommend_fallback(catalog_path, store)
+        return
+    if not runnable:
+        click.echo("No HuggingFace GGUF text-generation models fit this host's budget.")
+        return
+    for r in runnable:
+        q = r.quant
+        tag = "installed" if r.installed else "fits"
+        click.echo(f"[{tag:9}] {q.repo:48} {q.quant:10} {q.size_gb:5.1f} GB")
+    click.echo("\nInstall one with:  auspexai-worker model pull <repo> --quant <Q>")
+
+
+@model.command("pull", help="Download a HuggingFace GGUF model into the local store.")
+@click.argument("repo")
+@click.option(
+    "--quant", default=None, help="Quant to pull (e.g. Q4_K_M); default = largest that fits."
+)
+@click.pass_context
+def model_pull(ctx: click.Context, repo: str, quant: str | None) -> None:
+    config = ctx.obj["config"]
+    store = ModelStore(config.models_store_path)
+    acc = detect_accelerator()
+    disk_free = survey_resources(store.root).disk_free_bytes
+    try:
+        quants = HfHubBrowser().quants(repo)
+    except Exception as exc:
+        click.echo(f"could not query HuggingFace for {repo!r}: {exc}", err=True)
+        sys.exit(1)
+    if not quants:
+        click.echo(f"no GGUF files found in {repo!r}", err=True)
+        sys.exit(1)
+    if quant:
+        chosen = next((q for q in quants if q.quant.lower() == quant.lower()), None)
+        if chosen is None:
+            avail = ", ".join(sorted({q.quant for q in quants}))
+            click.echo(f"quant {quant!r} not in {repo!r}; available: {avail}", err=True)
+            sys.exit(1)
+    else:
+        usable = usable_budget_gb(acc.memory_budget_gb, unified=acc.unified)
+        fitting = [q for q in quants if quant_fits(q, usable, disk_free)]
+        chosen = (
+            max(fitting, key=lambda q: q.size_bytes)
+            if fitting
+            else min(quants, key=lambda q: q.size_bytes)
+        )
+    click.echo(f"pulling {chosen.repo} [{chosen.quant}] (~{chosen.size_gb:.1f} GB) …")
+    try:
+        dest = pull_quant(chosen, store, HfHubFetcher(), disk_free_bytes=disk_free)
     except ModelFetchError as exc:
         click.echo(f"pull failed: {exc}", err=True)
         sys.exit(1)
-    click.echo(f"installed {entry.id} -> {dest}")
+    click.echo(f"installed {chosen.model_id} -> {dest}")
 
 
-@model.command("setup", help="Interactively pick + download models that fit this host.")
-@_catalog_opt
+@model.command("setup", help="Interactively pick + download HF models that fit this host.")
+@click.option("--limit", default=30, help="How many popular HF models to consider.")
 @click.option(
     "--yes", is_flag=True, help="Non-interactive: pull ALL fitting, not-installed models."
 )
 @click.pass_context
-def model_setup(ctx: click.Context, catalog_path: str | None, yes: bool) -> None:
+def model_setup(ctx: click.Context, limit: int, yes: bool) -> None:
     config = ctx.obj["config"]
     store = ModelStore(config.models_store_path)
-    catalog = _load_catalog(catalog_path)
-    resources = survey_resources(store.root, declared_vram_gb=config.declared_gpus.vram_total_gb)
-    candidates = [r for r in recommend(catalog, store, resources) if r.fits and not r.installed]
+    acc = detect_accelerator()
+    disk_free = survey_resources(store.root).disk_free_bytes
+    click.echo(f"host: {acc.label}\n")
+    try:
+        candidates = [
+            r
+            for r in runnable_models(
+                HfHubBrowser(),
+                memory_budget_gb=acc.memory_budget_gb,
+                unified=acc.unified,
+                disk_free_bytes=disk_free,
+                installed_ids=frozenset(store.inventory()),
+                limit=limit,
+            )
+            if not r.installed
+        ]
+    except Exception as exc:
+        click.echo(
+            f"HuggingFace unavailable ({exc}); cannot set up models. "
+            "Install the [models] extra and ensure network access.",
+            err=True,
+        )
+        return
     if not candidates:
-        click.echo("No new models to set up (all fitting models already installed, or none fit).")
+        click.echo("No new HF models fit this host (or all fitting ones are installed).")
         return
 
-    click.echo("Models that fit this host:\n")
+    click.echo("HuggingFace models that fit this host:\n")
     for i, r in enumerate(candidates, 1):
-        tag = " (in demand)" if r.in_demand else ""
-        click.echo(
-            f"  {i}. {r.entry.id:24} {r.entry.disk_bytes / 1e9:5.1f} GB  {r.entry.note}{tag}"
-        )
+        q = r.quant
+        click.echo(f"  {i}. {q.repo:48} {q.quant:10} {q.size_gb:5.1f} GB")
 
     if yes:
         chosen = candidates
     elif not sys.stdin.isatty():
         click.echo(
-            "\nNon-interactive shell; run `auspexai-worker model pull <id>` to install "
+            "\nNon-interactive shell; run `auspexai-worker model pull <repo> --quant <Q>` "
             "(or re-run with --yes to pull all that fit)."
         )
         return
@@ -270,7 +332,7 @@ def model_setup(ctx: click.Context, catalog_path: str | None, yes: bool) -> None
     if not chosen:
         click.echo("Nothing selected.")
         return
-    total = sum(r.entry.disk_bytes for r in chosen)
+    total = sum(r.quant.size_bytes for r in chosen)
     if (
         not yes
         and sys.stdin.isatty()
@@ -283,10 +345,10 @@ def model_setup(ctx: click.Context, catalog_path: str | None, yes: bool) -> None
 
     failures = 0
     for r in chosen:
-        click.echo(f"pulling {r.entry.id} from {r.entry.hf_repo} …")
+        click.echo(f"pulling {r.quant.repo} [{r.quant.quant}] …")
         try:
-            pull_model(r.entry, store, HfHubFetcher(), resources=resources)
-            click.echo(f"  installed {r.entry.id}")
+            pull_quant(r.quant, store, HfHubFetcher(), disk_free_bytes=disk_free)
+            click.echo(f"  installed {r.quant.model_id}")
         except ModelFetchError as exc:
             failures += 1
             click.echo(f"  failed: {exc}", err=True)

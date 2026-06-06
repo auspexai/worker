@@ -111,14 +111,16 @@ class TestConfig:
         assert "synthetic only" in r.text
         assert "models in store" in r.text
 
-    def test_models_page_renders_store_and_recommendations(self, client: TestClient) -> None:
+    def test_models_page_renders_store_and_accelerator(self, client: TestClient) -> None:
         r = client.get("/models")
         assert r.status_code == 200
         assert "Local model store" in r.text
         assert "No models in the store yet." in r.text  # empty store
-        # recommendations come from the bundled seed catalog
-        assert "Recommended for this host" in r.text
-        assert "gpt2" in r.text
+        # the dashboard shows the detected accelerator + points to the CLI for
+        # live HF suggestions (it does not query HF on render)
+        assert "This host can run" in r.text
+        assert "accelerator" in r.text
+        assert "model recommend" in r.text
 
     def test_config_page_shows_new_blocks(self, client: TestClient) -> None:
         r = client.get("/config")

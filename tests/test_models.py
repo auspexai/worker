@@ -226,14 +226,38 @@ def test_capabilities_declares_worker_version():
     assert collect().to_dict()["worker_version"] == __version__
 
 
-def test_cli_model_setup_non_interactive_pulls_nothing(tmp_path: Path):
+def test_cli_model_setup_offline_is_graceful(tmp_path: Path):
     from click.testing import CliRunner
 
     from auspexai_worker.cli import cli
 
     env = {"AUSPEXAI_WORKER_DATA_DIR": str(tmp_path / "data")}
-    # CliRunner provides a non-tty stdin -> setup must not download, just guide.
-    r = CliRunner().invoke(cli, ["model", "setup", "--catalog", str(_cat_file(tmp_path))], env=env)
+    # No huggingface_hub in the test env -> HF-direct setup degrades gracefully
+    # and pulls nothing.
+    r = CliRunner().invoke(cli, ["model", "setup"], env=env)
     assert r.exit_code == 0, r.output
-    assert "Non-interactive" in r.output
-    assert not (tmp_path / "data" / "models" / "tiny").exists()
+    assert "HuggingFace unavailable" in r.output
+    models_dir = tmp_path / "data" / "models"
+    assert not models_dir.exists() or not any(models_dir.iterdir())
+
+
+def test_pull_quant_installs_single_gguf(tmp_path: Path):
+    from auspexai_worker.models.fetch import pull_quant
+    from auspexai_worker.models.hf_browse import ModelQuant
+
+    class _FileFetcher:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def fetch_file(self, repo: str, filename: str, dest_dir: Path) -> None:
+            self.calls += 1
+            (dest_dir / filename).write_bytes(b"gguf-bytes")
+
+    q = ModelQuant(repo="org/M-GGUF", filename="M-Q4_K_M.gguf", quant="Q4_K_M", size_bytes=9)
+    store = ModelStore(tmp_path)
+    fetcher = _FileFetcher()
+    dest = pull_quant(q, store, fetcher)
+    assert store.has(q.model_id)
+    assert (dest / "M-Q4_K_M.gguf").read_bytes() == b"gguf-bytes"
+    pull_quant(q, store, fetcher)  # idempotent
+    assert fetcher.calls == 1

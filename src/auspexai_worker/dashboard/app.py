@@ -20,9 +20,10 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from auspexai_worker import __version__
+from auspexai_worker.accelerator import detect_accelerator
 from auspexai_worker.config import WorkerConfig
 from auspexai_worker.health import ThermalMonitor, ThermalState
-from auspexai_worker.models import ModelCatalog, ModelStore, recommend, survey_resources
+from auspexai_worker.models import ModelStore
 from auspexai_worker.state import (
     AssignmentAuditRepository,
     Database,
@@ -210,9 +211,11 @@ def build_app(*, db: Database, config: WorkerConfig) -> FastAPI:
 
         # Health & execution — what this machine is set to run + its physical state.
         model_count = len(ModelStore(config.models_store_path).list())
+        acc = detect_accelerator()
         health_html = f"""    <h2>Health &amp; execution</h2>
     <dl class="kv">
       <dt>tenant code</dt><dd>{_executor_badge(config.execute_tenant_code)}</dd>
+      <dt>accelerator</dt><dd>{html.escape(acc.label)}</dd>
       <dt>thermal</dt><dd>{_thermal_html(config)}</dd>
       <dt>models in store</dt><dd>{model_count} (<a href="/models">manage</a>)</dd>
     </dl>"""
@@ -317,38 +320,20 @@ def build_app(*, db: Database, config: WorkerConfig) -> FastAPI:
         inv_table = render_table(
             ["model id", "size", "path"], inv_rows, "No models in the store yet."
         )
-
-        try:
-            catalog = ModelCatalog.load()
-            resources = survey_resources(
-                store.root, declared_vram_gb=config.declared_gpus.vram_total_gb
-            )
-            rec_rows: list[list[str]] = []
-            for r in recommend(catalog, store, resources):
-                status = "installed" if r.installed else ("fits" if r.fits else "too big")
-                cls = {"installed": "ok", "fits": "ok", "too big": "warn"}.get(status, "")
-                detail = "; ".join(r.blockers) or "; ".join(r.notes) or r.entry.note
-                rec_rows.append(
-                    [
-                        f'<span class="mono">{html.escape(r.entry.id)}</span>',
-                        f"{r.entry.disk_bytes / 1e9:.1f} GB",
-                        f'<span class="badge {cls}">{status}</span>',
-                        f'<span class="dim">{html.escape(detail)}</span>',
-                    ]
-                )
-            rec_table = render_table(
-                ["model id", "download", "status", "detail"], rec_rows, "Catalog is empty."
-            )
-        except Exception as exc:  # pragma: no cover — defensive (catalog read)
-            rec_table = f'    <p class="muted">catalog unavailable: {html.escape(str(exc))}</p>'
-
+        # Accelerator (drives what this host can run). Live HF browsing is the
+        # CLI's job (`model recommend`) — a dashboard page shouldn't query HF on
+        # every render.
+        acc = detect_accelerator()
         body = (
+            "    <h2>This host can run</h2>\n"
+            f'    <dl class="kv"><dt>accelerator</dt><dd>{html.escape(acc.label)}</dd>'
+            f"<dt>unified memory</dt><dd>{'yes' if acc.unified else 'no'}</dd></dl>\n"
             "    <h2>Local model store (BYOM)</h2>\n"
             f'    <p class="muted">Store: <code>{html.escape(str(store.root))}</code>. '
             "The platform never distributes weights — you host only what you choose to download. "
-            "Run <code>auspexai-worker model setup</code> (or <code>model pull &lt;id&gt;</code>) "
-            "from a terminal to add models.</p>\n" + inv_table + "\n"
-            "    <h2>Recommended for this host</h2>\n" + rec_table
+            "Run <code>auspexai-worker model recommend</code> for HuggingFace models that fit this "
+            "host, then <code>model pull &lt;repo&gt; --quant &lt;Q&gt;</code> (or "
+            "<code>model setup</code>) to add them.</p>\n" + inv_table
         )
         return render_page(title="Models", body=body, active_nav="/models")
 
