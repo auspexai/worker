@@ -9,6 +9,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
 
+import auspexai_worker.dashboard.app as dash_app
 from auspexai_worker.config import WorkerConfig
 from auspexai_worker.dashboard import build_app
 from auspexai_worker.state import (
@@ -222,10 +223,25 @@ class TestExecutorSetter:
         # default config is synthetic → the page offers off + enable-provisioned
         assert "enable provisioned" in r.text
 
-    def test_set_off_writes_toml_and_redirects(self, client: TestClient, toml_path: Path) -> None:
-        r = client.post("/executor", data={"policy": "off"}, follow_redirects=False)
-        assert r.status_code == 303
+    def test_set_off_writes_toml_and_auto_restarts(
+        self, client: TestClient, toml_path: Path, monkeypatch
+    ) -> None:
+        # auto-restart on a UI config change (systemd present → scheduled)
+        monkeypatch.setattr(dash_app, "_schedule_detached_restart", lambda: True)
+        r = client.post("/executor", data={"policy": "off"})
+        assert r.status_code == 200
         assert 'execute_tenant_code = "off"' in toml_path.read_text()
+        assert "restarting now" in r.text  # UI says it's restarting to apply
+
+    def test_set_without_systemd_shows_manual_restart(
+        self, client: TestClient, toml_path: Path, monkeypatch
+    ) -> None:
+        # no systemd managing the worker → fall back to a manual-restart instruction
+        monkeypatch.setattr(dash_app, "_schedule_detached_restart", lambda: False)
+        r = client.post("/executor", data={"policy": "off"})
+        assert r.status_code == 200
+        assert 'execute_tenant_code = "off"' in toml_path.read_text()
+        assert "systemctl --user restart auspexai-worker" in r.text
 
     def test_enable_provisioned_without_confirm_redirects_to_confirm(
         self, client: TestClient, toml_path: Path
@@ -238,23 +254,21 @@ class TestExecutorSetter:
             toml_path.read_text()
         )
 
-    def test_enable_provisioned_with_confirm_writes_toml(
-        self, client: TestClient, toml_path: Path
+    def test_enable_provisioned_with_confirm_writes_and_restarts(
+        self, client: TestClient, toml_path: Path, monkeypatch
     ) -> None:
-        r = client.post(
-            "/executor",
-            data={"policy": "provisioned", "confirm": "yes"},
-            follow_redirects=False,
-        )
-        assert r.status_code == 303
-        assert r.headers["location"] == "/config"
+        monkeypatch.setattr(dash_app, "_schedule_detached_restart", lambda: True)
+        r = client.post("/executor", data={"policy": "provisioned", "confirm": "yes"})
+        assert r.status_code == 200
         assert 'execute_tenant_code = "provisioned"' in toml_path.read_text()
+        assert "restarting now" in r.text
 
-    def test_confirm_page_warns(self, client: TestClient) -> None:
+    def test_confirm_page_warns_and_mentions_restart(self, client: TestClient) -> None:
         r = client.get("/executor/confirm")
         assert r.status_code == 200
         assert "third-party tenant code" in r.text
-        assert "Yes, enable provisioned execution" in r.text
+        assert "restarts the worker" in r.text  # the action's restart is disclosed
+        assert "enable provisioned + restart" in r.text
 
     def test_pending_restart_surfaced_when_file_differs_from_running(
         self, client: TestClient, db: Database, toml_path: Path
@@ -275,7 +289,11 @@ class TestExecutorSetter:
         ov = client.get("/")
         assert "pending restart" in ov.text
 
-    def test_invalid_policy_is_ignored(self, client: TestClient, toml_path: Path) -> None:
+    def test_invalid_policy_is_ignored(
+        self, client: TestClient, toml_path: Path, monkeypatch
+    ) -> None:
+        # never restarts on a rejected/invalid policy
+        monkeypatch.setattr(dash_app, "_schedule_detached_restart", lambda: True)
         r = client.post("/executor", data={"policy": "bogus"}, follow_redirects=False)
         assert r.status_code == 303
         assert r.headers["location"] == "/config"

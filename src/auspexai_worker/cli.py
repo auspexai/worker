@@ -212,18 +212,19 @@ def executor_show(ctx: click.Context) -> None:
 @click.option(
     "--restart/--no-restart",
     "restart",
-    default=False,
-    help="Restart the systemd user daemon so the change takes effect now "
-    "(otherwise it applies on the next restart).",
+    default=True,
+    help="Restart the systemd user daemon so the change takes effect now (default). "
+    "Pass --no-restart to only write the config and apply on the next restart.",
 )
 @click.pass_context
 def executor_set(ctx: click.Context, policy: str, auto_acquire: bool | None, restart: bool) -> None:
     """Deliberate, owner-driven change to what third-party code this worker runs.
     Writes the `[executor]` block of worker.toml in place (preserving the rest of
-    the file). The daemon reads execute_tenant_code at start, so the change applies
-    on the next restart — pass --restart to apply it now. Also available on the
-    localhost dashboard (M9 leg 4) — there, enabling `provisioned` is gated behind
-    a confirm step so it stays a deliberate act; this CLI is the headless equivalent."""
+    the file). The daemon reads execute_tenant_code at start, so the change needs a
+    restart — done automatically by default (pass --no-restart to only write). Also
+    available on the localhost dashboard (M9 leg 4) — there, enabling `provisioned`
+    is gated behind a confirm step; both surfaces apply the change by restarting the
+    worker."""
     target = ctx.obj.get("config_path") or default_worker_toml_path()
     try:
         set_executor_policy(target, policy, auto_acquire=auto_acquire)

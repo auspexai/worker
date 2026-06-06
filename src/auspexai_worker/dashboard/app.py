@@ -96,6 +96,47 @@ def _executor_state(config: WorkerConfig, config_path: Path | None) -> tuple[str
     return active, configured, configured != active
 
 
+def _schedule_detached_restart() -> bool:
+    """Schedule a worker-daemon restart ~2s out, **detached** from this process, so
+    the dashboard's HTTP response flushes before systemd bounces the daemon. The
+    dashboard runs INSIDE the daemon, so it can't restart synchronously; a transient
+    `systemd-run --on-active=2` timer fires the restart after the response is sent.
+    Returns True if scheduled; False when systemd isn't managing the worker (the
+    caller then shows a manual-restart instruction). Best-effort, never raises."""
+    import shutil
+    import subprocess
+
+    systemd_run = shutil.which("systemd-run")
+    systemctl = shutil.which("systemctl")
+    if not systemd_run or not systemctl:
+        return False
+    try:
+        active = subprocess.run(
+            [systemctl, "--user", "is-active", "auspexai-worker.service"],
+            capture_output=True,
+            text=True,
+        )
+        if active.returncode != 0:
+            return False
+        r = subprocess.run(
+            [
+                systemd_run,
+                "--user",
+                "--on-active=2",
+                "--quiet",
+                systemctl,
+                "--user",
+                "restart",
+                "auspexai-worker.service",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
 def _thermal_monitor(config: WorkerConfig) -> ThermalMonitor:
     return ThermalMonitor(
         warn_c=config.thermal_warn_c,
@@ -340,12 +381,12 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
             "this machine will run <strong>third-party tenant code</strong> — but only "
             "executors that were operator-staged locally and whose hash matches the "
             "coordinator's manifest (anything else is refused, never echoed). This is "
-            "your consent, on your hardware. The change applies on the next daemon "
-            "restart.</div>\n"
+            "your consent, on your hardware. <strong>Applying this restarts the worker "
+            "daemon</strong> (any in-flight unit is re-offered).</div>\n"
             '    <form method="post" action="/executor" style="margin:1em 0">\n'
             '      <input type="hidden" name="policy" value="provisioned">\n'
             '      <input type="hidden" name="confirm" value="yes">\n'
-            '      <button type="submit">Yes, enable provisioned execution</button>\n'
+            '      <button type="submit">Yes, enable provisioned + restart</button>\n'
             '      <a href="/config" style="margin-left:1em">Cancel</a>\n'
             "    </form>\n"
         )
@@ -371,7 +412,28 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
                 '    <p><a href="/config">back to config</a></p>'
             )
             return HTMLResponse(render_page(title="Config", body=body, active_nav="/config"))
-        return RedirectResponse("/config", status_code=303)
+        # A config change needs a daemon restart to take effect; the dashboard runs
+        # inside the daemon, so it can't restart synchronously — schedule a detached
+        # restart that fires after this response flushes. The UI told the user this
+        # action restarts the service (button label + confirm page).
+        restarting = _schedule_detached_restart()
+        if restarting:
+            body = (
+                '    <div class="notice">✓ Code-execution policy set to '
+                f"<strong>{html.escape(policy)}</strong>. The worker is "
+                "<strong>restarting now</strong> to apply — this dashboard will be "
+                "briefly unavailable; it reloads automatically.</div>\n"
+                '    <p><a href="/config">reload now</a></p>\n'
+                "    <script>setTimeout(function(){location.href='/config';}, 5000);</script>\n"
+            )
+        else:
+            body = (
+                '    <div class="notice">✓ Code-execution policy set to '
+                f"<strong>{html.escape(policy)}</strong>. Restart the worker to apply: "
+                "<code>systemctl --user restart auspexai-worker</code>.</div>\n"
+                '    <p><a href="/config">back to config</a></p>\n'
+            )
+        return HTMLResponse(render_page(title="Applied", body=body, active_nav="/config"))
 
     @app.get("/activity", response_class=HTMLResponse)
     def activity() -> str:
@@ -582,9 +644,10 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
             + "</p>\n"
             f'    <div style="margin:0.5em 0">{"".join(setter_buttons)}</div>\n'
             '    <p class="muted">Your consent to run third-party tenant code on this '
-            "machine. Applies on the next daemon restart. Enabling "
-            "<strong>provisioned</strong> requires confirmation; the network only "
-            "routes real (model-gated) experiments to provisioned workers.</p>\n"
+            "machine. <strong>Changing the policy restarts the worker daemon</strong> to "
+            "apply (any in-flight unit is re-offered). Enabling <strong>provisioned</strong> "
+            "asks for confirmation first; the network only routes real (model-gated) "
+            "experiments to provisioned workers.</p>\n"
         )
         body = (
             "    <h2>Configuration</h2>\n"

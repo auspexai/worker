@@ -66,9 +66,10 @@ def test_pause_requires_enrollment(tmp_path: Path) -> None:
 
 def test_executor_set_writes_toml(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path)
+    # --no-restart isolates the write path (restart defaults ON now).
     r = CliRunner().invoke(
         cli,
-        ["--config", str(cfg), "executor", "set", "provisioned", "--auto-acquire"],
+        ["--config", str(cfg), "executor", "set", "provisioned", "--auto-acquire", "--no-restart"],
         env=_env(tmp_path),
     )
     assert r.exit_code == 0, r.output
@@ -77,7 +78,7 @@ def test_executor_set_writes_toml(tmp_path: Path) -> None:
     assert loaded.auto_acquire is True
     # The pre-existing [coordinator] section is preserved (targeted upsert).
     assert loaded.coordinator_url == "http://t.invalid"
-    # Without --restart, it tells the user a restart is needed (no auto-restart).
+    # With --no-restart, it tells the user a restart is needed.
     assert "restart the daemon to apply" in r.output
 
 
