@@ -79,6 +79,23 @@ def _executor_badge(policy: str) -> str:
     return f'<span class="badge {cls}">{html.escape(label)}</span>'
 
 
+def _executor_state(config: WorkerConfig, config_path: Path | None) -> tuple[str, str, bool]:
+    """Return (active, configured, pending_restart) for the executor policy.
+
+    `active` is what the RUNNING daemon loaded at start (the snapshot in `config`,
+    which is what the heartbeat declares + dispatch enforces right now). `configured`
+    is what a fresh load from disk would pick up — i.e. what a restart would apply.
+    They differ after the setter writes worker.toml but before the daemon restarts;
+    `pending_restart` flags that so the dashboard never silently shows a stale mode
+    (the M9-leg-4 setter applies on restart, like the CLI)."""
+    active = config.execute_tenant_code
+    try:
+        configured = WorkerConfig.load(config_path=config_path).execute_tenant_code
+    except Exception:
+        configured = active
+    return active, configured, configured != active
+
+
 def _thermal_monitor(config: WorkerConfig) -> ThermalMonitor:
     return ThermalMonitor(
         warn_c=config.thermal_warn_c,
@@ -221,9 +238,15 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
         # Health & execution — what this machine is set to run + its physical state.
         model_count = len(ModelStore(config.models_store_path).list())
         acc = detect_accelerator()
+        active_mode, configured_mode, pending_restart = _executor_state(config, config_path)
+        tenant_code_cell = _executor_badge(active_mode)
+        if pending_restart:
+            tenant_code_cell += (
+                f' <span class="badge warn">pending restart → {html.escape(configured_mode)}</span>'
+            )
         health_html = f"""    <h2>Health &amp; execution</h2>
     <dl class="kv">
-      <dt>tenant code</dt><dd>{_executor_badge(config.execute_tenant_code)}</dd>
+      <dt>tenant code</dt><dd>{tenant_code_cell}</dd>
       <dt>accelerator</dt><dd>{html.escape(acc.label)}</dd>
       <dt>thermal</dt><dd>{_thermal_html(config)}</dd>
       <dt>models in store</dt><dd>{model_count} (<a href="/models">manage</a>)</dd>
@@ -518,29 +541,45 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
         # M9 leg 4: the one writable control on this page — the executor-policy
         # setter. Downgrades toward safer modes are one click; enabling
         # provisioned routes through the /executor/confirm deliberate-act step.
-        current = config.execute_tenant_code
+        # Buttons reflect the CONFIGURED (on-disk) value so they track what you last
+        # set; a pending-restart banner appears when that differs from the running
+        # daemon (the change applies on restart, like the CLI).
+        active_mode, configured, pending_restart = _executor_state(config, config_path)
         setter_buttons: list[str] = []
-        if current != "synthetic":
+        if configured != "synthetic":
             setter_buttons.append(
                 '<form method="post" action="/executor" style="display:inline">'
                 '<input type="hidden" name="policy" value="synthetic">'
                 '<button type="submit">set synthetic (echo only)</button></form>'
             )
-        if current != "off":
+        if configured != "off":
             setter_buttons.append(
                 '<form method="post" action="/executor" style="display:inline;margin-left:0.5em">'
                 '<input type="hidden" name="policy" value="off">'
                 '<button type="submit">set off (refuse all)</button></form>'
             )
-        if current != "provisioned":
+        if configured != "provisioned":
             # the deliberate-act path (confirm step before enabling 3rd-party code)
             setter_buttons.append(
                 '<a href="/executor/confirm" style="margin-left:0.5em" '
                 'role="button">enable provisioned…</a>'
             )
+        pending_banner = (
+            (
+                '    <div class="notice">⏳ <strong>Pending restart.</strong> Configured '
+                f"<strong>{html.escape(configured)}</strong>, but the running daemon is "
+                f"still <strong>{html.escape(active_mode)}</strong> — restart the worker "
+                "to apply (e.g. <code>systemctl --user restart auspexai-worker</code>).</div>\n"
+            )
+            if pending_restart
+            else ""
+        )
         executor_setter = (
             "    <h3>Code-execution policy</h3>\n"
-            f"    <p>current: {_executor_badge(current)}</p>\n"
+            + pending_banner
+            + f"    <p>configured: {_executor_badge(configured)}"
+            + (f" &nbsp;·&nbsp; running: {_executor_badge(active_mode)}" if pending_restart else "")
+            + "</p>\n"
             f'    <div style="margin:0.5em 0">{"".join(setter_buttons)}</div>\n'
             '    <p class="muted">Your consent to run third-party tenant code on this '
             "machine. Applies on the next daemon restart. Enabling "

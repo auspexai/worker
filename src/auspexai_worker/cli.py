@@ -209,13 +209,21 @@ def executor_show(ctx: click.Context) -> None:
     default=None,
     help="Also set auto_acquire (M3 pull-then-run; only effective under provisioned).",
 )
+@click.option(
+    "--restart/--no-restart",
+    "restart",
+    default=False,
+    help="Restart the systemd user daemon so the change takes effect now "
+    "(otherwise it applies on the next restart).",
+)
 @click.pass_context
-def executor_set(ctx: click.Context, policy: str, auto_acquire: bool | None) -> None:
+def executor_set(ctx: click.Context, policy: str, auto_acquire: bool | None, restart: bool) -> None:
     """Deliberate, owner-driven change to what third-party code this worker runs.
     Writes the `[executor]` block of worker.toml in place (preserving the rest of
-    the file). Restart the daemon to apply. Also available on the localhost
-    dashboard (M9 leg 4) — there, enabling `provisioned` is gated behind a confirm
-    step so it stays a deliberate act; this CLI is the headless equivalent."""
+    the file). The daemon reads execute_tenant_code at start, so the change applies
+    on the next restart — pass --restart to apply it now. Also available on the
+    localhost dashboard (M9 leg 4) — there, enabling `provisioned` is gated behind
+    a confirm step so it stays a deliberate act; this CLI is the headless equivalent."""
     target = ctx.obj.get("config_path") or default_worker_toml_path()
     try:
         set_executor_policy(target, policy, auto_acquire=auto_acquire)
@@ -226,13 +234,18 @@ def executor_set(ctx: click.Context, policy: str, auto_acquire: bool | None) -> 
         f"set [executor] execute_tenant_code = {policy}"
         + (f", auto_acquire = {auto_acquire}" if auto_acquire is not None else "")
     )
-    click.echo(
-        f"wrote {target} — restart the daemon to apply (e.g. `systemctl --user restart auspexai-worker`)."
-    )
     if policy == "provisioned":
         click.echo(
             "note: provisioned runs ONLY operator-staged executors whose hash matches "
             "the coordinator's manifest_sha256 (refuse-don't-echo otherwise)."
+        )
+    if restart:
+        _restart_service()
+    else:
+        click.echo(
+            f"wrote {target} — restart the daemon to apply "
+            "(`auspexai-worker executor set … --restart`, or "
+            "`systemctl --user restart auspexai-worker`)."
         )
 
 
@@ -559,6 +572,42 @@ def _enable_and_start_service() -> None:
         click.echo("service started.")
     else:
         click.echo(f"service start failed: {r.stderr.strip()}", err=True)
+
+
+def _restart_service() -> None:
+    """Restart the systemd user daemon so a config change takes effect now. Safe
+    from the CLI (a separate process, not in the daemon's cgroup). Falls back to a
+    clear manual instruction when systemd isn't managing the worker."""
+    import shutil
+    import subprocess
+
+    systemctl = shutil.which("systemctl")
+    if not systemctl:
+        click.echo("systemctl not found; restart the daemon manually to apply.")
+        return
+    if (
+        subprocess.run(
+            [systemctl, "--user", "is-active", "auspexai-worker.service"],
+            capture_output=True,
+            text=True,
+        ).returncode
+        != 0
+    ):
+        click.echo(
+            "auspexai-worker.service is not active under systemd --user; "
+            "restart the daemon manually to apply."
+        )
+        return
+    click.echo("restarting auspexai-worker.service …")
+    r = subprocess.run(
+        [systemctl, "--user", "restart", "auspexai-worker.service"],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode == 0:
+        click.echo("service restarted — the new policy is now active.")
+    else:
+        click.echo(f"restart failed: {r.stderr.strip()}", err=True)
         click.echo("try manually: systemctl --user enable --now auspexai-worker.service")
 
 

@@ -256,6 +256,25 @@ class TestExecutorSetter:
         assert "third-party tenant code" in r.text
         assert "Yes, enable provisioned execution" in r.text
 
+    def test_pending_restart_surfaced_when_file_differs_from_running(
+        self, client: TestClient, db: Database, toml_path: Path
+    ) -> None:
+        """The dashboard reflects the running daemon's snapshot (synthetic here);
+        once worker.toml is changed to provisioned, /config shows a pending-restart
+        banner and drives the buttons off the configured (on-disk) value — the
+        mayhem0 confusion (file=provisioned, daemon still synthetic)."""
+        _enroll(db)  # the overview health block (with the badge) renders when enrolled
+        toml_path.write_text('[executor]\nexecute_tenant_code = "provisioned"\n')
+        r = client.get("/config")
+        assert "Pending restart" in r.text
+        assert "running" in r.text  # shows the still-running mode
+        # buttons reflect configured=provisioned → offers downgrades, NOT "enable provisioned"
+        assert "set synthetic (echo only)" in r.text
+        assert "enable provisioned" not in r.text
+        # overview surfaces it too
+        ov = client.get("/")
+        assert "pending restart" in ov.text
+
     def test_invalid_policy_is_ignored(self, client: TestClient, toml_path: Path) -> None:
         r = client.post("/executor", data={"policy": "bogus"}, follow_redirects=False)
         assert r.status_code == 303
