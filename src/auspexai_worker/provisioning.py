@@ -172,6 +172,42 @@ def resolve_model_dir(
     return None, None
 
 
+def model_acquisition_coords(manifest: dict[str, Any]) -> tuple[str, str, str] | None:
+    """Return `(model_id, hf_repo, hf_filename)` for the single locally-required
+    model IF the manifest carries M3 acquisition coords, else None (the model
+    can't be auto-acquired — it must be staged out-of-band). Thin-slice: a single
+    model only, matching `resolve_model_dir`."""
+    models = manifest.get("models") or []
+    if len(models) != 1:
+        return None
+    m = models[0]
+    model_id = m.get("id")
+    hf_repo = m.get("hf_repo")
+    hf_filename = m.get("hf_filename")
+    if (
+        isinstance(model_id, str)
+        and model_id
+        and isinstance(hf_repo, str)
+        and hf_repo
+        and isinstance(hf_filename, str)
+        and hf_filename
+    ):
+        return model_id, hf_repo, hf_filename
+    return None
+
+
+class ModelAcquirer(Protocol):
+    """Pulls a missing model into the worker's store on demand (M3 lazy
+    auto-acquire). The dispatch layer supplies a concrete one wrapping
+    `models.fetch.pull_from_coords` + the store + a disk-headroom check; keeping
+    it a protocol lets `decide_execution` stay free of the fetch dependency and
+    be unit-tested with a fake."""
+
+    def acquire(self, *, model_id: str, hf_repo: str, hf_filename: str) -> Path:
+        """Pull the model into the store and return its dir. Raises on failure."""
+        ...
+
+
 class ExecutionMode(StrEnum):
     REAL = "real"  # run the resolved tenant executor
     SYNTHETIC = "synthetic"  # run the built-in echo executor
@@ -211,11 +247,19 @@ def decide_execution(
     model_store_dir: Path | None = None,
     allow_list: tuple[str, ...] = (),
     deny_list: tuple[str, ...] = (),
+    auto_acquire: bool = False,
+    acquirer: ModelAcquirer | None = None,
 ) -> ExecutionDecision:
     """The consent + resolution gate. Composes the code-execution policy with the
     §5.14 tenant allow/deny lists. Refuse-don't-echo: a `provisioned` worker that
     can't resolve a unit refuses it rather than submitting a synthetic echo under
-    a real tenant's experiment."""
+    a real tenant's experiment.
+
+    M3 lazy auto-acquire: when `auto_acquire` is set and an `acquirer` is supplied,
+    a missing locally-required model is *pulled* (from the manifest's
+    hf_repo/hf_filename) and the unit then runs, instead of refusing. A model
+    with no acquisition coords, or a pull that fails, still refuses (the worker
+    won't run a real tenant's experiment without the pinned weights)."""
     if policy is ExecutePolicy.OFF:
         return ExecutionDecision(ExecutionMode.REFUSE, "worker policy execute_tenant_code=off")
 
@@ -245,9 +289,30 @@ def decide_execution(
 
     # Resolve --models from the worker-local BYOM store (§5.8). A missing
     # locally-required model is a refuse, not an echo.
-    models_dir, model_reason = resolve_model_dir(
-        resolved.manifest, model_store_dir if model_store_dir is not None else Path()
-    )
+    store_dir = model_store_dir if model_store_dir is not None else Path()
+    models_dir, model_reason = resolve_model_dir(resolved.manifest, store_dir)
     if model_reason is not None:
-        return ExecutionDecision(ExecutionMode.REFUSE, model_reason)
+        # M3 lazy auto-acquire: try to pull the missing model, then re-resolve.
+        if auto_acquire and acquirer is not None:
+            coords = model_acquisition_coords(resolved.manifest)
+            if coords is None:
+                return ExecutionDecision(
+                    ExecutionMode.REFUSE,
+                    f"{model_reason}; auto_acquire is on but the manifest carries no "
+                    "hf_repo/hf_filename to pull from (model_not_acquirable)",
+                )
+            model_id, hf_repo, hf_filename = coords
+            try:
+                acquirer.acquire(model_id=model_id, hf_repo=hf_repo, hf_filename=hf_filename)
+            except Exception as exc:
+                return ExecutionDecision(
+                    ExecutionMode.REFUSE,
+                    f"auto-acquire of model {model_id!r} from {hf_repo}/{hf_filename} "
+                    f"failed: {exc} (model_pull_failed)",
+                )
+            models_dir, model_reason = resolve_model_dir(resolved.manifest, store_dir)
+            if model_reason is not None:  # pragma: no cover — pull succeeded but still unresolved
+                return ExecutionDecision(ExecutionMode.REFUSE, model_reason)
+        else:
+            return ExecutionDecision(ExecutionMode.REFUSE, model_reason)
     return ExecutionDecision(ExecutionMode.REAL, executor=resolved, models_dir=models_dir)

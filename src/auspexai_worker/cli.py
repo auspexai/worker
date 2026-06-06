@@ -44,7 +44,7 @@ from .health import ThermalMonitor
 from .keystore import KeystoreError
 from .models import ModelCatalog, ModelStore, recommend, survey_resources
 from .models.catalog import FileCatalogSource
-from .models.fetch import HfHubFetcher, ModelFetchError, pull_quant
+from .models.fetch import HfHubFetcher, ModelFetchError, StoreModelAcquirer, pull_quant
 from .models.hf_browse import HfHubBrowser, quant_fits, runnable_models, usable_budget_gb
 from .models.recommend import parse_selection
 from .oauth import (
@@ -157,6 +157,12 @@ def logs(ctx: click.Context, lines: int, follow: bool) -> None:
 @cli.group("model", help="Manage local inference models (BYOM model store).")
 def model() -> None:
     pass
+
+
+# M3 disk-exposure: leave a safety margin of free disk untouched when sizing a
+# model-acquisition set, so a worker never fills its root pulling weights (the
+# mayhem0 lesson — though that hang was a dead connection, not full disk).
+_DISK_SAFETY_MARGIN_BYTES = 5_000_000_000
 
 
 def _load_catalog(catalog_path: str | None) -> ModelCatalog:
@@ -303,7 +309,7 @@ def model_setup(ctx: click.Context, limit: int, yes: bool) -> None:
     store = ModelStore(config.models_store_path)
     acc = detect_accelerator()
     disk_free = survey_resources(store.root).disk_free_bytes
-    click.echo(f"host: {acc.label}\n")
+    click.echo(f"host: {acc.label}  ·  {disk_free / 1e9:.0f} GB disk free\n")
     _echo_installed_summary(store)
     try:
         candidates = [
@@ -352,22 +358,64 @@ def model_setup(ctx: click.Context, limit: int, yes: bool) -> None:
     if not chosen:
         click.echo("Nothing selected.")
         return
+
+    # M3 disk-exposure: never let the selected SET exceed free disk (minus a
+    # safety margin) — each quant fits individually, but `setup` pulls a set, and
+    # nothing summed across them before. Trim greedily in listed order and report
+    # exactly what was dropped (no silent truncation).
+    budget = max(0, disk_free - _DISK_SAFETY_MARGIN_BYTES)
     total = sum(r.quant.size_bytes for r in chosen)
+    if total > budget:
+        kept: list = []
+        dropped: list = []
+        running = 0
+        for r in chosen:
+            if running + r.quant.size_bytes <= budget:
+                kept.append(r)
+                running += r.quant.size_bytes
+            else:
+                dropped.append(r)
+        click.echo(
+            f"\n⚠ selected ~{total / 1e9:.1f} GB exceeds ~{budget / 1e9:.1f} GB usable "
+            f"({disk_free / 1e9:.1f} GB free - {_DISK_SAFETY_MARGIN_BYTES / 1e9:.0f} GB margin):"
+        )
+        for r in dropped:
+            click.echo(
+                f"  skipping {r.quant.repo} [{r.quant.quant}] "
+                f"(~{r.quant.size_gb:.1f} GB) - won't fit"
+            )
+        chosen = kept
+        if not chosen:
+            click.echo("Nothing fits the disk budget; free space or pick smaller quants.")
+            return
+        total = running
+
     if (
         not yes
         and sys.stdin.isatty()
         and not click.confirm(
-            f"\nDownload {len(chosen)} model(s), ~{total / 1e9:.1f} GB total?", default=True
+            f"\nDownload {len(chosen)} model(s), ~{total / 1e9:.1f} GB "
+            f"(of ~{budget / 1e9:.1f} GB usable)?",
+            default=True,
         )
     ):
         click.echo("Aborted.")
         return
 
     failures = 0
+    remaining = disk_free
     for r in chosen:
+        if r.quant.size_bytes > max(0, remaining - _DISK_SAFETY_MARGIN_BYTES):
+            click.echo(
+                f"  skipping {r.quant.model_id}: ~{r.quant.size_gb:.1f} GB won't fit "
+                f"{remaining / 1e9:.1f} GB remaining",
+                err=True,
+            )
+            continue
         click.echo(f"pulling {r.quant.repo} [{r.quant.quant}] …")
         try:
-            pull_quant(r.quant, store, HfHubFetcher(), disk_free_bytes=disk_free)
+            pull_quant(r.quant, store, HfHubFetcher(), disk_free_bytes=remaining)
+            remaining -= r.quant.size_bytes
             click.echo(f"  installed {r.quant.model_id}")
         except ModelFetchError as exc:
             failures += 1
@@ -593,6 +641,14 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
             executor_resolver=ProvisioningResolver(config.provisioning_path),
             model_store_dir=config.models_store_path,
             thermal_monitor=thermal_monitor,
+            # M3 lazy auto-acquire: pull a missing locally-required model on
+            # assignment (opt-in; only meaningful under `provisioned`).
+            auto_acquire=config.auto_acquire,
+            model_acquirer=(
+                StoreModelAcquirer(ModelStore(config.models_store_path))
+                if config.auto_acquire
+                else None
+            ),
         )
         heartbeat = HeartbeatLoop(
             coordinator=client,
@@ -606,6 +662,10 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
                 # W-H: report current thermal state so the coordinator can route
                 # work away from a degraded/overheating worker.
                 thermal=(thermal_monitor.snapshot().to_dict() if thermal_monitor.enabled else None),
+                # M3: declare auto-acquire only when it can actually take effect
+                # (provisioned policy), so the coordinator routes model-gated
+                # units here only if we'll truly pull+run them.
+                auto_acquire=(config.auto_acquire and config.execute_tenant_code == "provisioned"),
             ),
             interval_seconds=config.heartbeat_interval_seconds,
         )

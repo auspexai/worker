@@ -15,7 +15,13 @@ from auspexai_worker.models import (
     recommend,
 )
 from auspexai_worker.models.catalog import ModelCatalogEntry
-from auspexai_worker.models.fetch import HfHubFetcher, ModelFetchError, pull_model
+from auspexai_worker.models.fetch import (
+    HfHubFetcher,
+    ModelFetchError,
+    StoreModelAcquirer,
+    pull_from_coords,
+    pull_model,
+)
 
 # ---- catalog ---------------------------------------------------------------
 
@@ -166,6 +172,75 @@ def test_hf_fetcher_missing_dependency(tmp_path: Path):
     # huggingface_hub isn't installed in the test env -> clear actionable error.
     with pytest.raises(ModelFetchError, match="huggingface_hub"):
         HfHubFetcher().fetch(SMALL, tmp_path)
+
+
+# ---- M3 lazy auto-acquire: pull_from_coords + StoreModelAcquirer -----------
+
+
+class _FakeFileFetcher:
+    """Fetcher exposing the `fetch_file(repo, filename, dest_dir)` surface the
+    coords-pull path uses."""
+
+    def __init__(self, *, raises: Exception | None = None) -> None:
+        self.calls: list[tuple[str, str]] = []
+        self._raises = raises
+
+    def fetch_file(self, repo: str, filename: str, dest_dir: Path) -> None:
+        self.calls.append((repo, filename))
+        if self._raises is not None:
+            raise self._raises
+        (dest_dir / filename).write_bytes(b"weights")
+
+
+def test_pull_from_coords_installs_and_idempotent(tmp_path: Path):
+    store = ModelStore(tmp_path)
+    fetcher = _FakeFileFetcher()
+    dest = pull_from_coords(
+        model_id="m-x", hf_repo="Org/M-GGUF", hf_filename="M-Q4.gguf", store=store, fetcher=fetcher
+    )
+    assert dest == tmp_path / "m-x"
+    assert (dest / "M-Q4.gguf").read_bytes() == b"weights"
+    assert store.has("m-x")
+    # already installed -> no-op (fetcher not called again)
+    pull_from_coords(
+        model_id="m-x", hf_repo="Org/M-GGUF", hf_filename="M-Q4.gguf", store=store, fetcher=fetcher
+    )
+    assert len(fetcher.calls) == 1
+
+
+def test_pull_from_coords_headroom_guard(tmp_path: Path):
+    store = ModelStore(tmp_path)
+    with pytest.raises(ModelFetchError, match="headroom"):
+        pull_from_coords(
+            model_id="m-x",
+            hf_repo="Org/M-GGUF",
+            hf_filename="M-Q4.gguf",
+            store=store,
+            fetcher=_FakeFileFetcher(),
+            disk_free_bytes=1_000_000,  # below the 2 GB default min headroom
+        )
+
+
+def test_pull_from_coords_cleans_staging_on_failure(tmp_path: Path):
+    store = ModelStore(tmp_path)
+    with pytest.raises(ModelFetchError, match="auto-acquire"):
+        pull_from_coords(
+            model_id="m-x",
+            hf_repo="Org/M-GGUF",
+            hf_filename="M-Q4.gguf",
+            store=store,
+            fetcher=_FakeFileFetcher(raises=RuntimeError("connection died")),
+        )
+    assert not store.has("m-x")
+    assert not (tmp_path / "m-x.partial").exists()  # staging cleaned
+
+
+def test_store_model_acquirer_pulls_into_store(tmp_path: Path):
+    store = ModelStore(tmp_path)
+    acquirer = StoreModelAcquirer(store, _FakeFileFetcher())
+    dest = acquirer.acquire(model_id="m-x", hf_repo="Org/M-GGUF", hf_filename="M-Q4.gguf")
+    assert dest == tmp_path / "m-x"
+    assert store.has("m-x")
 
 
 # ---- selection parsing (interactive setup) ---------------------------------

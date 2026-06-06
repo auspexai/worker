@@ -16,6 +16,7 @@ acquisition-side analog of the §9 #37 `manifest_sha256` check.
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 from pathlib import Path
 from typing import Protocol
@@ -23,6 +24,16 @@ from typing import Protocol
 from auspexai_worker.models.catalog import ModelCatalogEntry
 from auspexai_worker.models.recommend import WorkerResources
 from auspexai_worker.models.store import ModelStore
+
+# M3 fetch-hardening (mayhem0, 2026-06-06): a `model setup` download wedged for
+# hours on a half-closed HuggingFace connection because the default **Xet**
+# transfer path has no read timeout — the process blocked in a socket read that
+# never returned. Force the classic resumable HTTP downloader (it honors
+# HF_HUB_DOWNLOAD_TIMEOUT as a per-read timeout AND resumes the `.incomplete`
+# shard) and bound that read. Set BEFORE huggingface_hub is imported anywhere;
+# `setdefault` so an operator can still override via the environment.
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")
 
 
 class ModelFetchError(Exception):
@@ -145,6 +156,85 @@ def pull_quant(quant, store: ModelStore, fetcher, *, disk_free_bytes: int | None
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
         raise
+    if dest.exists():
+        shutil.rmtree(dest)
+    staging.rename(dest)
+    return dest
+
+
+def _free_bytes_for(path: Path) -> int:
+    """Free bytes on the filesystem holding `path` (or its nearest existing
+    ancestor — the store root may not exist yet on a fresh worker)."""
+    p = path
+    while not p.exists() and p != p.parent:
+        p = p.parent
+    return shutil.disk_usage(p).free
+
+
+class StoreModelAcquirer:
+    """Concrete `provisioning.ModelAcquirer` (M3 lazy auto-acquire): pull a pinned
+    file into the worker store, guarded by a coarse free-disk headroom check.
+    Wired into the dispatcher only when `[executor] auto_acquire` is on."""
+
+    def __init__(
+        self,
+        store: ModelStore,
+        fetcher: ModelFetcher | None = None,
+        *,
+        min_headroom_bytes: int = 2_000_000_000,
+    ) -> None:
+        self._store = store
+        self._fetcher = fetcher or HfHubFetcher()
+        self._min_headroom_bytes = min_headroom_bytes
+
+    def acquire(self, *, model_id: str, hf_repo: str, hf_filename: str) -> Path:
+        return pull_from_coords(
+            model_id=model_id,
+            hf_repo=hf_repo,
+            hf_filename=hf_filename,
+            store=self._store,
+            fetcher=self._fetcher,
+            disk_free_bytes=_free_bytes_for(self._store.root),
+            min_headroom_bytes=self._min_headroom_bytes,
+        )
+
+
+def pull_from_coords(
+    *,
+    model_id: str,
+    hf_repo: str,
+    hf_filename: str,
+    store: ModelStore,
+    fetcher,
+    disk_free_bytes: int | None = None,
+    min_headroom_bytes: int = 2_000_000_000,
+) -> Path:
+    """Pull a single pinned file (`hf_repo`/`hf_filename`) into the store under
+    `model_id` — the M3 lazy-auto-acquire path. Mirrors `pull_quant`'s atomic
+    `.partial` staging + idempotence, but takes the explicit acquisition coords
+    the manifest carries (we don't know the size up front, so the disk guard is
+    a coarse free-headroom check rather than an exact size pre-check).
+
+    `fetcher` must expose `fetch_file(repo, filename, dest_dir)` (HfHubFetcher)."""
+    dest = store.path_for(model_id)
+    if store.has(model_id):
+        return dest
+    if disk_free_bytes is not None and disk_free_bytes < min_headroom_bytes:
+        raise ModelFetchError(
+            f"insufficient disk headroom to acquire {model_id!r}: "
+            f"{disk_free_bytes / 1e9:.1f} GB free, need >{min_headroom_bytes / 1e9:.1f} GB"
+        )
+    staging = dest.parent / f"{model_id}.partial"
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True)
+    try:
+        fetcher.fetch_file(hf_repo, hf_filename, staging)
+    except Exception as exc:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise ModelFetchError(
+            f"auto-acquire of {model_id!r} from {hf_repo}/{hf_filename} failed: {exc}"
+        ) from exc
     if dest.exists():
         shutil.rmtree(dest)
     staging.rename(dest)

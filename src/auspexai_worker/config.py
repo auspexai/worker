@@ -72,6 +72,12 @@ class WorkerConfig:
     # keyed by manifest_sha256.
     execute_tenant_code: str = "synthetic"
     provisioning_dir: Path | None = None
+    # [executor] auto_acquire (M3 lazy auto-acquire) — when True AND the policy is
+    # `provisioned`, a unit whose locally-required model is missing is pulled
+    # (from the manifest's hf_repo/hf_filename) then run, rather than refused.
+    # Default False keeps the refuse-don't-echo posture; this is an explicit
+    # opt-in to spend bandwidth+disk acquiring models on demand.
+    auto_acquire: bool = False
     # [models] store_dir (None -> data_dir/models): the worker-local BYOM model
     # store, laid out by model id (`<store>/<model_id>/`). The volunteer fills
     # it (the platform never distributes weights, §5.8); `--models` resolves
@@ -235,6 +241,8 @@ class WorkerConfig:
                     merged["execute_tenant_code"] = executor_block[key]
             if "provisioning_dir" in executor_block:
                 merged["provisioning_dir"] = executor_block["provisioning_dir"]
+            if "auto_acquire" in executor_block:
+                merged["auto_acquire"] = executor_block["auto_acquire"]
             models_block = data.get("models") or {}
             if "store_dir" in models_block:
                 merged["models_store_dir"] = models_block["store_dir"]
@@ -275,6 +283,12 @@ class WorkerConfig:
             merged["execute_tenant_code"] = env["AUSPEXAI_WORKER_EXECUTE_TENANT_CODE"]
         if "AUSPEXAI_WORKER_PROVISIONING_DIR" in env:
             merged["provisioning_dir"] = env["AUSPEXAI_WORKER_PROVISIONING_DIR"]
+        if "AUSPEXAI_WORKER_AUTO_ACQUIRE" in env:
+            merged["auto_acquire"] = env["AUSPEXAI_WORKER_AUTO_ACQUIRE"].lower() in (
+                "1",
+                "true",
+                "yes",
+            )
         if "AUSPEXAI_WORKER_DASHBOARD_ENABLED" in env:
             merged["dashboard_enabled"] = env["AUSPEXAI_WORKER_DASHBOARD_ENABLED"].lower() in (
                 "1",
@@ -306,6 +320,7 @@ class WorkerConfig:
             sandbox_use_bubblewrap=bool(merged.get("sandbox_use_bubblewrap", True)),
             runner_timeout_seconds=_opt_float(merged.get("runner_timeout_seconds")),
             execute_tenant_code=_validate_policy(merged.get("execute_tenant_code", "synthetic")),
+            auto_acquire=bool(merged.get("auto_acquire", False)),
             provisioning_dir=(
                 None
                 if merged.get("provisioning_dir") is None

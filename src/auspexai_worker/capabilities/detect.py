@@ -106,6 +106,13 @@ class Capabilities:
     # Lets the coordinator route work away from a degraded/overheating worker
     # (forward-compatible; opaque until consumed).
     thermal: dict[str, Any] | None = None
+    # M3 lazy auto-acquire: when True, the worker will pull a missing
+    # locally-required model on assignment (from the manifest's hf_repo/
+    # hf_filename) rather than refusing. The coordinator's #30 capability
+    # matcher reads this so it may route a model-gated unit here even when the
+    # model isn't in `models` yet. Omitted from the wire when False (the matcher
+    # checks `is True`, so absent == disabled).
+    auto_acquire: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-serializable shape.
@@ -135,6 +142,8 @@ class Capabilities:
             d.pop("thermal", None)  # omit where no sensor / health disabled
         if self.worker_version is None:
             d.pop("worker_version", None)
+        if not self.auto_acquire:
+            d.pop("auto_acquire", None)  # compact wire; absent == disabled
         return d
 
 
@@ -232,6 +241,9 @@ def collect(
     # Current thermal snapshot (W-H), caller-supplied (the daemon owns the
     # stateful monitor so hysteresis is shared with the dispatch gate).
     thermal: dict[str, Any] | None = None,
+    # M3 lazy auto-acquire opt-in (from [executor] auto_acquire). Caller-supplied
+    # so the collector stays config-agnostic.
+    auto_acquire: bool = False,
     # Back-compat alias kept for callers that still pass `declared=...`.
     declared: DeclaredCaps | None = None,
 ) -> Capabilities:
@@ -252,4 +264,5 @@ def collect(
         models=models or [],
         thermal=thermal,
         worker_version=worker_version,
+        auto_acquire=auto_acquire,
     )

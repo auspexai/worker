@@ -24,6 +24,26 @@ class TestConfigDefaults:
         assert cfg.declared_gpus.is_empty() is True
 
 
+class TestExecutorAutoAcquire:
+    def test_defaults_off(self, tmp_path: Path) -> None:
+        cfg = WorkerConfig.load(config_path=tmp_path / "missing.toml", env={})
+        assert cfg.auto_acquire is False
+
+    def test_parsed_from_executor_block(self, tmp_path: Path) -> None:
+        cfg_file = tmp_path / "worker.toml"
+        _write(cfg_file, "[executor]\nmode = 'provisioned'\nauto_acquire = true\n")
+        cfg = WorkerConfig.load(config_path=cfg_file, env={})
+        assert cfg.auto_acquire is True
+        assert cfg.execute_tenant_code == "provisioned"
+
+    def test_env_override(self, tmp_path: Path) -> None:
+        cfg = WorkerConfig.load(
+            config_path=tmp_path / "missing.toml",
+            env={"AUSPEXAI_WORKER_AUTO_ACQUIRE": "1"},
+        )
+        assert cfg.auto_acquire is True
+
+
 class TestResourcesBlock:
     def test_parses_caps(self, tmp_path: Path) -> None:
         cfg_file = tmp_path / "worker.toml"

@@ -116,6 +116,11 @@ class RunnerDispatcher:
         tenant_allow_list: tuple[str, ...] = (),
         tenant_deny_list: tuple[str, ...] = (),
         thermal_monitor: ThermalMonitor | None = None,  # W-H health governor
+        # M3 lazy auto-acquire: when `auto_acquire` is on, a missing
+        # locally-required model is pulled (via `model_acquirer`) instead of
+        # refused. Default off keeps refuse-don't-echo.
+        auto_acquire: bool = False,
+        model_acquirer=None,  # provisioning.ModelAcquirer | None
     ) -> None:
         self._coordinator = coordinator
         self._worker_id = worker_id
@@ -135,6 +140,8 @@ class RunnerDispatcher:
         self._tenant_allow_list = tenant_allow_list
         self._tenant_deny_list = tenant_deny_list
         self._thermal_monitor = thermal_monitor
+        self._auto_acquire = auto_acquire
+        self._model_acquirer = model_acquirer
 
     def run_unit(self, response: AssignmentResponse) -> DispatchOutcome:
         """Execute the assigned unit and submit the result. Always cleans
@@ -183,6 +190,8 @@ class RunnerDispatcher:
             model_store_dir=self._model_store_dir,
             allow_list=self._tenant_allow_list,
             deny_list=self._tenant_deny_list,
+            auto_acquire=self._auto_acquire,
+            acquirer=self._model_acquirer,
         )
         if decision.mode is ExecutionMode.REFUSE:
             logger.info("declining unit %s: %s", unit.unit_id, decision.reason)

@@ -241,6 +241,135 @@ def test_decide_execution_refuses_missing_required_model(tmp_path: Path):
     assert "big-llm" in d.reason
 
 
+# ---- M3 lazy auto-acquire --------------------------------------------------
+
+
+def test_model_acquisition_coords_present_and_absent():
+    from auspexai_worker.provisioning import model_acquisition_coords
+
+    have = {
+        "models": [
+            {
+                "id": "m-x",
+                "local_weights_required": True,
+                "hf_repo": "Org/M-GGUF",
+                "hf_filename": "M-Q4.gguf",
+            }
+        ]
+    }
+    assert model_acquisition_coords(have) == ("m-x", "Org/M-GGUF", "M-Q4.gguf")
+    # no coords -> not acquirable
+    assert model_acquisition_coords({"models": [{"id": "m-x"}]}) is None
+    # multi-model thin-slice unsupported
+    assert model_acquisition_coords({"models": [{"id": "a"}, {"id": "b"}]}) is None
+
+
+class _FakeAcquirer:
+    """Records the requested pull and lays down a non-empty model dir so the
+    re-resolve sees the model as present (or raises to simulate a failed pull)."""
+
+    def __init__(self, store_dir: Path, *, raises: Exception | None = None):
+        self._store_dir = store_dir
+        self._raises = raises
+        self.calls: list[tuple[str, str, str]] = []
+
+    def acquire(self, *, model_id: str, hf_repo: str, hf_filename: str) -> Path:
+        self.calls.append((model_id, hf_repo, hf_filename))
+        if self._raises is not None:
+            raise self._raises
+        dest = self._store_dir / model_id
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / hf_filename).write_text("weights")
+        return dest
+
+
+def _gated_manifest() -> dict:
+    return {
+        "tenant_id": "t",
+        "executor": {"command": ["python", "x.py"]},
+        "models": [
+            {
+                "id": "m-x",
+                "local_weights_required": True,
+                "hf_repo": "Org/M-GGUF",
+                "hf_filename": "M-Q4.gguf",
+            }
+        ],
+    }
+
+
+def test_auto_acquire_pulls_then_runs(tmp_path: Path):
+    resolved = ResolvedExecutor("a" * 64, ["python", "x.py"], Path("/p"), _gated_manifest())
+    acquirer = _FakeAcquirer(tmp_path)
+    d = decide_execution(
+        policy=ExecutePolicy.PROVISIONED,
+        tenant_id="t",
+        manifest_sha256="a" * 64,
+        resolver=_StubResolver(resolved),
+        model_store_dir=tmp_path,  # empty store -> would refuse without auto-acquire
+        auto_acquire=True,
+        acquirer=acquirer,
+    )
+    assert d.mode is ExecutionMode.REAL
+    assert acquirer.calls == [("m-x", "Org/M-GGUF", "M-Q4.gguf")]
+    assert d.models_dir == tmp_path / "m-x"
+
+
+def test_auto_acquire_off_still_refuses(tmp_path: Path):
+    resolved = ResolvedExecutor("a" * 64, ["python", "x.py"], Path("/p"), _gated_manifest())
+    acquirer = _FakeAcquirer(tmp_path)
+    d = decide_execution(
+        policy=ExecutePolicy.PROVISIONED,
+        tenant_id="t",
+        manifest_sha256="a" * 64,
+        resolver=_StubResolver(resolved),
+        model_store_dir=tmp_path,
+        auto_acquire=False,  # opt-in off
+        acquirer=acquirer,
+    )
+    assert d.mode is ExecutionMode.REFUSE
+    assert acquirer.calls == []
+
+
+def test_auto_acquire_no_coords_refuses_not_acquirable(tmp_path: Path):
+    manifest = {
+        "tenant_id": "t",
+        "executor": {"command": ["python", "x.py"]},
+        "models": [{"id": "m-x", "local_weights_required": True}],  # no hf_repo/filename
+    }
+    resolved = ResolvedExecutor("a" * 64, ["python", "x.py"], Path("/p"), manifest)
+    acquirer = _FakeAcquirer(tmp_path)
+    d = decide_execution(
+        policy=ExecutePolicy.PROVISIONED,
+        tenant_id="t",
+        manifest_sha256="a" * 64,
+        resolver=_StubResolver(resolved),
+        model_store_dir=tmp_path,
+        auto_acquire=True,
+        acquirer=acquirer,
+    )
+    assert d.mode is ExecutionMode.REFUSE
+    assert "model_not_acquirable" in d.reason
+    assert acquirer.calls == []
+
+
+def test_auto_acquire_pull_failure_refuses(tmp_path: Path):
+    resolved = ResolvedExecutor("a" * 64, ["python", "x.py"], Path("/p"), _gated_manifest())
+    acquirer = _FakeAcquirer(tmp_path, raises=RuntimeError("connection died"))
+    d = decide_execution(
+        policy=ExecutePolicy.PROVISIONED,
+        tenant_id="t",
+        manifest_sha256="a" * 64,
+        resolver=_StubResolver(resolved),
+        model_store_dir=tmp_path,
+        auto_acquire=True,
+        acquirer=acquirer,
+    )
+    assert d.mode is ExecutionMode.REFUSE
+    assert "model_pull_failed" in d.reason
+    assert acquirer.calls == [("m-x", "Org/M-GGUF", "M-Q4.gguf")]
+
+
 # ---- config wiring ---------------------------------------------------------
 
 

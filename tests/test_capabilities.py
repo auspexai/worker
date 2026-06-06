@@ -147,6 +147,15 @@ class TestCollect:
         payload = caps.to_dict()
         assert payload["declared_caps"] == {"max_ram_gb": 12.5, "max_cpu_cores": 4}
 
+    def test_to_dict_omits_auto_acquire_when_off(self, tmp_path: Path) -> None:
+        # M3: absent on the wire == disabled (the coordinator matcher checks `is True`).
+        payload = collect(sysroot=tmp_path).to_dict()
+        assert "auto_acquire" not in payload
+
+    def test_to_dict_includes_auto_acquire_when_on(self, tmp_path: Path) -> None:
+        payload = collect(sysroot=tmp_path, auto_acquire=True).to_dict()
+        assert payload["auto_acquire"] is True
+
     def test_declared_alias_back_compat(self, tmp_path: Path) -> None:
         """`declared=` kwarg is the old name; still accepted for back-compat
         so existing callers don't break during the M2-tail rename."""
