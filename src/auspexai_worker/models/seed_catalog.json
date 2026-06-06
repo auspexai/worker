@@ -1,0 +1,29 @@
+[
+  {
+    "id": "all-minilm-l6-v2",
+    "version": "1.0",
+    "hf_repo": "sentence-transformers/all-MiniLM-L6-v2",
+    "note": "Small sentence-embedding model (~90 MB); runs on CPU. Good first pull.",
+    "disk_bytes": 95000000,
+    "vram_load_gb": 0.5,
+    "min_ram_gb": 1.0
+  },
+  {
+    "id": "gpt2",
+    "version": "1.0",
+    "hf_repo": "openai-community/gpt2",
+    "note": "GPT-2 124M (~550 MB); CPU-friendly. Classic baseline LM.",
+    "disk_bytes": 550000000,
+    "vram_load_gb": 1.0,
+    "min_ram_gb": 2.0
+  },
+  {
+    "id": "falcon-7b",
+    "version": "1.0",
+    "hf_repo": "tiiuae/falcon-7b",
+    "note": "Falcon 7B (~15 GB); needs a ~16 GB GPU. Example of a large model.",
+    "disk_bytes": 15000000000,
+    "vram_load_gb": 16.0,
+    "min_ram_gb": 16.0
+  }
+]

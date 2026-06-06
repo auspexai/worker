@@ -1,0 +1,291 @@
+"""Executor resolution + the §9 #37 code-execution consent gate."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+
+import pytest
+
+from auspexai_worker.provisioning import (
+    ExecutePolicy,
+    ExecutionMode,
+    ProvisioningIntegrityError,
+    ProvisioningResolver,
+    ResolvedExecutor,
+    decide_execution,
+    hash_manifest,
+    resolve_model_dir,
+)
+
+MANIFEST = {
+    "tenant_id": "synth-geometry",
+    "experiment_id": "synth-geometry-v1",
+    "executor": {"command": ["python", "executor.py"]},
+    "models": [{"id": "m", "version": "1.0", "local_weights_required": True}],
+}
+
+
+def _stage(root: Path, manifest: dict, *, sha: str | None = None) -> str:
+    """Stage a tenant package under root/<sha>/ and return the sha used."""
+    sha = sha or hash_manifest(manifest)
+    pkg = root / sha
+    pkg.mkdir(parents=True)
+    (pkg / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (pkg / "executor.py").write_text("# executor", encoding="utf-8")
+    return sha
+
+
+# ---- manifest hashing must match the coordinator exactly -------------------
+
+
+def test_hash_manifest_matches_coordinator_canonicalization():
+    # Coordinator: sha256(json.dumps(m, sort_keys=True, separators=(",",":")))
+    expected = hashlib.sha256(
+        json.dumps(MANIFEST, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    assert hash_manifest(MANIFEST) == expected
+
+
+def test_hash_manifest_is_key_order_independent():
+    reordered = dict(reversed(list(MANIFEST.items())))
+    assert hash_manifest(reordered) == hash_manifest(MANIFEST)
+
+
+# ---- ProvisioningResolver --------------------------------------------------
+
+
+def test_resolve_returns_none_when_not_provisioned(tmp_path: Path):
+    resolver = ProvisioningResolver(tmp_path)
+    assert resolver.resolve("a" * 64) is None
+
+
+def test_resolve_returns_executor_when_hash_matches(tmp_path: Path):
+    sha = _stage(tmp_path, MANIFEST)
+    resolved = ProvisioningResolver(tmp_path).resolve(sha)
+    assert isinstance(resolved, ResolvedExecutor)
+    assert resolved.command == ["python", "executor.py"]
+    assert resolved.package_dir == tmp_path / sha
+    assert resolved.manifest["tenant_id"] == "synth-geometry"
+
+
+def test_resolve_rejects_hash_mismatch(tmp_path: Path):
+    # Stage the manifest under a sha that doesn't match its content.
+    wrong_sha = "b" * 64
+    _stage(tmp_path, MANIFEST, sha=wrong_sha)
+    with pytest.raises(ProvisioningIntegrityError, match="content-addressing"):
+        ProvisioningResolver(tmp_path).resolve(wrong_sha)
+
+
+def test_resolve_rejects_missing_executor_command(tmp_path: Path):
+    bad = {k: v for k, v in MANIFEST.items() if k != "executor"}
+    sha = _stage(tmp_path, bad)
+    with pytest.raises(ProvisioningIntegrityError, match=r"executor\.command"):
+        ProvisioningResolver(tmp_path).resolve(sha)
+
+
+def test_resolve_is_case_insensitive_on_sha(tmp_path: Path):
+    sha = _stage(tmp_path, MANIFEST)
+    # An uppercase assignment hash must still resolve + verify.
+    resolved = ProvisioningResolver(tmp_path).resolve(sha.upper())
+    assert resolved is not None
+    assert resolved.manifest_sha256 == sha  # normalized to lowercase
+
+
+# ---- decide_execution: the consent + resolution gate -----------------------
+
+
+class _StubResolver:
+    def __init__(self, result=None, raises: Exception | None = None):
+        self._result = result
+        self._raises = raises
+
+    def resolve(self, manifest_sha256):
+        if self._raises is not None:
+            raise self._raises
+        return self._result
+
+
+def test_policy_off_refuses():
+    d = decide_execution(
+        policy=ExecutePolicy.OFF,
+        tenant_id="t",
+        manifest_sha256="a" * 64,
+        resolver=_StubResolver(),
+    )
+    assert d.mode is ExecutionMode.REFUSE
+    assert "off" in d.reason
+
+
+def test_policy_synthetic_runs_synthetic():
+    d = decide_execution(
+        policy=ExecutePolicy.SYNTHETIC,
+        tenant_id="t",
+        manifest_sha256="a" * 64,
+        resolver=_StubResolver(),
+    )
+    assert d.mode is ExecutionMode.SYNTHETIC
+
+
+def test_deny_list_refuses_even_when_provisioned():
+    resolved = ResolvedExecutor("a" * 64, ["python", "x.py"], Path("/p"), {})
+    d = decide_execution(
+        policy=ExecutePolicy.PROVISIONED,
+        tenant_id="bad-tenant",
+        manifest_sha256="a" * 64,
+        resolver=_StubResolver(resolved),
+        deny_list=("bad-tenant",),
+    )
+    assert d.mode is ExecutionMode.REFUSE
+    assert "deny-list" in d.reason
+
+
+def test_allow_list_refuses_tenant_not_listed():
+    d = decide_execution(
+        policy=ExecutePolicy.PROVISIONED,
+        tenant_id="stranger",
+        manifest_sha256="a" * 64,
+        resolver=_StubResolver(),
+        allow_list=("known",),
+    )
+    assert d.mode is ExecutionMode.REFUSE
+    assert "allow-list" in d.reason
+
+
+def test_provisioned_runs_real_when_resolved():
+    resolved = ResolvedExecutor("a" * 64, ["python", "x.py"], Path("/p"), {})
+    d = decide_execution(
+        policy=ExecutePolicy.PROVISIONED,
+        tenant_id="known",
+        manifest_sha256="a" * 64,
+        resolver=_StubResolver(resolved),
+        allow_list=("known",),
+    )
+    assert d.mode is ExecutionMode.REAL
+    assert d.executor is resolved
+
+
+def test_provisioned_refuses_when_unresolved_not_echo():
+    d = decide_execution(
+        policy=ExecutePolicy.PROVISIONED,
+        tenant_id="known",
+        manifest_sha256="a" * 64,
+        resolver=_StubResolver(None),
+    )
+    assert d.mode is ExecutionMode.REFUSE  # refuse-don't-echo
+    assert "no provisioned executor" in d.reason
+
+
+def test_provisioned_refuses_on_integrity_error():
+    d = decide_execution(
+        policy=ExecutePolicy.PROVISIONED,
+        tenant_id="known",
+        manifest_sha256="a" * 64,
+        resolver=_StubResolver(raises=ProvisioningIntegrityError("tampered")),
+    )
+    assert d.mode is ExecutionMode.REFUSE
+    assert "tampered" in d.reason
+
+
+# ---- model store resolution (BYOM, §5.8) -----------------------------------
+
+
+def test_resolve_model_dir_no_models(tmp_path: Path):
+    assert resolve_model_dir({"models": []}, tmp_path) == (None, None)
+    assert resolve_model_dir({}, tmp_path) == (None, None)
+
+
+def test_resolve_model_dir_present_in_store(tmp_path: Path):
+    (tmp_path / "llama-3-70b").mkdir()
+    manifest = {"models": [{"id": "llama-3-70b", "version": "1.0"}]}
+    models_dir, reason = resolve_model_dir(manifest, tmp_path)
+    assert models_dir == tmp_path / "llama-3-70b"
+    assert reason is None
+
+
+def test_resolve_model_dir_missing_required_refuses(tmp_path: Path):
+    manifest = {"models": [{"id": "llama-3-70b", "local_weights_required": True}]}
+    models_dir, reason = resolve_model_dir(manifest, tmp_path)
+    assert models_dir is None
+    assert "not in the worker model store" in reason
+
+
+def test_resolve_model_dir_missing_optional_is_empty(tmp_path: Path):
+    manifest = {"models": [{"id": "opt-model", "local_weights_required": False}]}
+    assert resolve_model_dir(manifest, tmp_path) == (None, None)
+
+
+def test_resolve_model_dir_multi_model_unsupported(tmp_path: Path):
+    manifest = {"models": [{"id": "a"}, {"id": "b"}]}
+    models_dir, reason = resolve_model_dir(manifest, tmp_path)
+    assert models_dir is None
+    assert "multi-model" in reason
+
+
+def test_decide_execution_refuses_missing_required_model(tmp_path: Path):
+    manifest = {
+        "tenant_id": "t",
+        "executor": {"command": ["python", "x.py"]},
+        "models": [{"id": "big-llm", "local_weights_required": True}],
+    }
+    resolved = ResolvedExecutor("a" * 64, ["python", "x.py"], Path("/p"), manifest)
+    d = decide_execution(
+        policy=ExecutePolicy.PROVISIONED,
+        tenant_id="t",
+        manifest_sha256="a" * 64,
+        resolver=_StubResolver(resolved),
+        model_store_dir=tmp_path,  # empty store
+    )
+    assert d.mode is ExecutionMode.REFUSE
+    assert "big-llm" in d.reason
+
+
+# ---- config wiring ---------------------------------------------------------
+
+
+def test_config_defaults_to_synthetic_policy(tmp_path: Path):
+    from auspexai_worker.config import WorkerConfig
+
+    cfg = WorkerConfig.load(config_path=tmp_path / "missing.toml", env={})
+    assert cfg.execute_tenant_code == "synthetic"
+    # provisioning_path defaults under data_dir
+    assert cfg.provisioning_path == cfg.data_dir / "tenants"
+
+
+def test_config_parses_executor_block(tmp_path: Path):
+    from auspexai_worker.config import WorkerConfig
+
+    cfg_file = tmp_path / "worker.toml"
+    cfg_file.write_text(
+        "\n".join(
+            [
+                "[executor]",
+                'execute_tenant_code = "provisioned"',
+                f'provisioning_dir = "{tmp_path / "pkgs"}"',
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cfg = WorkerConfig.load(config_path=cfg_file, env={})
+    assert cfg.execute_tenant_code == "provisioned"
+    assert cfg.provisioning_path == tmp_path / "pkgs"
+
+
+def test_config_env_overrides_policy(tmp_path: Path):
+    from auspexai_worker.config import WorkerConfig
+
+    cfg = WorkerConfig.load(
+        config_path=tmp_path / "missing.toml",
+        env={"AUSPEXAI_WORKER_EXECUTE_TENANT_CODE": "off"},
+    )
+    assert cfg.execute_tenant_code == "off"
+
+
+def test_config_rejects_unknown_policy(tmp_path: Path):
+    from auspexai_worker.config import WorkerConfig
+
+    cfg_file = tmp_path / "worker.toml"
+    cfg_file.write_text('[executor]\nexecute_tenant_code = "yolo"\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="execute_tenant_code"):
+        WorkerConfig.load(config_path=cfg_file, env={})

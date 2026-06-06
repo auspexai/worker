@@ -132,7 +132,8 @@ do_uninstall() {
     info "Uninstalled."
     echo ""
     echo "Local state at ~/.local/state/auspexai-worker/ was NOT removed."
-    echo "To remove it: rm -rf ~/.local/state/auspexai-worker ~/.local/share/auspexai-worker"
+    echo "Downloaded models (can be many GB) live under ~/.local/share/auspexai-worker/models/."
+    echo "To remove everything: rm -rf ~/.local/state/auspexai-worker ~/.local/share/auspexai-worker"
 }
 
 main() {
@@ -467,13 +468,41 @@ APPARMOR
         fi
     fi
 
+    # ── Offer model setup (BYOM onramp, W-M) ─────────────────────────
+    # Opt-in (default N) — never surprise a volunteer with multi-GB downloads.
+    # The base install is lean; pulling models needs the huggingface_hub extra,
+    # installed here only if the volunteer opts in.
+    if [ -x "${INSTALL_PREFIX}/bin/auspexai-worker" ]; then
+        echo ""
+        printf 'Set up inference models now? Downloads models that fit your hardware so this worker can run real experiments. [y/N] '
+        read -r reply </dev/tty
+        case "$reply" in
+            y|Y|yes|YES)
+                if [ -x "${INSTALL_PREFIX}/bin/pip" ]; then
+                    info "Installing model-download support (huggingface_hub) …"
+                    sudo "${INSTALL_PREFIX}/bin/pip" install -q huggingface_hub \
+                        || warn "could not install huggingface_hub; \`model pull\` will be unavailable"
+                else
+                    warn "pip not found in ${INSTALL_PREFIX}; install huggingface_hub manually for \`model pull\`"
+                fi
+                "${INSTALL_PREFIX}/bin/auspexai-worker" model setup </dev/tty || true
+                ;;
+            *)
+                echo "    Skipped. Run \`auspexai-worker model recommend\` to see what fits,"
+                echo "    then \`auspexai-worker model setup\` anytime."
+                ;;
+        esac
+    fi
+
     cat <<'EOF'
 
 Done. Useful commands:
 
-  auspexai-worker status       # identity, tier, progress
-  auspexai-worker logs -f      # watch daemon activity in real time
-  auspexai-worker login        # optional: bind GitHub identity for T1 trust
+  auspexai-worker status         # identity, tier, progress
+  auspexai-worker logs -f        # watch daemon activity in real time
+  auspexai-worker login          # optional: bind GitHub identity for T1 trust
+  auspexai-worker model setup    # pick + download models that fit this host
+  auspexai-worker model list     # models you have (your network inventory)
 
 EOF
 }

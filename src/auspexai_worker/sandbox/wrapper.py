@@ -16,6 +16,7 @@ Environment variables passed through to the runner regardless of mode:
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -52,6 +53,14 @@ class SandboxConfig:
     manifest_sha256: str
     policy: SandboxPolicy = SandboxPolicy.PERMISSIVE
     bwrap_path: str = "bwrap"
+    # §9 #37 real-executor dispatch. When set (the daemon resolved + consented
+    # to a tenant package), the runner runs the tenant executor instead of the
+    # synthetic echo. `executor_package_dir` / `models_dir` are bind-mounted
+    # read-only (Phase 2 STRICT); reachable via --dev-bind / / under Phase 1.
+    executor_command: list[str] | None = None
+    executor_package_dir: str | None = None
+    models_dir: str | None = None
+    executor_timeout_seconds: float | None = None
 
 
 def check_bubblewrap_available(bwrap_path: str = "bwrap") -> bool:
@@ -123,7 +132,7 @@ def build_argv(config: SandboxConfig) -> list[str]:
             "install `bubblewrap` or set `[sandbox] use_bubblewrap = false` "
             "(NOT recommended for production)"
         )
-    return [
+    argv = [
         config.bwrap_path,
         # Die when the parent (worker daemon) exits — don't leak runner
         # subprocesses on daemon crash.
@@ -155,10 +164,20 @@ def build_argv(config: SandboxConfig) -> list[str]:
         "--bind",
         config.workspace_path,
         config.workspace_path,
-        *env_args,
-        "--",
-        config.runner_bin,
     ]
+    if config.executor_command is not None:
+        # §5.17: the inference subprocess gets NO network. Real tenant code
+        # runs in a network namespace with no interface. (Synthetic-only
+        # dispatch keeps host net so it stays a pure no-op change for the
+        # existing echo path.) Phase 2 STRICT replaces --dev-bind / / with
+        # narrow --ro-bind of the package + models dirs explicitly bound here.
+        argv.append("--unshare-net")
+        if config.executor_package_dir:
+            argv += ["--ro-bind", config.executor_package_dir, config.executor_package_dir]
+        if config.models_dir:
+            argv += ["--ro-bind-try", config.models_dir, config.models_dir]
+    argv += [*env_args, "--", config.runner_bin]
+    return argv
 
 
 def _env_argv(config: SandboxConfig) -> list[str]:
@@ -167,7 +186,7 @@ def _env_argv(config: SandboxConfig) -> list[str]:
     on the subprocess directly; this is bwrap-specific."""
     if not config.use_bubblewrap:
         return []
-    return [
+    args = [
         "--setenv",
         "AUSPEXAI_UNIT_ID",
         config.unit_id,
@@ -178,3 +197,16 @@ def _env_argv(config: SandboxConfig) -> list[str]:
         "AUSPEXAI_OUTPUT_PATH",
         config.output_path,
     ]
+    if config.executor_command is not None:
+        args += ["--setenv", "AUSPEXAI_EXECUTOR_COMMAND", json.dumps(config.executor_command)]
+        if config.executor_package_dir:
+            args += ["--setenv", "AUSPEXAI_EXECUTOR_DIR", config.executor_package_dir]
+        if config.models_dir:
+            args += ["--setenv", "AUSPEXAI_MODELS_DIR", config.models_dir]
+        if config.executor_timeout_seconds is not None:
+            args += [
+                "--setenv",
+                "AUSPEXAI_EXECUTOR_TIMEOUT",
+                str(int(config.executor_timeout_seconds)),
+            ]
+    return args

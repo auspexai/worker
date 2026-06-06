@@ -92,6 +92,20 @@ class Capabilities:
     gpus_observed: GpuObservation
     gpus_declared: GpuDeclaration = field(default_factory=GpuDeclaration)
     declared_caps: DeclaredCaps = field(default_factory=DeclaredCaps)
+    # Running worker code version (hatch-vcs). Always reported so the operator
+    # can tell which workers support which features across a mixed-version
+    # fleet (who has §9 #37 executor dispatch / W-M / W-H). Part of the
+    # version-surfacing epic; rides the opaque capabilities channel.
+    worker_version: str | None = None
+    # Locally-available model ids (the BYOM store inventory, W-M). The §5.8
+    # capability the scheduler will route on (#30). Omitted from the wire when
+    # empty. The coordinator stores capabilities as an opaque dict, so this is
+    # forward-compatible — it consumes `models` only once #30 lands.
+    models: list[str] = field(default_factory=list)
+    # Current thermal/health snapshot (W-H), or None where no sensor exists.
+    # Lets the coordinator route work away from a degraded/overheating worker
+    # (forward-compatible; opaque until consumed).
+    thermal: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-serializable shape.
@@ -115,6 +129,12 @@ class Capabilities:
             d["declared_caps"] = declared
         else:
             d.pop("declared_caps", None)
+        if not self.models:
+            d.pop("models", None)  # compact wire when the store is empty
+        if self.thermal is None:
+            d.pop("thermal", None)  # omit where no sensor / health disabled
+        if self.worker_version is None:
+            d.pop("worker_version", None)
         return d
 
 
@@ -206,11 +226,20 @@ def collect(
     sysroot: Path | None = None,
     meminfo_path: Path | None = None,
     probe: GpuProbe = _device_responsive,
+    # Locally-available model ids (BYOM store inventory). Caller-supplied — the
+    # collector doesn't read the store itself (keeps detection store-agnostic).
+    models: list[str] | None = None,
+    # Current thermal snapshot (W-H), caller-supplied (the daemon owns the
+    # stateful monitor so hysteresis is shared with the dispatch gate).
+    thermal: dict[str, Any] | None = None,
     # Back-compat alias kept for callers that still pass `declared=...`.
     declared: DeclaredCaps | None = None,
 ) -> Capabilities:
     """Top-level capability snapshot. Cheap; safe to call on every heartbeat."""
     resolved_caps = declared_caps if declared_caps is not None else (declared or DeclaredCaps())
+    # Lazy import avoids any package-load cycle (detect is imported early).
+    from auspexai_worker import __version__ as worker_version
+
     return Capabilities(
         os=platform.system().lower(),
         arch=platform.machine().lower(),
@@ -220,4 +249,7 @@ def collect(
         gpus_observed=detect_gpus(sysroot=sysroot, probe=probe),
         gpus_declared=declared_gpus or GpuDeclaration(),
         declared_caps=resolved_caps,
+        models=models or [],
+        thermal=thermal,
+        worker_version=worker_version,
     )

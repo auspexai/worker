@@ -102,6 +102,30 @@ class TestReceipts:
 
 
 class TestConfig:
+    def test_overview_surfaces_health_and_execution(self, client: TestClient, db: Database) -> None:
+        _enroll(db)
+        r = client.get("/")
+        assert r.status_code == 200
+        # the new transparency block + executor-policy badge (default synthetic)
+        assert "Health" in r.text and "execution" in r.text
+        assert "synthetic only" in r.text
+        assert "models in store" in r.text
+
+    def test_models_page_renders_store_and_recommendations(self, client: TestClient) -> None:
+        r = client.get("/models")
+        assert r.status_code == 200
+        assert "Local model store" in r.text
+        assert "No models in the store yet." in r.text  # empty store
+        # recommendations come from the bundled seed catalog
+        assert "Recommended for this host" in r.text
+        assert "gpt2" in r.text
+
+    def test_config_page_shows_new_blocks(self, client: TestClient) -> None:
+        r = client.get("/config")
+        assert "execute tenant code" in r.text
+        assert "model store dir" in r.text
+        assert "thermal thresholds" in r.text
+
     def test_config_page_renders_loaded_values(
         self, client: TestClient, config: WorkerConfig
     ) -> None:

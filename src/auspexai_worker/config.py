@@ -64,6 +64,28 @@ class WorkerConfig:
     # Maximum wall-clock seconds a runner subprocess can take. None = no
     # timeout (Phase 1 synthetic-tenant work is bounded by trivial logic).
     runner_timeout_seconds: float | None = None
+    # [executor] — §9 #37 tenant code-execution consent + provisioning. The
+    # resource owner's say on running third-party code: "synthetic" (default;
+    # built-in echo only, NO tenant code), "provisioned" (run hash-verified
+    # operator-staged executors, refuse unresolved), "off" (refuse all).
+    # provisioning_dir (None -> data_dir/tenants) holds staged tenant packages
+    # keyed by manifest_sha256.
+    execute_tenant_code: str = "synthetic"
+    provisioning_dir: Path | None = None
+    # [models] store_dir (None -> data_dir/models): the worker-local BYOM model
+    # store, laid out by model id (`<store>/<model_id>/`). The volunteer fills
+    # it (the platform never distributes weights, §5.8); `--models` resolves
+    # here. A model-acquisition onramp will populate it at install/upgrade.
+    models_store_dir: Path | None = None
+    # [health] — W-H thermal governor thresholds (°C). Auto-discovers
+    # /sys/class/thermal zones; graceful no-op where absent. A host at/over
+    # crit refuses new work until it cools below resume (hysteresis).
+    thermal_warn_c: float = 70.0
+    thermal_crit_c: float = 82.0
+    thermal_resume_c: float = 68.0
+    # NB: per-tenant §5.14 consent (allow/deny lists) is owned by the DB-backed
+    # TenantListRepository + the `auspexai-worker tenant` CLI, enforced at the
+    # poller's accept-time gate — NOT duplicated here as config.
     # [dashboard] — Phase 2 §5.14 "Layer B" local volunteer-transparency
     # surface. Default-on, localhost-only. Disable with
     # `[dashboard] enabled = false` if the volunteer doesn't want the
@@ -81,6 +103,24 @@ class WorkerConfig:
     @property
     def keystore_path(self) -> Path:
         return self.data_dir / "keystore.enc"
+
+    @property
+    def provisioning_path(self) -> Path:
+        """Where staged tenant packages live (keyed by manifest_sha256).
+        Defaults to data_dir/tenants when not explicitly configured."""
+        return (
+            self.provisioning_dir
+            if self.provisioning_dir is not None
+            else self.data_dir / "tenants"
+        )
+
+    @property
+    def models_store_path(self) -> Path:
+        """The worker-local BYOM model store (keyed by model id). Defaults to
+        data_dir/models."""
+        return (
+            self.models_store_dir if self.models_store_dir is not None else self.data_dir / "models"
+        )
 
     @classmethod
     def load(
@@ -124,6 +164,12 @@ class WorkerConfig:
             "declared_gpu_amd_model": None,
             "sandbox_use_bubblewrap": True,
             "runner_timeout_seconds": None,
+            "execute_tenant_code": "synthetic",
+            "provisioning_dir": None,
+            "models_store_dir": None,
+            "thermal_warn_c": 70.0,
+            "thermal_crit_c": 82.0,
+            "thermal_resume_c": 68.0,
             "dashboard_enabled": True,
             "dashboard_host": "127.0.0.1",
             "dashboard_port": 7799,
@@ -182,6 +228,24 @@ class WorkerConfig:
                 merged["sandbox_use_bubblewrap"] = sandbox_block["use_bubblewrap"]
             if "runner_timeout_seconds" in sandbox_block:
                 merged["runner_timeout_seconds"] = sandbox_block["runner_timeout_seconds"]
+            executor_block = data.get("executor") or {}
+            # accept `execute_tenant_code` or the shorter alias `mode`
+            for key in ("execute_tenant_code", "mode"):
+                if key in executor_block:
+                    merged["execute_tenant_code"] = executor_block[key]
+            if "provisioning_dir" in executor_block:
+                merged["provisioning_dir"] = executor_block["provisioning_dir"]
+            models_block = data.get("models") or {}
+            if "store_dir" in models_block:
+                merged["models_store_dir"] = models_block["store_dir"]
+            health_block = data.get("health") or {}
+            for short, full in (
+                ("warn_c", "thermal_warn_c"),
+                ("crit_c", "thermal_crit_c"),
+                ("resume_c", "thermal_resume_c"),
+            ):
+                if short in health_block:
+                    merged[full] = health_block[short]
             dashboard_block = data.get("dashboard") or {}
             if "enabled" in dashboard_block:
                 merged["dashboard_enabled"] = dashboard_block["enabled"]
@@ -195,8 +259,8 @@ class WorkerConfig:
                 merged["upgrade_prompt_enabled"] = upgrade_block["enabled"]
             if "threshold" in upgrade_block:
                 merged["upgrade_prompt_threshold"] = upgrade_block["threshold"]
-            # [tenants], [models], [telemetry] are reserved for later
-            # milestones; tolerated here without consumption.
+            # [tenants], [telemetry] are reserved for later milestones;
+            # tolerated here without consumption.
 
         # Env var overrides (highest precedence besides explicit kwargs).
         if "AUSPEXAI_COORDINATOR_URL" in env:
@@ -207,6 +271,10 @@ class WorkerConfig:
             merged["data_dir"] = env["AUSPEXAI_WORKER_DATA_DIR"]
         if "AUSPEXAI_WORKER_KEYSTORE_BACKEND" in env:
             merged["keystore_backend"] = env["AUSPEXAI_WORKER_KEYSTORE_BACKEND"] or None
+        if "AUSPEXAI_WORKER_EXECUTE_TENANT_CODE" in env:
+            merged["execute_tenant_code"] = env["AUSPEXAI_WORKER_EXECUTE_TENANT_CODE"]
+        if "AUSPEXAI_WORKER_PROVISIONING_DIR" in env:
+            merged["provisioning_dir"] = env["AUSPEXAI_WORKER_PROVISIONING_DIR"]
         if "AUSPEXAI_WORKER_DASHBOARD_ENABLED" in env:
             merged["dashboard_enabled"] = env["AUSPEXAI_WORKER_DASHBOARD_ENABLED"].lower() in (
                 "1",
@@ -237,12 +305,36 @@ class WorkerConfig:
             ),
             sandbox_use_bubblewrap=bool(merged.get("sandbox_use_bubblewrap", True)),
             runner_timeout_seconds=_opt_float(merged.get("runner_timeout_seconds")),
+            execute_tenant_code=_validate_policy(merged.get("execute_tenant_code", "synthetic")),
+            provisioning_dir=(
+                None
+                if merged.get("provisioning_dir") is None
+                else Path(str(merged["provisioning_dir"])).expanduser()
+            ),
+            models_store_dir=(
+                None
+                if merged.get("models_store_dir") is None
+                else Path(str(merged["models_store_dir"])).expanduser()
+            ),
+            thermal_warn_c=float(merged.get("thermal_warn_c", 70.0)),
+            thermal_crit_c=float(merged.get("thermal_crit_c", 82.0)),
+            thermal_resume_c=float(merged.get("thermal_resume_c", 68.0)),
             dashboard_enabled=bool(merged.get("dashboard_enabled", True)),
             dashboard_host=str(merged.get("dashboard_host", "127.0.0.1")),
             dashboard_port=int(merged.get("dashboard_port", 7799)),
             upgrade_prompt_enabled=bool(merged.get("upgrade_prompt_enabled", True)),
             upgrade_prompt_threshold=int(merged.get("upgrade_prompt_threshold", 10)),
         )
+
+
+_EXECUTE_POLICIES = ("synthetic", "provisioned", "off")
+
+
+def _validate_policy(raw: object) -> str:
+    val = str(raw)
+    if val not in _EXECUTE_POLICIES:
+        raise ValueError(f"execute_tenant_code must be one of {_EXECUTE_POLICIES}, got {val!r}")
+    return val
 
 
 def _opt_float(raw: object) -> float | None:

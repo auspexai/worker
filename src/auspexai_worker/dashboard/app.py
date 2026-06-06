@@ -21,6 +21,8 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 from auspexai_worker import __version__
 from auspexai_worker.config import WorkerConfig
+from auspexai_worker.health import ThermalMonitor, ThermalState
+from auspexai_worker.models import ModelCatalog, ModelStore, recommend, survey_resources
 from auspexai_worker.state import (
     AssignmentAuditRepository,
     Database,
@@ -62,6 +64,36 @@ def _tier_badge(tier: int) -> str:
     }
     label = html.escape(names.get(tier, f"T{tier}"))
     return f'<span class="badge tier-{tier}">{label}</span>'
+
+
+def _executor_badge(policy: str) -> str:
+    """Make the code-execution consent setting unmissable (§5.14)."""
+    label, cls = {
+        "synthetic": ("synthetic only — no third-party code", "ok"),
+        "provisioned": ("runs provisioned tenant code", "warn"),
+        "off": ("off — refuses all work", ""),
+    }.get(policy, (policy, ""))
+    return f'<span class="badge {cls}">{html.escape(label)}</span>'
+
+
+def _thermal_monitor(config: WorkerConfig) -> ThermalMonitor:
+    return ThermalMonitor(
+        warn_c=config.thermal_warn_c,
+        crit_c=config.thermal_crit_c,
+        resume_c=config.thermal_resume_c,
+    )
+
+
+def _thermal_html(config: WorkerConfig) -> str:
+    mon = _thermal_monitor(config)
+    if not mon.enabled:
+        return '<span class="muted">no thermal sensor — governor inactive on this host</span>'
+    snap = mon.snapshot()
+    cls = {ThermalState.OK: "ok", ThermalState.WARM: "warn", ThermalState.CRITICAL: "error"}[
+        snap.state
+    ]
+    temp = f"{snap.current_temp_c}°C" if snap.current_temp_c is not None else "—"
+    return f'{html.escape(temp)} <span class="badge {cls}">{snap.state.value}</span>'
 
 
 def build_app(*, db: Database, config: WorkerConfig) -> FastAPI:
@@ -176,7 +208,26 @@ def build_app(*, db: Database, config: WorkerConfig) -> FastAPI:
       <dt>tenant allow / deny</dt><dd>{stats["tenant_allow_count"]} / {stats["tenant_deny_count"]}</dd>
     </dl>"""
 
-        body = "    <h2>Identity</h2>\n" + kv + "\n" + upgrade_html + progress_html + "\n" + counts
+        # Health & execution — what this machine is set to run + its physical state.
+        model_count = len(ModelStore(config.models_store_path).list())
+        health_html = f"""    <h2>Health &amp; execution</h2>
+    <dl class="kv">
+      <dt>tenant code</dt><dd>{_executor_badge(config.execute_tenant_code)}</dd>
+      <dt>thermal</dt><dd>{_thermal_html(config)}</dd>
+      <dt>models in store</dt><dd>{model_count} (<a href="/models">manage</a>)</dd>
+    </dl>"""
+
+        body = (
+            "    <h2>Identity</h2>\n"
+            + kv
+            + "\n"
+            + upgrade_html
+            + health_html
+            + "\n"
+            + progress_html
+            + "\n"
+            + counts
+        )
         return render_page(title="Overview", body=body, active_nav="/")
 
     @app.get("/activity", response_class=HTMLResponse)
@@ -252,6 +303,55 @@ def build_app(*, db: Database, config: WorkerConfig) -> FastAPI:
         )
         return render_page(title="Receipts", body=body, active_nav="/receipts")
 
+    @app.get("/models", response_class=HTMLResponse)
+    def models_page() -> str:
+        store = ModelStore(config.models_store_path)
+        inv_rows = [
+            [
+                f'<span class="mono">{html.escape(m.id)}</span>',
+                f"{m.size_bytes / 1e9:.2f} GB",
+                f'<span class="dim mono">{html.escape(str(m.path))}</span>',
+            ]
+            for m in store.list()
+        ]
+        inv_table = render_table(
+            ["model id", "size", "path"], inv_rows, "No models in the store yet."
+        )
+
+        try:
+            catalog = ModelCatalog.load()
+            resources = survey_resources(
+                store.root, declared_vram_gb=config.declared_gpus.vram_total_gb
+            )
+            rec_rows: list[list[str]] = []
+            for r in recommend(catalog, store, resources):
+                status = "installed" if r.installed else ("fits" if r.fits else "too big")
+                cls = {"installed": "ok", "fits": "ok", "too big": "warn"}.get(status, "")
+                detail = "; ".join(r.blockers) or "; ".join(r.notes) or r.entry.note
+                rec_rows.append(
+                    [
+                        f'<span class="mono">{html.escape(r.entry.id)}</span>',
+                        f"{r.entry.disk_bytes / 1e9:.1f} GB",
+                        f'<span class="badge {cls}">{status}</span>',
+                        f'<span class="dim">{html.escape(detail)}</span>',
+                    ]
+                )
+            rec_table = render_table(
+                ["model id", "download", "status", "detail"], rec_rows, "Catalog is empty."
+            )
+        except Exception as exc:  # pragma: no cover — defensive (catalog read)
+            rec_table = f'    <p class="muted">catalog unavailable: {html.escape(str(exc))}</p>'
+
+        body = (
+            "    <h2>Local model store (BYOM)</h2>\n"
+            f'    <p class="muted">Store: <code>{html.escape(str(store.root))}</code>. '
+            "The platform never distributes weights — you host only what you choose to download. "
+            "Run <code>auspexai-worker model setup</code> (or <code>model pull &lt;id&gt;</code>) "
+            "from a terminal to add models.</p>\n" + inv_table + "\n"
+            "    <h2>Recommended for this host</h2>\n" + rec_table
+        )
+        return render_page(title="Models", body=body, active_nav="/models")
+
     @app.get("/config", response_class=HTMLResponse)
     def config_page() -> str:
         rows: list[tuple[str, str, bool]] = [
@@ -285,6 +385,19 @@ def build_app(*, db: Database, config: WorkerConfig) -> FastAPI:
             (
                 "runner timeout",
                 f"{config.runner_timeout_seconds}s",
+                False,
+            ),
+            (
+                "execute tenant code",
+                _executor_badge(config.execute_tenant_code),
+                False,
+            ),
+            ("provisioning dir", html.escape(str(config.provisioning_path)), True),
+            ("model store dir", html.escape(str(config.models_store_path)), True),
+            (
+                "thermal thresholds",
+                f"warn {config.thermal_warn_c:.0f}°C / crit {config.thermal_crit_c:.0f}°C "
+                f"/ resume {config.thermal_resume_c:.0f}°C",
                 False,
             ),
             (

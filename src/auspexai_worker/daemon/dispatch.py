@@ -43,6 +43,13 @@ from auspexai_worker.coordinator import (
     WorkerIdMismatchError,
     WorkerPubkeyMismatchError,
 )
+from auspexai_worker.health import ThermalMonitor, ThermalState
+from auspexai_worker.provisioning import (
+    ExecutePolicy,
+    ExecutionMode,
+    ExecutorResolver,
+    decide_execution,
+)
 from auspexai_worker.sandbox import SandboxConfig, SandboxNotAvailableError, build_argv
 from auspexai_worker.signing import sign_result
 from auspexai_worker.state import (
@@ -60,6 +67,12 @@ class DispatchOutcomeKind:
     SUBMIT_FAILED_TRANSIENT = "submit_failed_transient"  # queued for retry
     SUBMIT_FAILED_TERMINAL = "submit_failed_terminal"  # surfaced to operator
     SANDBOX_UNAVAILABLE = "sandbox_unavailable"
+    # §9 #37: the worker declined to run this unit on consent/resolution
+    # grounds (policy off, tenant denied, not provisioned, hash mismatch).
+    EXECUTOR_REFUSED = "executor_refused"
+    # W-H: host is thermally critical — refuse to protect the hardware AND
+    # result integrity (a throttled host produces divergent results).
+    THERMAL_CRITICAL = "thermal_critical"
     # Back-compat: previous code used a single SUBMIT_FAILED constant. Tests
     # and external callers can still check that value as a substring match
     # if needed; the more specific variants above are preferred.
@@ -93,6 +106,16 @@ class RunnerDispatcher:
         runner_timeout_seconds: float | None = None,
         on_runner_spawned=None,  # Callable[[int], None] — receives PID
         max_pending_attempts: int = 100,
+        # §9 #37 tenant code-execution consent. `execute_policy` is the
+        # resource owner's setting; `executor_resolver` resolves provisioned
+        # packages (only consulted in `provisioned` mode). Defaults keep the
+        # synthetic-only behavior for callers that don't wire #37.
+        execute_policy: ExecutePolicy = ExecutePolicy.SYNTHETIC,
+        executor_resolver: ExecutorResolver | None = None,
+        model_store_dir=None,  # Path | None — worker-local BYOM model store
+        tenant_allow_list: tuple[str, ...] = (),
+        tenant_deny_list: tuple[str, ...] = (),
+        thermal_monitor: ThermalMonitor | None = None,  # W-H health governor
     ) -> None:
         self._coordinator = coordinator
         self._worker_id = worker_id
@@ -106,6 +129,12 @@ class RunnerDispatcher:
         self._runner_timeout_seconds = runner_timeout_seconds
         self._on_runner_spawned = on_runner_spawned
         self._max_pending_attempts = max_pending_attempts
+        self._execute_policy = execute_policy
+        self._executor_resolver = executor_resolver
+        self._model_store_dir = model_store_dir
+        self._tenant_allow_list = tenant_allow_list
+        self._tenant_deny_list = tenant_deny_list
+        self._thermal_monitor = thermal_monitor
 
     def run_unit(self, response: AssignmentResponse) -> DispatchOutcome:
         """Execute the assigned unit and submit the result. Always cleans
@@ -128,6 +157,43 @@ class RunnerDispatcher:
         assert response.work_unit is not None
         unit = response.work_unit
 
+        # W-H thermal gate — physical safety BEFORE authorization. A host at the
+        # critical threshold refuses new work (re-offered to a cooler worker; the
+        # box cools by not running the heavy executor). Protects the volunteer's
+        # hardware AND result integrity (a throttled host diverges from quorum).
+        if self._thermal_monitor is not None and self._thermal_monitor.state() is (
+            ThermalState.CRITICAL
+        ):
+            snap = self._thermal_monitor.snapshot()
+            reason = (
+                f"host thermal critical ({snap.current_temp_c}°C) — refusing to "
+                "protect hardware + result integrity"
+            )
+            logger.warning("thermal refuse for unit %s: %s", unit.unit_id, reason)
+            return DispatchOutcome(kind=DispatchOutcomeKind.THERMAL_CRITICAL, reason=reason)
+
+        # §9 #37 consent + resolution gate. Decide BEFORE spawning anything:
+        # refuse (decline the unit, re-offer), synthetic (built-in echo), or
+        # real (a hash-verified, consented tenant executor).
+        decision = decide_execution(
+            policy=self._execute_policy,
+            tenant_id=unit.tenant_id,
+            manifest_sha256=unit.manifest_sha256,
+            resolver=self._executor_resolver,
+            model_store_dir=self._model_store_dir,
+            allow_list=self._tenant_allow_list,
+            deny_list=self._tenant_deny_list,
+        )
+        if decision.mode is ExecutionMode.REFUSE:
+            logger.info("declining unit %s: %s", unit.unit_id, decision.reason)
+            return DispatchOutcome(
+                kind=DispatchOutcomeKind.EXECUTOR_REFUSED,
+                reason=decision.reason,
+            )
+        resolved = decision.executor if decision.mode is ExecutionMode.REAL else None
+        models_dir = decision.models_dir
+        has_models = models_dir is not None and models_dir.is_dir()
+
         sandbox_config = SandboxConfig(
             use_bubblewrap=self._use_bubblewrap,
             runner_bin=self._runner_bin,
@@ -135,6 +201,10 @@ class RunnerDispatcher:
             output_path=str(workspace.output_path),
             unit_id=unit.unit_id,
             manifest_sha256=unit.manifest_sha256,
+            executor_command=resolved.command if resolved else None,
+            executor_package_dir=str(resolved.package_dir) if resolved else None,
+            models_dir=str(models_dir) if has_models else None,
+            executor_timeout_seconds=self._runner_timeout_seconds,
         )
         try:
             argv = build_argv(sandbox_config)
@@ -167,6 +237,26 @@ class RunnerDispatcher:
                     "AUSPEXAI_OUTPUT_PATH": str(workspace.output_path),
                 }
             )
+            # Passthrough mode (tests / no-bwrap hosts): the executor env that
+            # bwrap mode injects via --setenv must be set on the subprocess.
+            if resolved is not None:
+                env["AUSPEXAI_EXECUTOR_COMMAND"] = json.dumps(resolved.command)
+                env["AUSPEXAI_EXECUTOR_DIR"] = str(resolved.package_dir)
+                if has_models:
+                    env["AUSPEXAI_MODELS_DIR"] = str(models_dir)
+                if self._runner_timeout_seconds is not None:
+                    env["AUSPEXAI_EXECUTOR_TIMEOUT"] = str(int(self._runner_timeout_seconds))
+        else:
+            # bwrap mode: env is injected via --setenv (in argv); strip any
+            # inherited executor vars so a real-executor unit never leaks into
+            # a later synthetic unit's runner.
+            for k in (
+                "AUSPEXAI_EXECUTOR_COMMAND",
+                "AUSPEXAI_EXECUTOR_DIR",
+                "AUSPEXAI_MODELS_DIR",
+                "AUSPEXAI_EXECUTOR_TIMEOUT",
+            ):
+                env.pop(k, None)
 
         logger.info("spawning runner for unit %s (argv head: %s)", unit.unit_id, argv[0])
         try:

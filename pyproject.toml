@@ -47,6 +47,12 @@ dev = [
 secret-service = [
     "SecretStorage>=3.3",
 ]
+# Optional model-acquisition backend (W-M onramp). Only `auspexai-worker model
+# pull` needs it; a host that only runs already-staged models stays lean.
+# Lazily imported in HfHubFetcher with a clear error if absent.
+models = [
+    "huggingface_hub>=0.20",
+]
 
 [project.scripts]
 auspexai-worker = "auspexai_worker.cli:main"
@@ -68,10 +74,11 @@ build-backend = "hatchling.build"
 source = "vcs"
 
 [tool.hatch.build.targets.wheel]
+# `packages` already includes the package's non-.py data (the tracked
+# migrations_sql/*.sql + models/seed_catalog.json) — a redundant force-include
+# of migrations_sql double-added every .sql, which newer hatchling (pulled by
+# `uv build`) hard-errors on (older silently deduped). Rely on the default.
 packages = ["src/auspexai_worker"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"src/auspexai_worker/state/migrations_sql" = "auspexai_worker/state/migrations_sql"
 
 [tool.hatch.build.targets.sdist]
 include = [

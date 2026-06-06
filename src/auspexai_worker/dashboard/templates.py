@@ -45,6 +45,7 @@ code { font-family: ui-monospace, monospace; background: #1a1e2a; padding: 0.1em
 _NAV_ITEMS = [
     ("/", "Overview"),
     ("/activity", "Activity"),
+    ("/models", "Models"),
     ("/receipts", "Receipts"),
     ("/config", "Config"),
 ]

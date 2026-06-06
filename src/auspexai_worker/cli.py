@@ -39,7 +39,12 @@ from .coordinator import (
 )
 from .daemon import AssignmentPoller, HeartbeatLoop
 from .daemon.dispatch import RunnerDispatcher
+from .health import ThermalMonitor
 from .keystore import KeystoreError
+from .models import ModelCatalog, ModelStore, recommend, survey_resources
+from .models.catalog import FileCatalogSource
+from .models.fetch import HfHubFetcher, ModelFetchError, pull_model
+from .models.recommend import parse_selection
 from .oauth import (
     AccessDeniedError,
     DeviceCode,
@@ -47,6 +52,7 @@ from .oauth import (
     ExpiredTokenError,
     run_device_flow,
 )
+from .provisioning import ExecutePolicy, ProvisioningResolver
 from .sandbox import probe_bubblewrap
 from .state import (
     AcceptedSensitiveRepository,
@@ -105,6 +111,14 @@ def status(ctx: click.Context) -> None:
         f"progress:    {progress['completed_units']} units completed "
         f"across {progress['distinct_experiments']} experiments"
     )
+    _tm = ThermalMonitor(
+        warn_c=config.thermal_warn_c,
+        crit_c=config.thermal_crit_c,
+        resume_c=config.thermal_resume_c,
+    )
+    if _tm.enabled:
+        _snap = _tm.snapshot()
+        click.echo(f"thermal:     {_snap.current_temp_c}°C ({_snap.state.value})")
     if (
         worker.trust_tier == 0
         and config.upgrade_prompt_enabled
@@ -136,6 +150,160 @@ def logs(ctx: click.Context, lines: int, follow: bool) -> None:
         subprocess.run(cmd)
     except KeyboardInterrupt:
         pass
+
+
+@cli.group("model", help="Manage local inference models (BYOM model store).")
+def model() -> None:
+    pass
+
+
+def _load_catalog(catalog_path: str | None) -> ModelCatalog:
+    source = FileCatalogSource(Path(catalog_path)) if catalog_path else None
+    return ModelCatalog.load(source)
+
+
+_catalog_opt = click.option(
+    "--catalog",
+    "catalog_path",
+    type=click.Path(dir_okay=False, path_type=str),
+    default=None,
+    help="Override the model catalog with a local JSON file.",
+)
+
+
+@model.command("list", help="List models in the local store (your declared inventory).")
+@click.pass_context
+def model_list(ctx: click.Context) -> None:
+    store = ModelStore(ctx.obj["config"].models_store_path)
+    models = store.list()
+    if not models:
+        click.echo(f"no models in {store.root}")
+        click.echo("run `auspexai-worker model recommend` to see what fits this host.")
+        return
+    for m in models:
+        click.echo(f"{m.id:32} {m.size_bytes / 1e9:6.2f} GB  {m.path}")
+
+
+@model.command("recommend", help="Recommend models that fit this host's resources.")
+@_catalog_opt
+@click.pass_context
+def model_recommend(ctx: click.Context, catalog_path: str | None) -> None:
+    config = ctx.obj["config"]
+    store = ModelStore(config.models_store_path)
+    catalog = _load_catalog(catalog_path)
+    resources = survey_resources(store.root, declared_vram_gb=config.declared_gpus.vram_total_gb)
+    ram = f"{resources.ram_gb:.0f} GB" if resources.ram_gb else "unknown"
+    vram = f"{resources.vram_gb:.0f} GB" if resources.vram_gb else "none declared"
+    click.echo(
+        f"host: {resources.disk_free_bytes / 1e9:.0f} GB disk free · RAM {ram} · VRAM {vram}\n"
+    )
+    for r in recommend(catalog, store, resources):
+        tag = "installed" if r.installed else ("fits" if r.fits else "too big")
+        click.echo(f"[{tag:9}] {r.entry.id:24} {r.entry.disk_bytes / 1e9:5.1f} GB  {r.entry.note}")
+        for b in r.blockers:
+            click.echo(f"            ✗ {b}")
+        for n in r.notes:
+            click.echo(f"            · {n}")
+
+
+@model.command("pull", help="Download a model from the catalog into the local store.")
+@click.argument("model_id")
+@_catalog_opt
+@click.pass_context
+def model_pull(ctx: click.Context, model_id: str, catalog_path: str | None) -> None:
+    config = ctx.obj["config"]
+    store = ModelStore(config.models_store_path)
+    entry = _load_catalog(catalog_path).get(model_id)
+    if entry is None:
+        click.echo(
+            f"unknown model id {model_id!r}; see `auspexai-worker model recommend`", err=True
+        )
+        sys.exit(1)
+    resources = survey_resources(store.root, declared_vram_gb=config.declared_gpus.vram_total_gb)
+    click.echo(f"pulling {entry.id} from {entry.hf_repo} (~{entry.disk_bytes / 1e9:.1f} GB) …")
+    try:
+        dest = pull_model(entry, store, HfHubFetcher(), resources=resources)
+    except ModelFetchError as exc:
+        click.echo(f"pull failed: {exc}", err=True)
+        sys.exit(1)
+    click.echo(f"installed {entry.id} -> {dest}")
+
+
+@model.command("setup", help="Interactively pick + download models that fit this host.")
+@_catalog_opt
+@click.option(
+    "--yes", is_flag=True, help="Non-interactive: pull ALL fitting, not-installed models."
+)
+@click.pass_context
+def model_setup(ctx: click.Context, catalog_path: str | None, yes: bool) -> None:
+    config = ctx.obj["config"]
+    store = ModelStore(config.models_store_path)
+    catalog = _load_catalog(catalog_path)
+    resources = survey_resources(store.root, declared_vram_gb=config.declared_gpus.vram_total_gb)
+    candidates = [r for r in recommend(catalog, store, resources) if r.fits and not r.installed]
+    if not candidates:
+        click.echo("No new models to set up (all fitting models already installed, or none fit).")
+        return
+
+    click.echo("Models that fit this host:\n")
+    for i, r in enumerate(candidates, 1):
+        tag = " (in demand)" if r.in_demand else ""
+        click.echo(
+            f"  {i}. {r.entry.id:24} {r.entry.disk_bytes / 1e9:5.1f} GB  {r.entry.note}{tag}"
+        )
+
+    if yes:
+        chosen = candidates
+    elif not sys.stdin.isatty():
+        click.echo(
+            "\nNon-interactive shell; run `auspexai-worker model pull <id>` to install "
+            "(or re-run with --yes to pull all that fit)."
+        )
+        return
+    else:
+        sel = click.prompt(
+            "\nSelect models to download (comma-separated numbers, 'all', or 'none')",
+            default="none",
+        )
+        chosen = [candidates[i] for i in parse_selection(sel, len(candidates))]
+
+    if not chosen:
+        click.echo("Nothing selected.")
+        return
+    total = sum(r.entry.disk_bytes for r in chosen)
+    if (
+        not yes
+        and sys.stdin.isatty()
+        and not click.confirm(
+            f"\nDownload {len(chosen)} model(s), ~{total / 1e9:.1f} GB total?", default=True
+        )
+    ):
+        click.echo("Aborted.")
+        return
+
+    failures = 0
+    for r in chosen:
+        click.echo(f"pulling {r.entry.id} from {r.entry.hf_repo} …")
+        try:
+            pull_model(r.entry, store, HfHubFetcher(), resources=resources)
+            click.echo(f"  installed {r.entry.id}")
+        except ModelFetchError as exc:
+            failures += 1
+            click.echo(f"  failed: {exc}", err=True)
+    if failures:
+        sys.exit(1)
+
+
+@model.command("rm", help="Remove a model from the local store.")
+@click.argument("model_id")
+@click.pass_context
+def model_rm(ctx: click.Context, model_id: str) -> None:
+    store = ModelStore(ctx.obj["config"].models_store_path)
+    if store.remove(model_id):
+        click.echo(f"removed {model_id}")
+    else:
+        click.echo(f"{model_id} not in store", err=True)
+        sys.exit(1)
 
 
 def _enable_and_start_service() -> None:
@@ -319,6 +487,13 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
     privkey = keystore.load()
 
     with CoordinatorClient(base_url=config.coordinator_url, signer=signer) as client:
+        # W-H: one shared thermal monitor — its hysteresis is consistent across
+        # the dispatch gate (refuse-when-hot) and the heartbeat snapshot.
+        thermal_monitor = ThermalMonitor(
+            warn_c=config.thermal_warn_c,
+            crit_c=config.thermal_crit_c,
+            resume_c=config.thermal_resume_c,
+        )
         dispatcher = RunnerDispatcher(
             coordinator=client,
             worker_id=worker.worker_id,
@@ -329,6 +504,13 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
             pending_repo=pending_submissions,
             use_bubblewrap=config.sandbox_use_bubblewrap,
             runner_timeout_seconds=config.runner_timeout_seconds,
+            # §9 #37: tenant code-execution consent + provisioned-executor
+            # resolution. Tenant allow/deny stays the poller's accept-time
+            # gate (DB-backed §5.14), so no tenant lists wired here.
+            execute_policy=ExecutePolicy(config.execute_tenant_code),
+            executor_resolver=ProvisioningResolver(config.provisioning_path),
+            model_store_dir=config.models_store_path,
+            thermal_monitor=thermal_monitor,
         )
         heartbeat = HeartbeatLoop(
             coordinator=client,
@@ -337,6 +519,11 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
             capability_collector=lambda: collect_capabilities(
                 declared_caps=declared_caps,
                 declared_gpus=config.declared_gpus,
+                # W-M: declare the BYOM store inventory so #30 can route on it.
+                models=ModelStore(config.models_store_path).inventory(),
+                # W-H: report current thermal state so the coordinator can route
+                # work away from a degraded/overheating worker.
+                thermal=(thermal_monitor.snapshot().to_dict() if thermal_monitor.enabled else None),
             ),
             interval_seconds=config.heartbeat_interval_seconds,
         )
