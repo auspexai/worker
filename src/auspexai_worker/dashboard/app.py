@@ -159,6 +159,7 @@ def build_app(*, db: Database, config: WorkerConfig) -> FastAPI:
 
         rows: list[tuple[str, str, bool]] = [
             ("worker_id", html.escape(worker.worker_id), True),
+            ("worker version", f"<code>{html.escape(__version__)}</code>", False),
             ("trust tier", _tier_badge(int(worker.trust_tier)), False),
             ("public key", html.escape(worker.pubkey_hex), True),
             (

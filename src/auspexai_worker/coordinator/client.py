@@ -222,6 +222,15 @@ class CanonicalReceiptResponse:
 
 
 @dataclass(frozen=True)
+class PrestageDirective:
+    """One model the conductor wants this worker to pre-stage (M3b)."""
+
+    model_id: str
+    hf_repo: str
+    hf_filename: str
+
+
+@dataclass(frozen=True)
 class AssignmentResponse:
     """Coordinator's response to GET /workers/{id}/assignments.
 
@@ -389,6 +398,38 @@ class CoordinatorClient:
             )
         raise CoordinatorError(
             f"get_assignment: unexpected status {response.status_code}: {response.text[:500]}"
+        )
+
+    # ---- /workers/{id}/prestage (signed) — M3b eager conductor --------
+
+    def get_prestage(self, *, worker_id: str) -> list[PrestageDirective]:
+        """GET /api/v0/workers/{worker_id}/prestage. Worker-credentialed. Returns
+        the models the conductor wants this worker to pre-stage (pull ahead of
+        assignment); empty when nothing is queued. The worker fulfils each via its
+        M3 auto-acquire path."""
+        if self._signer is None:
+            raise CoordinatorError(
+                "get_prestage requires a signer; CoordinatorClient was constructed without one"
+            )
+        response = self._signed_request(
+            method="GET",
+            path=f"/api/v0/workers/{worker_id}/prestage",
+            json_body=None,
+        )
+        if response.status_code == 200:
+            items = response.json().get("prestage") or []
+            return [
+                PrestageDirective(
+                    model_id=i["model_id"], hf_repo=i["hf_repo"], hf_filename=i["hf_filename"]
+                )
+                for i in items
+            ]
+        if response.status_code in (401, 403):
+            raise UnauthorizedError(_error_message(response))
+        if response.status_code == 404:
+            raise WorkerNotFoundError(_error_message(response))
+        raise CoordinatorError(
+            f"get_prestage: unexpected status {response.status_code}: {response.text[:500]}"
         )
 
     # ---- /workers/{id}/assignments/{unit_id}/result (signed) ----------

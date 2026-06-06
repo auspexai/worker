@@ -9,10 +9,13 @@ from __future__ import annotations
 
 from .assignment_loop import AssignmentPoller, AssignmentStats
 from .loop import HeartbeatLoop, HeartbeatStats
+from .prestage_loop import PrestageLoop, PrestageStats
 
 __all__ = [
     "AssignmentPoller",
     "AssignmentStats",
     "HeartbeatLoop",
     "HeartbeatStats",
+    "PrestageLoop",
+    "PrestageStats",
 ]

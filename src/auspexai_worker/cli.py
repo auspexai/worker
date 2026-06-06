@@ -38,7 +38,7 @@ from .coordinator import (
     UnsupportedIdpError,
     WorkerNotFoundError,
 )
-from .daemon import AssignmentPoller, HeartbeatLoop
+from .daemon import AssignmentPoller, HeartbeatLoop, PrestageLoop
 from .daemon.dispatch import RunnerDispatcher
 from .health import ThermalMonitor
 from .keystore import KeystoreError
@@ -680,6 +680,19 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
             dispatcher=dispatcher,
         )
 
+        # M3b: pre-stage loop — pulls models the conductor directs this worker to
+        # acquire ahead of assignment. Own thread (a pull can be slow; must not
+        # block heartbeat/poller). Only when the worker opts into auto-acquire
+        # under a provisioned policy (same gate as the heartbeat auto_acquire flag).
+        prestage: PrestageLoop | None = None
+        if config.auto_acquire and config.execute_tenant_code == "provisioned":
+            prestage = PrestageLoop(
+                coordinator=client,
+                worker_id=worker.worker_id,
+                acquirer=StoreModelAcquirer(ModelStore(config.models_store_path)),
+                interval_seconds=config.heartbeat_interval_seconds * 2,
+            )
+
         # Dashboard server — third thread alongside heartbeat + poller.
         # Localhost-only per §5.14; disabled if config.dashboard_enabled
         # is false OR if --max-ticks is set (treating bounded runs as
@@ -700,6 +713,8 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
             click.echo(f"received signal {signum}, shutting down", err=True)
             heartbeat.stop()
             poller.stop()
+            if prestage is not None:
+                prestage.stop()
             if dashboard is not None:
                 dashboard.stop()
 
@@ -718,10 +733,22 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
             name="auspexai-assignment-poller",
             daemon=True,
         )
+        prestage_thread: threading.Thread | None = None
+        if prestage is not None:
+            prestage_thread = threading.Thread(
+                target=prestage.run,
+                kwargs={"max_ticks": max_ticks},
+                name="auspexai-prestage",
+                daemon=True,
+            )
         heartbeat_thread.start()
         poller_thread.start()
+        if prestage_thread is not None:
+            prestage_thread.start()
         heartbeat_thread.join()
         poller_thread.join()
+        if prestage_thread is not None:
+            prestage_thread.join()
 
         # For bounded --max-ticks runs the dashboard wasn't started; for
         # unbounded runs, stop it after the worker threads exit so the
