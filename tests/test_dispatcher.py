@@ -213,3 +213,65 @@ class TestWorkspaceCleanup:
             )
             dispatcher.run_unit(_envelope())
         assert not (tmp_path / "runs" / "u-1").exists()
+
+
+class _StatefulThermal:
+    """ThermalMonitor stand-in: OK on the pre-dispatch gate's first `state()`
+    read, CRITICAL on every read after — so the mid-run watchdog (not the
+    pre-dispatch gate) is what fires. Mirrors the surface the dispatcher uses."""
+
+    def __init__(self) -> None:
+        self._calls = 0
+
+    @property
+    def enabled(self) -> bool:
+        return True
+
+    def state(self):
+        from auspexai_worker.health import ThermalState
+
+        self._calls += 1
+        return ThermalState.OK if self._calls <= 1 else ThermalState.CRITICAL
+
+    def snapshot(self):
+        from auspexai_worker.health import ThermalSnapshot, ThermalState
+
+        return ThermalSnapshot(
+            state=ThermalState.CRITICAL, current_temp_c=95.0, max_temp_c=95.0, zone_count=1
+        )
+
+
+class TestMidRunThermalAbort:
+    def test_critical_midrun_kills_runner(self, tmp_path: Path, db: Database) -> None:
+        """W-H increment 2 (M5): a host that goes thermal-critical WHILE a runner
+        executes gets the runner killed + the unit refused THERMAL_CRITICAL —
+        without waiting out the hard runner_timeout."""
+        privkey, pub = _make_key()
+        # A runner that just sleeps (ignores stdin/args). `exec` so the PID we
+        # spawn IS the sleeper — killing it closes the pipes (no communicate hang).
+        sleeper = tmp_path / "sleeper.sh"
+        sleeper.write_text("#!/bin/sh\nexec sleep 30\n")
+        sleeper.chmod(0o755)
+
+        def handler(req: httpx.Request) -> httpx.Response:  # not reached
+            return httpx.Response(201, json={})
+
+        with _make_client(handler, Rfc9421Signer(privkey, pub)) as client:
+            dispatcher = RunnerDispatcher(
+                coordinator=client,
+                worker_id="wkr-a",
+                worker_pubkey=pub,
+                privkey=privkey,
+                workspace_manager=WorkspaceManager(tmp_path / "runs"),
+                submitted_repo=SubmittedResultRepository(db),
+                pending_repo=PendingSubmissionRepository(db),
+                use_bubblewrap=False,
+                runner_bin=str(sleeper),
+                runner_timeout_seconds=None,  # only the watchdog should end it
+                thermal_monitor=_StatefulThermal(),
+                thermal_poll_interval_seconds=0.05,
+            )
+            outcome = dispatcher.run_unit(_envelope())
+
+        assert outcome.kind == DispatchOutcomeKind.THERMAL_CRITICAL
+        assert "mid-run" in outcome.reason

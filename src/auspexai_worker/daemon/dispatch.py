@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import subprocess
+import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -116,6 +117,11 @@ class RunnerDispatcher:
         tenant_allow_list: tuple[str, ...] = (),
         tenant_deny_list: tuple[str, ...] = (),
         thermal_monitor: ThermalMonitor | None = None,  # W-H health governor
+        # W-H increment 2 (M5): how often the mid-run thermal watchdog polls the
+        # monitor while a runner subprocess is executing. On CRITICAL it kills
+        # the runner (a unit that spikes hot mid-run no longer relies solely on
+        # the hard runner_timeout). Pre-dispatch gate is increment 1.
+        thermal_poll_interval_seconds: float = 5.0,
         # M3 lazy auto-acquire: when `auto_acquire` is on, a missing
         # locally-required model is pulled (via `model_acquirer`) instead of
         # refused. Default off keeps refuse-don't-echo.
@@ -140,6 +146,7 @@ class RunnerDispatcher:
         self._tenant_allow_list = tenant_allow_list
         self._tenant_deny_list = tenant_deny_list
         self._thermal_monitor = thermal_monitor
+        self._thermal_poll_interval_seconds = thermal_poll_interval_seconds
         self._auto_acquire = auto_acquire
         self._model_acquirer = model_acquirer
 
@@ -289,6 +296,33 @@ class RunnerDispatcher:
             except Exception:
                 logger.exception("on_runner_spawned callback raised; continuing")
 
+        # W-H increment 2 (M5): watch the thermal monitor WHILE the runner runs.
+        # On CRITICAL mid-run, kill the runner — protects the volunteer's hardware
+        # and result integrity (a throttled host diverges from quorum) without
+        # waiting out the hard runner_timeout. THERMAL_CRITICAL is a retryable
+        # refusal (§2.1 #8) so the unit is re-offered (to this worker once it
+        # cools, or another worker the coordinator routes to meanwhile).
+        thermal_abort = threading.Event()
+        stop_watch = threading.Event()
+        monitor: threading.Thread | None = None
+        if self._thermal_monitor is not None and self._thermal_monitor.enabled:
+
+            def _thermal_watch() -> None:
+                while not stop_watch.wait(self._thermal_poll_interval_seconds):
+                    try:
+                        if self._thermal_monitor.state() is ThermalState.CRITICAL:
+                            thermal_abort.set()
+                            proc.kill()
+                            return
+                    except Exception:  # a sensor read must never crash the watchdog
+                        logger.exception("thermal watchdog read failed; continuing")
+
+            monitor = threading.Thread(
+                target=_thermal_watch, name=f"thermal-watch-{unit.unit_id}", daemon=True
+            )
+            monitor.start()
+
+        timed_out = False
         try:
             _stdout, stderr = proc.communicate(
                 input=envelope_bytes,
@@ -296,7 +330,28 @@ class RunnerDispatcher:
             )
         except subprocess.TimeoutExpired:
             proc.kill()
-            proc.communicate()
+            _stdout, stderr = proc.communicate()
+            timed_out = True
+        finally:
+            stop_watch.set()
+            if monitor is not None:
+                monitor.join(timeout=2.0)
+
+        if thermal_abort.is_set():
+            snap = self._thermal_monitor.snapshot()
+            logger.warning(
+                "thermal CRITICAL mid-run for unit %s (%s°C) — killed runner",
+                unit.unit_id,
+                snap.current_temp_c,
+            )
+            return DispatchOutcome(
+                kind=DispatchOutcomeKind.THERMAL_CRITICAL,
+                reason=(
+                    f"host went thermal-critical mid-run ({snap.current_temp_c}°C); "
+                    "killed runner to protect hardware + result integrity"
+                ),
+            )
+        if timed_out:
             logger.warning("runner timed out for unit %s", unit.unit_id)
             return DispatchOutcome(
                 kind=DispatchOutcomeKind.RUNNER_CRASH,
