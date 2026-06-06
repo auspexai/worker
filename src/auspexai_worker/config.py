@@ -372,3 +372,58 @@ def _opt_str(raw: object) -> str | None:
 
 def _opt_bool(raw: object) -> bool | None:
     return None if raw is None else bool(raw)
+
+
+def _upsert_toml_section(path: Path, section: str, updates: dict[str, str]) -> None:
+    """Set `key = value_literal` for each (key, value_literal) in `updates` inside
+    `[section]` of a TOML file, preserving everything else (comments + other
+    sections). Replaces a key already present in the section, inserts it right
+    after the section header otherwise, and appends a new `[section]` if absent.
+    A targeted text edit (no TOML round-trip) so the volunteer's file stays intact.
+    `value_literal` is the raw TOML value (e.g. '"provisioned"', 'true')."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    lines = text.splitlines()
+
+    header = f"[{section}]"
+    start = next((i for i, ln in enumerate(lines) if ln.strip() == header), None)
+    if start is None:
+        block = [header] + [f"{k} = {v}" for k, v in updates.items()]
+        if lines and lines[-1].strip() != "":
+            lines.append("")
+        lines.extend(block)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return
+    end = next(
+        (i for i in range(start + 1, len(lines)) if lines[i].lstrip().startswith("[")),
+        len(lines),
+    )
+    for key, value in updates.items():
+        idx = next(
+            (
+                i
+                for i in range(start + 1, end)
+                if lines[i].lstrip().startswith((f"{key} ", f"{key}="))
+            ),
+            None,
+        )
+        if idx is not None:
+            lines[idx] = f"{key} = {value}"
+        else:
+            lines.insert(start + 1, f"{key} = {value}")
+            end += 1
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def set_executor_policy(config_path: Path, policy: str, *, auto_acquire: bool | None = None) -> str:
+    """Persist `[executor] execute_tenant_code` (+ optional `auto_acquire`) to the
+    worker.toml at `config_path`, preserving the rest of the file. Validates the
+    policy (raises ValueError on an unknown value). Shared by the CLI `executor
+    set` and the M9 leg-4 dashboard setter — the single owner-consent write path.
+    Returns the normalized policy. The change applies on the next daemon restart."""
+    policy = _validate_policy(policy)
+    updates = {"execute_tenant_code": f'"{policy}"'}
+    if auto_acquire is not None:
+        updates["auto_acquire"] = "true" if auto_acquire else "false"
+    _upsert_toml_section(config_path, "executor", updates)
+    return policy

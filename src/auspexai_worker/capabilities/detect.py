@@ -117,6 +117,12 @@ class Capabilities:
     # coordinator routes around it (like a degraded/paused worker). Omitted from
     # the wire when False (the matcher checks `is True`).
     self_paused: bool = False
+    # M9 leg 4: the owner's code-execution consent mode (synthetic/provisioned/off).
+    # ALWAYS sent (short + informative): the scheduler routes real (model-gated)
+    # experiments only to `provisioned` workers, and the operator console surfaces
+    # the mode. Absent (an older worker) is read coordinator-side as not-provisioned
+    # (conservative — no real work routed until the worker affirmatively declares).
+    execute_tenant_code: str = "synthetic"
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-serializable shape.
@@ -252,6 +258,11 @@ def collect(
     auto_acquire: bool = False,
     # §2.1 #11 volunteer self-pause flag (caller-supplied from local state).
     self_paused: bool = False,
+    # M9 leg 4: the owner's code-execution consent mode (config.execute_tenant_code:
+    # synthetic / provisioned / off). Declared so the coordinator can route real
+    # (model-gated) experiments only to provisioned-mode workers — a synthetic
+    # worker echoes, which would pollute consensus. Caller-supplied from config.
+    execute_tenant_code: str = "synthetic",
     # Back-compat alias kept for callers that still pass `declared=...`.
     declared: DeclaredCaps | None = None,
 ) -> Capabilities:
@@ -274,4 +285,5 @@ def collect(
         worker_version=worker_version,
         auto_acquire=auto_acquire,
         self_paused=self_paused,
+        execute_tenant_code=execute_tenant_code,
     )

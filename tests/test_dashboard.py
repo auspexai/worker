@@ -38,8 +38,15 @@ def config(tmp_path: Path) -> WorkerConfig:
 
 
 @pytest.fixture
-def client(db: Database, config: WorkerConfig) -> TestClient:
-    return TestClient(build_app(db=db, config=config))
+def client(db: Database, config: WorkerConfig, tmp_path: Path) -> TestClient:
+    # M9 leg 4: point the executor setter at a tmp worker.toml so tests never
+    # touch the real XDG config.
+    return TestClient(build_app(db=db, config=config, config_path=tmp_path / "worker.toml"))
+
+
+@pytest.fixture
+def toml_path(tmp_path: Path) -> Path:
+    return tmp_path / "worker.toml"
 
 
 def _enroll(db: Database) -> None:
@@ -155,6 +162,105 @@ class TestAPI:
         body = r.json()
         assert body["worker_id"] == "wkr-test"
         assert body["trust_tier"] == 0
+
+
+class TestSelfPause:
+    """§2.1 #11 + follow-on: the dashboard self-pause form carries an optional
+    reason (parsed from the urlencoded body, no python-multipart), stored as a
+    local note and surfaced back on the overview — mirroring `pause --reason`."""
+
+    def test_self_pause_form_has_reason_input(self, client: TestClient, db: Database) -> None:
+        _enroll(db)
+        r = client.get("/")
+        assert 'action="/self-pause"' in r.text
+        assert 'name="reason"' in r.text  # the operator can now enter a reason
+
+    def test_self_pause_with_reason_is_stored_and_surfaced(
+        self, client: TestClient, db: Database
+    ) -> None:
+        _enroll(db)
+        r = client.post(
+            "/self-pause",
+            data={"reason": "rebooting the box"},
+            follow_redirects=False,
+        )
+        assert r.status_code == 303
+        self_ = WorkerSelfRepository(db).get()
+        assert self_ is not None and self_.self_paused is True
+        assert self_.self_pause_reason == "rebooting the box"
+        # and it surfaces on the overview's self-paused notice
+        overview = client.get("/")
+        assert "rebooting the box" in overview.text
+
+    def test_self_pause_without_reason_stores_none(self, client: TestClient, db: Database) -> None:
+        _enroll(db)
+        r = client.post("/self-pause", data={"reason": "   "}, follow_redirects=False)
+        assert r.status_code == 303
+        self_ = WorkerSelfRepository(db).get()
+        assert self_ is not None and self_.self_paused is True
+        # blank ⇒ None (no synthetic "paused from dashboard" placeholder)
+        assert self_.self_pause_reason is None
+
+    def test_self_unpause_clears(self, client: TestClient, db: Database) -> None:
+        _enroll(db)
+        WorkerSelfRepository(db).set_self_pause(True, reason="x")
+        r = client.post("/self-unpause", follow_redirects=False)
+        assert r.status_code == 303
+        self_ = WorkerSelfRepository(db).get()
+        assert self_ is not None and self_.self_paused is False
+
+
+class TestExecutorSetter:
+    """M9 leg 4: the dashboard executor-policy setter — one-click downgrades, a
+    confirm step before enabling provisioned, writing the worker.toml the daemon
+    reads on its next restart."""
+
+    def test_config_page_shows_setter_with_current_mode(self, client: TestClient) -> None:
+        r = client.get("/config")
+        assert "Code-execution policy" in r.text
+        assert 'action="/executor"' in r.text
+        # default config is synthetic → the page offers off + enable-provisioned
+        assert "enable provisioned" in r.text
+
+    def test_set_off_writes_toml_and_redirects(self, client: TestClient, toml_path: Path) -> None:
+        r = client.post("/executor", data={"policy": "off"}, follow_redirects=False)
+        assert r.status_code == 303
+        assert 'execute_tenant_code = "off"' in toml_path.read_text()
+
+    def test_enable_provisioned_without_confirm_redirects_to_confirm(
+        self, client: TestClient, toml_path: Path
+    ) -> None:
+        r = client.post("/executor", data={"policy": "provisioned"}, follow_redirects=False)
+        assert r.status_code == 303
+        assert r.headers["location"] == "/executor/confirm"
+        # nothing was written — the deliberate-act gate held
+        assert not toml_path.exists() or 'execute_tenant_code = "provisioned"' not in (
+            toml_path.read_text()
+        )
+
+    def test_enable_provisioned_with_confirm_writes_toml(
+        self, client: TestClient, toml_path: Path
+    ) -> None:
+        r = client.post(
+            "/executor",
+            data={"policy": "provisioned", "confirm": "yes"},
+            follow_redirects=False,
+        )
+        assert r.status_code == 303
+        assert r.headers["location"] == "/config"
+        assert 'execute_tenant_code = "provisioned"' in toml_path.read_text()
+
+    def test_confirm_page_warns(self, client: TestClient) -> None:
+        r = client.get("/executor/confirm")
+        assert r.status_code == 200
+        assert "third-party tenant code" in r.text
+        assert "Yes, enable provisioned execution" in r.text
+
+    def test_invalid_policy_is_ignored(self, client: TestClient, toml_path: Path) -> None:
+        r = client.post("/executor", data={"policy": "bogus"}, follow_redirects=False)
+        assert r.status_code == 303
+        assert r.headers["location"] == "/config"
+        assert not toml_path.exists()
 
 
 class TestNoExternalSurface:

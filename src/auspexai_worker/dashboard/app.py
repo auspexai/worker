@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import html
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from auspexai_worker import __version__
@@ -97,7 +99,7 @@ def _thermal_html(config: WorkerConfig) -> str:
     return f'{html.escape(temp)} <span class="badge {cls}">{snap.state.value}</span>'
 
 
-def build_app(*, db: Database, config: WorkerConfig) -> FastAPI:
+def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = None) -> FastAPI:
     """Build the dashboard FastAPI app.
 
     Args:
@@ -105,9 +107,15 @@ def build_app(*, db: Database, config: WorkerConfig) -> FastAPI:
             and the worker's re-entrant transaction lock make this
             safe alongside the daemon's writer threads.
         config: snapshot of the loaded WorkerConfig. Read-only for
-            the dashboard's purposes; config doesn't change inside a
-            running daemon.
+            the dashboard's display; the M9 leg-4 executor setter is the
+            one write path, and it writes the TOML at `config_path` (the
+            change applies on the next daemon restart, like the CLI).
+        config_path: the worker.toml the executor setter writes to. Defaults
+            to the standard XDG path when not supplied.
     """
+    from auspexai_worker.config import default_worker_toml_path, set_executor_policy
+
+    toml_path = config_path or default_worker_toml_path()
     app = FastAPI(
         title="AuspexAI Worker — local dashboard",
         version=__version__,
@@ -236,15 +244,22 @@ def build_app(*, db: Database, config: WorkerConfig) -> FastAPI:
                 f"reason: {html.escape(worker.operator_hold_reason or '—')}</div>\n"
             )
         if worker is not None and worker.self_paused:
+            sp_reason = (
+                f" reason: {html.escape(worker.self_pause_reason)}"
+                if worker.self_pause_reason
+                else ""
+            )
             holds_parts.append(
                 '    <div class="notice">You self-paused this worker — it stays enrolled '
-                "(tier preserved) but receives no work. "
+                f"(tier preserved) but receives no work.{sp_reason} "
                 '<form method="post" action="/self-unpause" style="display:inline">'
                 '<button type="submit">resume (unpause)</button></form></div>\n'
             )
         else:
             holds_parts.append(
                 '    <form method="post" action="/self-pause" style="margin:0.75em 0">'
+                '<input type="text" name="reason" placeholder="reason (optional)" '
+                'style="padding:0.3em;min-width:18em;margin-right:0.4em"> '
                 '<button type="submit">pause this worker</button> '
                 '<span class="muted">— stop receiving work; keep enrollment + tier</span>'
                 "</form>\n"
@@ -266,12 +281,18 @@ def build_app(*, db: Database, config: WorkerConfig) -> FastAPI:
         return render_page(title="Overview", body=body, active_nav="/")
 
     @app.post("/self-pause")
-    def self_pause() -> RedirectResponse:
+    async def self_pause(request: Request) -> RedirectResponse:
         """§2.1 #11: the one mutating control on the dashboard — the volunteer's
         own no-fault pause (low-risk; localhost-only). Takes effect within a
-        heartbeat (the daemon declares self_paused + stops polling for work)."""
+        heartbeat (the daemon declares self_paused + stops polling for work).
+
+        The optional `reason` is parsed straight from the urlencoded form body
+        (no `python-multipart` dependency) and stored as a local note, mirroring
+        the CLI `pause --reason`; empty ⇒ None (no synthetic placeholder)."""
+        raw = (await request.body()).decode("utf-8", "replace")
+        reason = (parse_qs(raw).get("reason", [""])[0] or "").strip() or None
         if self_repo.get() is not None:
-            self_repo.set_self_pause(True, reason="paused from dashboard")
+            self_repo.set_self_pause(True, reason=reason)
         return RedirectResponse("/", status_code=303)
 
     @app.post("/self-unpause")
@@ -279,6 +300,55 @@ def build_app(*, db: Database, config: WorkerConfig) -> FastAPI:
         if self_repo.get() is not None:
             self_repo.set_self_pause(False)
         return RedirectResponse("/", status_code=303)
+
+    # M9 leg 4: the executor-policy setter — the owner's code-execution consent
+    # (synthetic/provisioned/off). This was deferred from the dashboard, not
+    # permanently withheld. Localhost-only ⇒ only the box owner reaches it, but
+    # enabling `provisioned` (consenting to run third-party code) is gated behind
+    # an explicit confirm step so it stays a *deliberate act*; downgrading toward
+    # a safer mode is one click. The write applies on the next daemon restart
+    # (same as `executor set`). Tier-agnostic by design — owner consent is a
+    # different axis than the network's trust tier (see M9 leg-4 design).
+    @app.get("/executor/confirm", response_class=HTMLResponse)
+    def executor_confirm() -> str:
+        body = (
+            "    <h2>Enable provisioned execution?</h2>\n"
+            '    <div class="notice">Switching to <strong>provisioned</strong> means '
+            "this machine will run <strong>third-party tenant code</strong> — but only "
+            "executors that were operator-staged locally and whose hash matches the "
+            "coordinator's manifest (anything else is refused, never echoed). This is "
+            "your consent, on your hardware. The change applies on the next daemon "
+            "restart.</div>\n"
+            '    <form method="post" action="/executor" style="margin:1em 0">\n'
+            '      <input type="hidden" name="policy" value="provisioned">\n'
+            '      <input type="hidden" name="confirm" value="yes">\n'
+            '      <button type="submit">Yes, enable provisioned execution</button>\n'
+            '      <a href="/config" style="margin-left:1em">Cancel</a>\n'
+            "    </form>\n"
+        )
+        return render_page(title="Confirm", body=body, active_nav="/config")
+
+    @app.post("/executor", response_model=None)
+    async def set_executor(request: Request) -> RedirectResponse | HTMLResponse:
+        raw = (await request.body()).decode("utf-8", "replace")
+        fields = parse_qs(raw)
+        policy = (fields.get("policy", [""])[0] or "").strip()
+        confirm = (fields.get("confirm", [""])[0] or "").strip()
+        if policy not in ("synthetic", "provisioned", "off"):
+            return RedirectResponse("/config", status_code=303)
+        # Enabling provisioned requires the explicit confirm step.
+        if policy == "provisioned" and confirm != "yes":
+            return RedirectResponse("/executor/confirm", status_code=303)
+        try:
+            set_executor_policy(toml_path, policy)
+        except OSError as e:
+            body = (
+                f'    <div class="notice">Could not write {html.escape(str(toml_path))}: '
+                f"{html.escape(str(e))}</div>\n"
+                '    <p><a href="/config">back to config</a></p>'
+            )
+            return HTMLResponse(render_page(title="Config", body=body, active_nav="/config"))
+        return RedirectResponse("/config", status_code=303)
 
     @app.get("/activity", response_class=HTMLResponse)
     def activity() -> str:
@@ -445,8 +515,44 @@ def build_app(*, db: Database, config: WorkerConfig) -> FastAPI:
                 False,
             ),
         ]
+        # M9 leg 4: the one writable control on this page — the executor-policy
+        # setter. Downgrades toward safer modes are one click; enabling
+        # provisioned routes through the /executor/confirm deliberate-act step.
+        current = config.execute_tenant_code
+        setter_buttons: list[str] = []
+        if current != "synthetic":
+            setter_buttons.append(
+                '<form method="post" action="/executor" style="display:inline">'
+                '<input type="hidden" name="policy" value="synthetic">'
+                '<button type="submit">set synthetic (echo only)</button></form>'
+            )
+        if current != "off":
+            setter_buttons.append(
+                '<form method="post" action="/executor" style="display:inline;margin-left:0.5em">'
+                '<input type="hidden" name="policy" value="off">'
+                '<button type="submit">set off (refuse all)</button></form>'
+            )
+        if current != "provisioned":
+            # the deliberate-act path (confirm step before enabling 3rd-party code)
+            setter_buttons.append(
+                '<a href="/executor/confirm" style="margin-left:0.5em" '
+                'role="button">enable provisioned…</a>'
+            )
+        executor_setter = (
+            "    <h3>Code-execution policy</h3>\n"
+            f"    <p>current: {_executor_badge(current)}</p>\n"
+            f'    <div style="margin:0.5em 0">{"".join(setter_buttons)}</div>\n'
+            '    <p class="muted">Your consent to run third-party tenant code on this '
+            "machine. Applies on the next daemon restart. Enabling "
+            "<strong>provisioned</strong> requires confirmation; the network only "
+            "routes real (model-gated) experiments to provisioned workers.</p>\n"
+        )
         body = (
-            "    <h2>Configuration (read-only)</h2>\n" + render_kv(rows) + "\n"
+            "    <h2>Configuration</h2>\n"
+            + executor_setter
+            + "    <h3>Other settings (read-only)</h3>\n"
+            + render_kv(rows)
+            + "\n"
             '    <p class="muted">Edit '
             "<code>~/.config/auspexai-worker/worker.toml</code> or set the "
             "matching env var to change a value, then restart the daemon. "

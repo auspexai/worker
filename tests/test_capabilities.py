@@ -163,6 +163,14 @@ class TestCollect:
     def test_to_dict_includes_self_paused_when_on(self, tmp_path: Path) -> None:
         assert collect(sysroot=tmp_path, self_paused=True).to_dict()["self_paused"] is True
 
+    def test_execute_tenant_code_declared_default_synthetic(self, tmp_path: Path) -> None:
+        # M9 leg 4: always present (informative + routing); default is synthetic.
+        assert collect(sysroot=tmp_path).to_dict()["execute_tenant_code"] == "synthetic"
+
+    def test_execute_tenant_code_declared_provisioned(self, tmp_path: Path) -> None:
+        payload = collect(sysroot=tmp_path, execute_tenant_code="provisioned").to_dict()
+        assert payload["execute_tenant_code"] == "provisioned"
+
     def test_declared_alias_back_compat(self, tmp_path: Path) -> None:
         """`declared=` kwarg is the old name; still accepted for back-compat
         so existing callers don't break during the M2-tail rename."""

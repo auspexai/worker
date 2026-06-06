@@ -25,7 +25,7 @@ from .bootstrap import bootstrap as bootstrap_worker
 from .bootstrap import build_signer, initialize_state, open_keystore
 from .capabilities import DeclaredCaps
 from .capabilities import collect as collect_capabilities
-from .config import WorkerConfig, default_worker_toml_path
+from .config import WorkerConfig, default_worker_toml_path, set_executor_policy
 from .coordinator import (
     BindingTokenConsumedError,
     BindingTokenExpiredError,
@@ -213,14 +213,12 @@ def executor_show(ctx: click.Context) -> None:
 def executor_set(ctx: click.Context, policy: str, auto_acquire: bool | None) -> None:
     """Deliberate, owner-driven change to what third-party code this worker runs.
     Writes the `[executor]` block of worker.toml in place (preserving the rest of
-    the file). Restart the daemon to apply. Not exposed on the localhost dashboard
-    — enabling third-party code execution should be a deliberate config act."""
+    the file). Restart the daemon to apply. Also available on the localhost
+    dashboard (M9 leg 4) — there, enabling `provisioned` is gated behind a confirm
+    step so it stays a deliberate act; this CLI is the headless equivalent."""
     target = ctx.obj.get("config_path") or default_worker_toml_path()
-    updates = {"execute_tenant_code": f'"{policy}"'}
-    if auto_acquire is not None:
-        updates["auto_acquire"] = "true" if auto_acquire else "false"
     try:
-        _upsert_toml_section(target, "executor", updates)
+        set_executor_policy(target, policy, auto_acquire=auto_acquire)
     except OSError as e:
         click.echo(f"ERROR: could not write {target}: {e}", err=True)
         sys.exit(1)
@@ -262,48 +260,6 @@ def logs(ctx: click.Context, lines: int, follow: bool) -> None:
 @cli.group("model", help="Manage local inference models (BYOM model store).")
 def model() -> None:
     pass
-
-
-def _upsert_toml_section(path: Path, section: str, updates: dict[str, str]) -> None:
-    """Set `key = value_literal` for each (key, value_literal) in `updates` inside
-    `[section]` of a TOML file, preserving everything else (comments + other
-    sections). Replaces a key already present in the section, inserts it right
-    after the section header otherwise, and appends a new `[section]` if absent.
-    A targeted text edit (no TOML round-trip) so the volunteer's file stays intact.
-    `value_literal` is the raw TOML value (e.g. '"provisioned"', 'true')."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    text = path.read_text(encoding="utf-8") if path.exists() else ""
-    lines = text.splitlines()
-
-    # Find the section's line span: from its header to the next header (or EOF).
-    header = f"[{section}]"
-    start = next((i for i, ln in enumerate(lines) if ln.strip() == header), None)
-    if start is None:
-        block = [header] + [f"{k} = {v}" for k, v in updates.items()]
-        if lines and lines[-1].strip() != "":
-            lines.append("")
-        lines.extend(block)
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        return
-    end = next(
-        (i for i in range(start + 1, len(lines)) if lines[i].lstrip().startswith("[")),
-        len(lines),
-    )
-    for key, value in updates.items():
-        idx = next(
-            (
-                i
-                for i in range(start + 1, end)
-                if lines[i].lstrip().startswith((f"{key} ", f"{key}="))
-            ),
-            None,
-        )
-        if idx is not None:
-            lines[idx] = f"{key} = {value}"
-        else:
-            lines.insert(start + 1, f"{key} = {value}")
-            end += 1
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 # M3 disk-exposure: leave a safety margin of free disk untouched when sizing a
@@ -816,6 +772,10 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
                 # §2.1 #11: declare the volunteer self-pause so the coordinator
                 # routes around this worker (read fresh from local state each beat).
                 self_paused=bool(getattr(repo.get(), "self_paused", False)),
+                # M9 leg 4: declare the owner's code-execution consent mode so the
+                # coordinator routes real (model-gated) experiments only to
+                # provisioned-mode workers (a synthetic worker would echo).
+                execute_tenant_code=config.execute_tenant_code,
             ),
             interval_seconds=config.heartbeat_interval_seconds,
         )
@@ -852,7 +812,7 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
         if config.dashboard_enabled and max_ticks is None:
             from .dashboard import DashboardServer, build_app
 
-            dashboard_app = build_app(db=db, config=config)
+            dashboard_app = build_app(db=db, config=config, config_path=ctx.obj.get("config_path"))
             dashboard = DashboardServer(
                 app=dashboard_app,
                 host=config.dashboard_host,

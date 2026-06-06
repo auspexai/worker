@@ -35,9 +35,7 @@ class _FakeAcquirer:
 
 
 def _loop(coord, acq):
-    return PrestageLoop(
-        coordinator=coord, worker_id="wkr-a", acquirer=acq, interval_seconds=0.01
-    )
+    return PrestageLoop(coordinator=coord, worker_id="wkr-a", acquirer=acq, interval_seconds=0.01)
 
 
 def test_prestage_pulls_each_directive():
