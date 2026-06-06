@@ -100,12 +100,23 @@ class WorkerSelfRepository:
                 (new_tier, account_binding_json),
             )
 
-    def record_heartbeat(self, at: datetime) -> None:
+    def record_heartbeat(self, at: datetime, *, trust_tier: int | None = None) -> None:
+        """Record the heartbeat timestamp. When the coordinator's heartbeat
+        response carries the worker's current `trust_tier`, refresh the
+        locally-cached value too — otherwise `status` / the local dashboard
+        stay stuck at the tier captured at enrollment and a coord-side
+        promotion/demotion is invisible to the volunteer."""
         with self._db.transaction() as conn:
-            conn.execute(
-                "UPDATE worker_self SET last_heartbeat_at = ? WHERE id = 1",
-                (_format_ts(at),),
-            )
+            if trust_tier is None:
+                conn.execute(
+                    "UPDATE worker_self SET last_heartbeat_at = ? WHERE id = 1",
+                    (_format_ts(at),),
+                )
+            else:
+                conn.execute(
+                    "UPDATE worker_self SET last_heartbeat_at = ?, trust_tier = ? WHERE id = 1",
+                    (_format_ts(at), trust_tier),
+                )
 
     def delete(self) -> None:
         with self._db.transaction() as conn:

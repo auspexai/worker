@@ -113,6 +113,37 @@ class TestLoopTicks:
         assert worker is not None
         assert worker.last_heartbeat_at is not None
 
+    def test_heartbeat_refreshes_local_trust_tier(self, repo: WorkerSelfRepository) -> None:
+        # The coordinator's heartbeat response carries the worker's live tier;
+        # the loop must persist it so `status`/the dashboard don't show a stale
+        # enrollment-time tier after a coord-side promotion/demotion.
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "worker_id": "wkr-loop-001",
+                    "trust_tier": 2,  # promoted coord-side; was T0 at enrollment
+                    "last_heartbeat_at": "2026-05-20T12:05:00+00:00",
+                },
+            )
+
+        assert repo.get().trust_tier == 0  # enrollment tier
+        with CoordinatorClient(
+            base_url="http://test-coord.invalid",
+            signer=_make_signer(),
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            loop = HeartbeatLoop(
+                coordinator=client,
+                repo=repo,
+                worker_id="wkr-loop-001",
+                capability_collector=_make_fake_capabilities,
+                interval_seconds=0.0,
+            )
+            loop.run(max_ticks=1)
+
+        assert repo.get().trust_tier == 2  # refreshed from the heartbeat response
+
 
 class TestLoopStopEvent:
     def test_stop_event_aborts_loop(self, repo: WorkerSelfRepository) -> None:
@@ -199,4 +230,41 @@ class TestLoopErrorResilience:
         assert stats.ticks_attempted == 2
         assert stats.ticks_succeeded == 1
         assert stats.ticks_failed == 1
+        assert stats.last_error is not None
+
+    def test_capability_collector_error_does_not_kill_loop(
+        self, repo: WorkerSelfRepository
+    ) -> None:
+        # Regression: a thermal sysfs read raised TypeError inside capability
+        # collection, escaped _tick_once (which only caught CoordinatorError),
+        # and killed the heartbeat thread → fleet went silently offline.
+        calls = [0]
+
+        def flaky_collector() -> Capabilities:
+            calls[0] += 1
+            if calls[0] == 1:
+                raise TypeError("can't concat NoneType to bytes")  # the Jetson crash
+            return _make_fake_capabilities()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"worker_id": "wkr-loop-001", "trust_tier": 0})
+
+        with CoordinatorClient(
+            base_url="http://test-coord.invalid",
+            signer=_make_signer(),
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            loop = HeartbeatLoop(
+                coordinator=client,
+                repo=repo,
+                worker_id="wkr-loop-001",
+                capability_collector=flaky_collector,
+                interval_seconds=0.0,
+            )
+            stats = loop.run(max_ticks=2)
+
+        # The loop survived the collector error and kept going.
+        assert stats.ticks_attempted == 2
+        assert stats.ticks_failed == 1
+        assert stats.ticks_succeeded == 1
         assert stats.last_error is not None

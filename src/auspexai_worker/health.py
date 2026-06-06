@@ -99,7 +99,12 @@ class ThermalMonitor:
         for tpath in self._zones:
             try:
                 temps.append(int(tpath.read_text().strip()) / 1000.0)
-            except (OSError, ValueError):
+            except (OSError, ValueError, TypeError, UnicodeDecodeError):
+                # A sensor read must NEVER crash the worker. Some hardware
+                # (observed on Jetson zones) raises on read or returns
+                # undecodable bytes — `read_text()` itself can raise TypeError /
+                # UnicodeDecodeError, not just OSError/ValueError. Skip the zone
+                # and treat it as unreadable (→ graceful no-op, never blocks work).
                 continue
         return max(temps) if temps else None
 

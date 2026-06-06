@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import sys
+
 import pytest
 
 from auspexai_worker.sandbox import (
@@ -11,6 +14,7 @@ from auspexai_worker.sandbox import (
     check_bubblewrap_available,
     probe_bubblewrap,
 )
+from auspexai_worker.sandbox.wrapper import resolve_runner_bin
 
 
 def _config(*, use_bubblewrap: bool, bwrap_path: str = "bwrap") -> SandboxConfig:
@@ -43,13 +47,39 @@ class TestBubblewrap:
         # Env vars present.
         for key in ("AUSPEXAI_UNIT_ID", "AUSPEXAI_MANIFEST_SHA256", "AUSPEXAI_OUTPUT_PATH"):
             assert key in argv
-        # The runner is the last argv element after "--".
+        # The runner is the last argv element after "--", resolved to an
+        # absolute path so bwrap's execvp finds it (the sandbox PATH lacks the
+        # venv bin dir; a bare name fails with "No such file or directory").
         dashdash = argv.index("--")
-        assert argv[dashdash + 1 :] == ["auspexai-worker-runner"]
+        runner = argv[dashdash + 1 :]
+        assert len(runner) == 1
+        assert runner[0].endswith("auspexai-worker-runner")
 
     def test_missing_bwrap_raises(self) -> None:
         with pytest.raises(SandboxNotAvailableError):
             build_argv(_config(use_bubblewrap=True, bwrap_path="bwrap-that-does-not-exist"))
+
+
+class TestResolveRunnerBin:
+    def test_absolute_passes_through(self) -> None:
+        p = "/opt/auspexai-worker/bin/auspexai-worker-runner"
+        assert resolve_runner_bin(p) == p
+
+    def test_colocated_with_interpreter_resolves_absolute(self, tmp_path, monkeypatch) -> None:
+        # Simulate a venv bin dir: a fake interpreter + a colocated runner.
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        (bindir / "fake-runner").write_text("#!/bin/sh\n")
+        monkeypatch.setattr(sys, "executable", str(bindir / "python"))
+        resolved = resolve_runner_bin("fake-runner")
+        assert resolved == str(bindir / "fake-runner")
+        assert os.path.isabs(resolved)
+
+    def test_unresolvable_name_passes_through(self, monkeypatch) -> None:
+        # Not colocated with the interpreter and not on PATH → unchanged.
+        monkeypatch.setattr(sys, "executable", "/nonexistent/python")
+        monkeypatch.setattr("shutil.which", lambda _name: None)
+        assert resolve_runner_bin("not-a-real-binary-xyz") == "not-a-real-binary-xyz"
 
 
 class TestProbeBubblewrap:

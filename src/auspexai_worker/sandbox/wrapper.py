@@ -17,10 +17,13 @@ Environment variables passed through to the runner regardless of mode:
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 
 
 class SandboxPolicy(Enum):
@@ -66,6 +69,26 @@ class SandboxConfig:
 def check_bubblewrap_available(bwrap_path: str = "bwrap") -> bool:
     """Return True if the bubblewrap binary is on PATH."""
     return shutil.which(bwrap_path) is not None
+
+
+def resolve_runner_bin(runner_bin: str) -> str:
+    """Resolve the runner command to an absolute path for `bwrap` exec.
+
+    bwrap's `execvp` resolves a bare command name against the SANDBOX's PATH,
+    which does NOT include the venv bin dir — the daemon runs as a systemd
+    `--user` service whose PATH is `/usr/bin:/bin:...`, not
+    `/opt/auspexai-worker/bin`. So a bare `auspexai-worker-runner` is present
+    under the permissive `--dev-bind / /` but not *found* (execvp: No such file
+    or directory). Resolve it to an absolute path: prefer the console script
+    colocated with the running interpreter (the venv bin dir), then PATH.
+    Absolute paths and unresolvable names pass through unchanged.
+    """
+    if os.path.isabs(runner_bin):
+        return runner_bin
+    candidate = Path(sys.executable).parent / runner_bin
+    if candidate.exists():
+        return str(candidate)
+    return shutil.which(runner_bin) or runner_bin
 
 
 @dataclass(frozen=True)
@@ -176,7 +199,10 @@ def build_argv(config: SandboxConfig) -> list[str]:
             argv += ["--ro-bind", config.executor_package_dir, config.executor_package_dir]
         if config.models_dir:
             argv += ["--ro-bind-try", config.models_dir, config.models_dir]
-    argv += [*env_args, "--", config.runner_bin]
+    # Absolute path so bwrap's execvp finds the runner (the sandbox PATH won't
+    # include the venv bin dir). Passthrough mode (above) leaves resolution to
+    # the daemon's own PATH, unchanged.
+    argv += [*env_args, "--", resolve_runner_bin(config.runner_bin)]
     return argv
 
 

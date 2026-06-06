@@ -75,6 +75,48 @@ def test_unreadable_sensor_is_ok(tmp_path: Path):
     assert mon.state() is ThermalState.OK
 
 
+class _RaisingZone:
+    """A zone whose read raises TypeError — reproduces the Jetson sysfs failure
+    where `read_text()` itself raises (not OSError/ValueError) and used to crash
+    the heartbeat loop."""
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    def read_text(self, *args: object, **kwargs: object) -> str:
+        raise self._exc
+
+
+def test_sensor_read_raising_typeerror_is_ok():
+    # The actual Jetson failure: read_text() → TypeError deep in codecs.
+    mon = ThermalMonitor(zones=[_RaisingZone(TypeError("can't concat NoneType to bytes"))])
+    assert mon.read_temp() is None
+    assert mon.state() is ThermalState.OK  # graceful no-op, never raises
+
+
+def test_sensor_undecodable_bytes_is_ok(tmp_path: Path):
+    z = tmp_path / "thermal_zone0" / "temp"
+    z.parent.mkdir(parents=True)
+    z.write_bytes(b"\xff\xfe not-a-temp")  # invalid UTF-8 → read_text() raises
+    mon = ThermalMonitor(zones=[z])
+    assert mon.read_temp() is None
+    assert mon.state() is ThermalState.OK
+
+
+def test_snapshot_survives_unreadable_sensor():
+    # snapshot() → state() → read_temp() is the exact path that crashed heartbeat.
+    mon = ThermalMonitor(zones=[_RaisingZone(TypeError("boom"))])
+    snap = mon.snapshot().to_dict()  # must not raise
+    assert snap["state"] == "ok"
+    assert snap["current_temp_c"] is None
+
+
+def test_one_bad_zone_does_not_hide_a_good_one(tmp_path: Path):
+    good = _zone(tmp_path, 0, 71500)  # 71.5°C
+    mon = ThermalMonitor(zones=[_RaisingZone(TypeError("boom")), good])
+    assert mon.read_temp() == 71.5  # still governs on the readable zone
+
+
 def test_snapshot_shape(tmp_path: Path):
     z = _zone(tmp_path, 0, 75000)
     mon = ThermalMonitor(zones=[z], warn_c=70, crit_c=82)

@@ -132,7 +132,13 @@ do_uninstall() {
     info "Uninstalled."
     echo ""
     echo "Local state at ~/.local/state/auspexai-worker/ was NOT removed."
-    echo "Downloaded models (can be many GB) live under ~/.local/share/auspexai-worker/models/."
+    models_dir="$HOME/.local/share/auspexai-worker/models"
+    if [ -d "$models_dir" ] && [ -n "$(ls -A "$models_dir" 2>/dev/null)" ]; then
+        echo "Downloaded models retained under $models_dir (preserved across installs/upgrades; can be many GB):"
+        ls -1 "$models_dir" 2>/dev/null | sed 's/^/    - /'
+    else
+        echo "Downloaded models (if any) live under ~/.local/share/auspexai-worker/models/."
+    fi
     echo "To remove everything: rm -rf ~/.local/state/auspexai-worker ~/.local/share/auspexai-worker"
 }
 

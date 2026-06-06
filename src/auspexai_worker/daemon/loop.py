@@ -102,12 +102,16 @@ class HeartbeatLoop:
         self._stats.ticks_attempted += 1
         try:
             capabilities = self._collect_capabilities().to_dict()
-            self._coordinator.heartbeat(
+            status = self._coordinator.heartbeat(
                 worker_id=self._worker_id,
                 capabilities=capabilities,
             )
             now = datetime.now(UTC)
-            self._repo.record_heartbeat(now)
+            # Refresh the locally-cached trust_tier from the coordinator's
+            # response so `status` / the dashboard reflect the worker's live
+            # network standing (a coord-side promotion/demotion is otherwise
+            # invisible locally).
+            self._repo.record_heartbeat(now, trust_tier=status.trust_tier)
             self._stats.ticks_succeeded += 1
             self._stats.last_success_at = now
             logger.debug("heartbeat ok (tick=%d)", self._stats.ticks_attempted)
@@ -116,3 +120,17 @@ class HeartbeatLoop:
             self._stats.last_error = str(exc)
             self._stats.errors.append(str(exc))
             logger.warning("heartbeat failed (tick=%d): %s", self._stats.ticks_attempted, exc)
+        except Exception as exc:
+            # Defense-in-depth: a monitoring tick (capability collection, etc.)
+            # must NEVER kill the heartbeat loop — a crashed loop drops the worker
+            # off the network silently (no heartbeats → coordinator marks offline).
+            # Record and continue rather than letting the loop thread die.
+            # (Root-caused once: a thermal sysfs read raised TypeError inside
+            # capability collection and killed the loop on every Jetson.)
+            self._stats.ticks_failed += 1
+            self._stats.last_error = str(exc)
+            self._stats.errors.append(str(exc))
+            logger.exception(
+                "heartbeat tick raised an unexpected error (tick=%d); continuing",
+                self._stats.ticks_attempted,
+            )

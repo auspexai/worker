@@ -186,6 +186,24 @@ def model_list(ctx: click.Context) -> None:
         click.echo(f"{m.id:32} {m.size_bytes / 1e9:6.2f} GB  {m.path}")
 
 
+def _echo_installed_summary(store: ModelStore) -> None:
+    """Surface what's already on this device — preserved across upgrades — so a
+    re-run (especially the install/upgrade path) is never mistaken for
+    re-downloading. The store persists across upgrades and `pull` is idempotent
+    (`store.has()` short-circuits), so anything listed here is NOT re-fetched."""
+    installed = store.list()
+    if not installed:
+        return
+    total = sum(m.size_bytes for m in installed)
+    click.echo(
+        f"already available on this device ({len(installed)} model(s), "
+        f"{total / 1e9:.1f} GB — preserved across upgrades, not re-downloaded):"
+    )
+    for m in installed:
+        click.echo(f"  ✓ {m.id:40} {m.size_bytes / 1e9:6.2f} GB")
+    click.echo("")
+
+
 def _recommend_fallback(catalog_path: str | None, store: ModelStore) -> None:
     """Offline degraded view: the bundled catalog (HuggingFace unavailable)."""
     catalog = _load_catalog(catalog_path)
@@ -207,6 +225,7 @@ def model_recommend(ctx: click.Context, limit: int, catalog_path: str | None) ->
     acc = detect_accelerator()
     disk_free = survey_resources(store.root).disk_free_bytes
     click.echo(f"host: {acc.label}  ·  {disk_free / 1e9:.0f} GB disk free\n")
+    _echo_installed_summary(store)
     try:
         runnable = runnable_models(
             HfHubBrowser(),
@@ -285,6 +304,7 @@ def model_setup(ctx: click.Context, limit: int, yes: bool) -> None:
     acc = detect_accelerator()
     disk_free = survey_resources(store.root).disk_free_bytes
     click.echo(f"host: {acc.label}\n")
+    _echo_installed_summary(store)
     try:
         candidates = [
             r

@@ -241,6 +241,25 @@ def test_cli_model_setup_offline_is_graceful(tmp_path: Path):
     assert not models_dir.exists() or not any(models_dir.iterdir())
 
 
+def test_cli_model_setup_shows_installed_inventory(tmp_path: Path):
+    # #6: the setup/upgrade path must REPORT what's already on the device
+    # (preserved across upgrades, not re-downloaded), so a re-run isn't mistaken
+    # for redundant downloading. The summary is local-only, so it shows even when
+    # HuggingFace is unavailable (as in the test env).
+    from click.testing import CliRunner
+
+    from auspexai_worker.cli import cli
+
+    data = tmp_path / "data"
+    _stage_model(data / "models", "qwen3-q4", content=b"x" * 100)
+    env = {"AUSPEXAI_WORKER_DATA_DIR": str(data)}
+    r = CliRunner().invoke(cli, ["model", "setup"], env=env)
+    assert r.exit_code == 0, r.output
+    assert "already available on this device" in r.output
+    assert "qwen3-q4" in r.output
+    assert "not re-downloaded" in r.output
+
+
 def test_pull_quant_installs_single_gguf(tmp_path: Path):
     from auspexai_worker.models.fetch import pull_quant
     from auspexai_worker.models.hf_browse import ModelQuant
