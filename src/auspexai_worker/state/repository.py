@@ -18,6 +18,12 @@ class WorkerSelf:
     enrolled_at: datetime
     last_heartbeat_at: datetime | None
     account_binding_json: str | None
+    # §2.1 #11 holds (local cache for status/dashboard surfacing):
+    self_paused: bool = False
+    self_pause_reason: str | None = None
+    operator_hold_kind: str | None = None  # 'pause' | 'quarantine' | None
+    operator_hold_reason: str | None = None
+    operator_hold_at: str | None = None
 
 
 class AlreadyEnrolledError(Exception):
@@ -33,7 +39,8 @@ class WorkerSelfRepository:
     def get(self) -> WorkerSelf | None:
         row = self._db.connection.execute(
             "SELECT worker_id, trust_tier, pubkey_hex, enrolled_at, "
-            "last_heartbeat_at, account_binding_json "
+            "last_heartbeat_at, account_binding_json, self_paused, self_pause_reason, "
+            "operator_hold_kind, operator_hold_reason, operator_hold_at "
             "FROM worker_self WHERE id = 1"
         ).fetchone()
         if row is None:
@@ -45,7 +52,35 @@ class WorkerSelfRepository:
             enrolled_at=_parse_ts(row["enrolled_at"]),
             last_heartbeat_at=_parse_ts(row["last_heartbeat_at"]),
             account_binding_json=row["account_binding_json"],
+            self_paused=bool(row["self_paused"]),
+            self_pause_reason=row["self_pause_reason"],
+            operator_hold_kind=row["operator_hold_kind"],
+            operator_hold_reason=row["operator_hold_reason"],
+            operator_hold_at=row["operator_hold_at"],
         )
+
+    def set_self_pause(self, paused: bool, *, reason: str | None = None) -> None:
+        """§2.1 #11: the volunteer's own pause hold (resource-owner sovereignty).
+        Persisted so it survives a daemon restart; declared to the coordinator as
+        the `self_paused` capability + short-circuits the assignment poller."""
+        with self._db.transaction() as cur:
+            cur.execute(
+                "UPDATE worker_self SET self_paused = ?, self_pause_reason = ? WHERE id = 1",
+                (1 if paused else 0, reason if paused else None),
+            )
+
+    def record_operator_hold(
+        self, kind: str | None, *, reason: str | None = None, at: str | None = None
+    ) -> None:
+        """Cache the operator hold the coordinator reported on the last poll (or
+        clear it with kind=None on a 200), so `status` + the dashboard can show
+        it. `kind` ∈ 'pause' | 'quarantine' | None."""
+        with self._db.transaction() as cur:
+            cur.execute(
+                "UPDATE worker_self SET operator_hold_kind = ?, operator_hold_reason = ?, "
+                "operator_hold_at = ? WHERE id = 1",
+                (kind, reason, at),
+            )
 
     def insert(
         self,

@@ -156,6 +156,13 @@ class TestCollect:
         payload = collect(sysroot=tmp_path, auto_acquire=True).to_dict()
         assert payload["auto_acquire"] is True
 
+    def test_to_dict_omits_self_paused_when_off(self, tmp_path: Path) -> None:
+        # §2.1 #11: absent == not self-paused (coordinator checks `is True`).
+        assert "self_paused" not in collect(sysroot=tmp_path).to_dict()
+
+    def test_to_dict_includes_self_paused_when_on(self, tmp_path: Path) -> None:
+        assert collect(sysroot=tmp_path, self_paused=True).to_dict()["self_paused"] is True
+
     def test_declared_alias_back_compat(self, tmp_path: Path) -> None:
         """`declared=` kwarg is the old name; still accepted for back-compat
         so existing callers don't break during the M2-tail rename."""

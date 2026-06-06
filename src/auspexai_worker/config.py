@@ -37,6 +37,12 @@ def _xdg_config_home() -> Path:
     return _xdg_dir("XDG_CONFIG_HOME", ".config")
 
 
+def default_worker_toml_path() -> Path:
+    """The canonical user-writable worker.toml location (the XDG override path the
+    loader checks last). Where `executor set` writes when no explicit --config."""
+    return _xdg_config_home() / "auspexai-worker" / "worker.toml"
+
+
 @dataclass(frozen=True)
 class WorkerConfig:
     """Resolved worker configuration."""

@@ -72,6 +72,24 @@ class WorkerQuarantinedError(CoordinatorError):
         self.quarantine_reason = quarantine_reason
 
 
+class WorkerPausedError(CoordinatorError):
+    """423 worker_paused — the operator paused this worker (§2.1 #11). Like
+    quarantine it's reversible + carries the operator's reason for the volunteer,
+    but it's a NO-FAULT operational hold (distinct code + `no_fault` flag) — not a
+    trust/fault signal. The worker surfaces it as an operational pause."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        paused_at: str | None = None,
+        pause_reason: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.paused_at = paused_at
+        self.pause_reason = pause_reason
+
+
 class AssignmentNotFoundError(CoordinatorError):
     """404 assignment_not_found — no assignment exists for this (unit, worker)."""
 
@@ -380,21 +398,24 @@ class CoordinatorClient:
         if response.status_code == 404:
             raise WorkerNotFoundError(_error_message(response))
         if response.status_code == 423:
-            # Maintainer-applied pause. Extract quarantined_at AND the
-            # maintainer's reason from the error details if present so the
-            # caller can surface both to the worker (the reason is worker-
-            # visible by design — see WorkerQuarantinedError).
+            # An operator hold — quarantine (fault) or pause (§2.1 #11, no-fault).
+            # Both carry the operator's reason in the error details so the worker
+            # can surface it (the reason is worker-visible by design).
+            code = _error_code(response)
             try:
                 details = response.json().get("detail", {}).get("error", {}).get("details", {})
-                quarantined_at = details.get("quarantined_at")
-                quarantine_reason = details.get("quarantine_reason")
             except (ValueError, AttributeError):
-                quarantined_at = None
-                quarantine_reason = None
+                details = {}
+            if code == "worker_paused":
+                raise WorkerPausedError(
+                    _error_message(response),
+                    paused_at=details.get("paused_at"),
+                    pause_reason=details.get("pause_reason"),
+                )
             raise WorkerQuarantinedError(
                 _error_message(response),
-                quarantined_at=quarantined_at,
-                quarantine_reason=quarantine_reason,
+                quarantined_at=details.get("quarantined_at"),
+                quarantine_reason=details.get("quarantine_reason"),
             )
         raise CoordinatorError(
             f"get_assignment: unexpected status {response.status_code}: {response.text[:500]}"

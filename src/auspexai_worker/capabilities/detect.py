@@ -113,6 +113,10 @@ class Capabilities:
     # model isn't in `models` yet. Omitted from the wire when False (the matcher
     # checks `is True`, so absent == disabled).
     auto_acquire: bool = False
+    # §2.1 #11: the volunteer self-paused this worker (owner hold). The
+    # coordinator routes around it (like a degraded/paused worker). Omitted from
+    # the wire when False (the matcher checks `is True`).
+    self_paused: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-serializable shape.
@@ -144,6 +148,8 @@ class Capabilities:
             d.pop("worker_version", None)
         if not self.auto_acquire:
             d.pop("auto_acquire", None)  # compact wire; absent == disabled
+        if not self.self_paused:
+            d.pop("self_paused", None)  # compact wire; absent == not self-paused
         return d
 
 
@@ -244,6 +250,8 @@ def collect(
     # M3 lazy auto-acquire opt-in (from [executor] auto_acquire). Caller-supplied
     # so the collector stays config-agnostic.
     auto_acquire: bool = False,
+    # §2.1 #11 volunteer self-pause flag (caller-supplied from local state).
+    self_paused: bool = False,
     # Back-compat alias kept for callers that still pass `declared=...`.
     declared: DeclaredCaps | None = None,
 ) -> Capabilities:
@@ -265,4 +273,5 @@ def collect(
         thermal=thermal,
         worker_version=worker_version,
         auto_acquire=auto_acquire,
+        self_paused=self_paused,
     )

@@ -19,6 +19,7 @@ from auspexai_worker.state import (
     ManifestPinRepository,
     MigrationRunner,
     TenantListRepository,
+    WorkerSelfRepository,
 )
 
 
@@ -103,6 +104,7 @@ def _make_poller(
     handler,
     *,
     interval: float = 0.0,
+    worker_self=None,
 ) -> tuple[AssignmentPoller, CoordinatorClient]:
     client = CoordinatorClient(
         base_url="http://test-coord.invalid",
@@ -117,6 +119,7 @@ def _make_poller(
         tenant_lists=TenantListRepository(db),
         audit=AssignmentAuditRepository(db),
         interval_seconds=interval,
+        worker_self=worker_self,
     )
     return poller, client
 
@@ -358,3 +361,63 @@ class TestPollerQuarantineHandling:
         assert stats.polls_attempted == 3
         assert stats.polls_quarantined == 3
         assert stats.quarantined_at == self._QUARANTINED_AT
+
+
+class TestPollerHolds:
+    """§2.1 #11: self-pause short-circuit + operator-pause (423) hold caching."""
+
+    def _enroll(self, db: Database) -> WorkerSelfRepository:
+        from datetime import UTC, datetime
+
+        repo = WorkerSelfRepository(db)
+        repo.insert(
+            worker_id="wkr-test", trust_tier=0, pubkey_hex="a" * 64, enrolled_at=datetime.now(UTC)
+        )
+        return repo
+
+    def test_self_paused_short_circuits_the_poll(self, db: Database) -> None:
+        repo = self._enroll(db)
+        repo.set_self_pause(True, reason="brb")
+        # Handler would hand out work — but a self-paused poller never calls it.
+        poller, client = _make_poller(db, _route([_work_response()]), worker_self=repo)
+        try:
+            stats = poller.run(max_polls=2)
+        finally:
+            client.close()
+        assert stats.polls_self_paused == 2
+        assert stats.units_accepted == 0
+        assert stats.no_work_polls == 0  # never actually polled the coordinator for work
+
+    def test_operator_pause_423_caches_hold(self, db: Database) -> None:
+        repo = self._enroll(db)
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            if req.method == "GET" and req.url.path.endswith("/assignments"):
+                return httpx.Response(
+                    423,
+                    json={
+                        "detail": {
+                            "error": {
+                                "code": "worker_paused",
+                                "message": "paused by operator",
+                                "details": {
+                                    "paused_at": "2026-06-06T00:00:00+00:00",
+                                    "pause_reason": "rolling upgrade",
+                                    "no_fault": True,
+                                },
+                            }
+                        }
+                    },
+                )
+            return httpx.Response(404, json={"detail": {"error": {"code": "unhandled"}}})
+
+        poller, client = _make_poller(db, handler, worker_self=repo)
+        try:
+            stats = poller.run(max_polls=1)
+        finally:
+            client.close()
+        assert stats.polls_paused == 1
+        assert stats.pause_reason == "rolling upgrade"
+        ws = repo.get()
+        assert ws.operator_hold_kind == "pause"
+        assert ws.operator_hold_reason == "rolling upgrade"

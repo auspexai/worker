@@ -27,6 +27,7 @@ from auspexai_worker.coordinator import (
     AssignmentResponse,
     CoordinatorClient,
     CoordinatorError,
+    WorkerPausedError,
     WorkerQuarantinedError,
 )
 from auspexai_worker.daemon.dispatch import (
@@ -39,6 +40,7 @@ from auspexai_worker.state import (
     AssignmentAuditRepository,
     ManifestPinRepository,
     TenantListRepository,
+    WorkerSelfRepository,
 )
 
 logger = logging.getLogger(__name__)
@@ -49,7 +51,9 @@ class AssignmentStats:
     polls_attempted: int = 0
     polls_succeeded: int = 0
     polls_failed: int = 0
-    polls_quarantined: int = 0  # 423 worker_quarantined responses (maintainer pause)
+    polls_quarantined: int = 0  # 423 worker_quarantined responses
+    polls_paused: int = 0  # 423 worker_paused responses (§2.1 #11, operator no-fault pause)
+    polls_self_paused: int = 0  # ticks skipped because the volunteer self-paused
     units_accepted: int = 0
     units_refused: int = 0
     units_submitted: int = 0  # M4: dispatched + run + submitted ok
@@ -59,6 +63,8 @@ class AssignmentStats:
     refuse_calls_failed: int = 0
     quarantined_at: str | None = None  # ISO timestamp from coord's 423 details
     quarantine_reason: str | None = None  # maintainer's reason from coord's 423 details
+    paused_at: str | None = None  # §2.1 #11: ISO timestamp from the worker_paused 423
+    pause_reason: str | None = None  # §2.1 #11: operator's reason from the 423
     last_error: str | None = None
     errors: list[str] = field(default_factory=list)
 
@@ -84,6 +90,7 @@ class AssignmentPoller:
         audit: AssignmentAuditRepository,
         interval_seconds: float,
         dispatcher: RunnerDispatcher | None = None,
+        worker_self: WorkerSelfRepository | None = None,
         stop_event: threading.Event | None = None,
     ) -> None:
         self._coordinator = coordinator
@@ -94,6 +101,8 @@ class AssignmentPoller:
         self._audit = audit
         self._interval = float(interval_seconds)
         self._dispatcher = dispatcher
+        # §2.1 #11: local self-pause check + operator-hold cache for status/dashboard.
+        self._worker_self = worker_self
         self._stop_event = stop_event or threading.Event()
         self._stats = AssignmentStats()
 
@@ -107,6 +116,19 @@ class AssignmentPoller:
 
     def stop(self) -> None:
         self._stop_event.set()
+
+    def _record_operator_hold(
+        self, kind: str | None, *, reason: str | None = None, at: str | None = None
+    ) -> None:
+        """Cache the operator hold to local state so `status` + the dashboard can
+        show it (§2.1 #11). Best-effort — a state-write failure must never break
+        the poll loop."""
+        if self._worker_self is None:
+            return
+        try:
+            self._worker_self.record_operator_hold(kind, reason=reason, at=at)
+        except Exception:
+            logger.debug("failed to cache operator hold locally; continuing", exc_info=True)
 
     def run(self, *, max_polls: int | None = None) -> AssignmentStats:
         """Loop until `stop()` is called or `max_polls` is reached."""
@@ -159,26 +181,52 @@ class AssignmentPoller:
                 logger.exception("fetch_pending_canonical raised; continuing with new-work poll")
 
         self._stats.polls_attempted += 1
+        # §2.1 #11: the volunteer self-paused — skip the NEW-WORK poll (the retry/
+        # receipt-fetch of already-done work above still ran). The owner's hold;
+        # the coordinator also routes around it, this just avoids a pointless poll.
+        # Counted as a tick (polls_attempted) so a bounded run still advances.
+        if self._worker_self is not None:
+            ws = self._worker_self.get()
+            if ws is not None and ws.self_paused:
+                self._stats.polls_self_paused += 1
+                return
+
         try:
             response = self._coordinator.get_assignment(worker_id=self._worker_id)
             self._stats.polls_succeeded += 1
-            # Clear any prior quarantine state — we got an actual 200, which
-            # means the maintainer has lifted the quarantine.
+            # A 200 means no operator hold — clear any cached quarantine/pause.
             self._stats.quarantined_at = None
             self._stats.quarantine_reason = None
+            self._stats.paused_at = None
+            self._stats.pause_reason = None
+            self._record_operator_hold(None)
         except WorkerQuarantinedError as exc:
-            # Maintainer-applied pause. Not an error condition — log at INFO
-            # and let the next tick try again. The quarantined_at timestamp
-            # and the maintainer's reason surface via stats (and the log) so
-            # the volunteer can see why their machine was paused.
             self._stats.polls_quarantined += 1
             self._stats.quarantined_at = exc.quarantined_at
             self._stats.quarantine_reason = exc.quarantine_reason
+            self._record_operator_hold(
+                "quarantine", reason=exc.quarantine_reason, at=exc.quarantined_at
+            )
             logger.info(
                 "assignment poll: worker quarantined by maintainer at %s (reason: %s); "
                 "will retry next tick (poll=%d)",
                 exc.quarantined_at or "<unknown>",
                 exc.quarantine_reason or "<none given>",
+                self._stats.polls_attempted,
+            )
+            return
+        except WorkerPausedError as exc:
+            # §2.1 #11: operator no-fault pause. Surface the reason like quarantine
+            # (the volunteer is entitled to know), but it's not a trust signal.
+            self._stats.polls_paused += 1
+            self._stats.paused_at = exc.paused_at
+            self._stats.pause_reason = exc.pause_reason
+            self._record_operator_hold("pause", reason=exc.pause_reason, at=exc.paused_at)
+            logger.info(
+                "assignment poll: worker paused by operator at %s (no-fault; reason: %s); "
+                "will retry next tick (poll=%d)",
+                exc.paused_at or "<unknown>",
+                exc.pause_reason or "<none given>",
                 self._stats.polls_attempted,
             )
             return

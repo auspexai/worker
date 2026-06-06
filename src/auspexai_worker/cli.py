@@ -25,7 +25,7 @@ from .bootstrap import bootstrap as bootstrap_worker
 from .bootstrap import build_signer, initialize_state, open_keystore
 from .capabilities import DeclaredCaps
 from .capabilities import collect as collect_capabilities
-from .config import WorkerConfig
+from .config import WorkerConfig, default_worker_toml_path
 from .coordinator import (
     BindingTokenConsumedError,
     BindingTokenExpiredError,
@@ -80,6 +80,7 @@ from .workspace import WorkspaceManager, workspace_runs_dir
 def cli(ctx: click.Context, config_path: Path | None) -> None:
     ctx.ensure_object(dict)
     ctx.obj["config"] = WorkerConfig.load(config_path=config_path)
+    ctx.obj["config_path"] = config_path  # raw --config (for `executor set` to write)
 
 
 @cli.command(help="Show worker identity, tier, progress, and configured coordinator URL.")
@@ -121,6 +122,22 @@ def status(ctx: click.Context) -> None:
     if _tm.enabled:
         _snap = _tm.snapshot()
         click.echo(f"thermal:     {_snap.current_temp_c}°C ({_snap.state.value})")
+    # §2.1 #11: surface the holds — the volunteer's own self-pause and the
+    # operator's pause/quarantine (with the operator's reason, cached from the
+    # last assignment poll).
+    if worker.self_paused:
+        sp = f" (reason: {worker.self_pause_reason})" if worker.self_pause_reason else ""
+        click.echo(f"self-paused: yes{sp} — run `auspexai-worker unpause` to resume")
+    if worker.operator_hold_kind == "pause":
+        click.echo(
+            f"operator hold: PAUSED by operator (no-fault) "
+            f"— reason: {worker.operator_hold_reason or '<none given>'}"
+        )
+    elif worker.operator_hold_kind == "quarantine":
+        click.echo(
+            f"operator hold: QUARANTINED by operator "
+            f"— reason: {worker.operator_hold_reason or '<none given>'}"
+        )
     if (
         worker.trust_tier == 0
         and config.upgrade_prompt_enabled
@@ -130,6 +147,94 @@ def status(ctx: click.Context) -> None:
         click.echo(
             "You've contributed enough to build a portable track record. "
             "Run `auspexai-worker login` to claim your contributions."
+        )
+
+
+@cli.command(help="Self-pause this worker: keep enrolled + your tier, but stop receiving work.")
+@click.option("--reason", default=None, help="Optional note, shown locally in `status`/dashboard.")
+@click.pass_context
+def pause(ctx: click.Context, reason: str | None) -> None:
+    """Volunteer self-pause (§2.1 #11) — a no-fault, owner-controlled hold. The
+    daemon keeps heartbeating (you stay enrolled, your tier is preserved) but the
+    coordinator stops sending work until you `unpause`. A softer alternative to
+    `retire` (withdrawal). Takes effect within one heartbeat of a running daemon."""
+    config: WorkerConfig = ctx.obj["config"]
+    db, repo = initialize_state(config)
+    try:
+        if repo.get() is None:
+            click.echo("not enrolled; nothing to pause", err=True)
+            sys.exit(1)
+        repo.set_self_pause(True, reason=reason)
+    finally:
+        db.close()
+    click.echo("worker self-paused — the coordinator will stop sending it work.")
+    click.echo("Run `auspexai-worker unpause` to resume.")
+
+
+@cli.command(help="Resume this worker after a self-pause.")
+@click.pass_context
+def unpause(ctx: click.Context) -> None:
+    config: WorkerConfig = ctx.obj["config"]
+    db, repo = initialize_state(config)
+    try:
+        if repo.get() is None:
+            click.echo("not enrolled; nothing to unpause", err=True)
+            sys.exit(1)
+        repo.set_self_pause(False)
+    finally:
+        db.close()
+    click.echo("worker unpaused — it will resume receiving work within a heartbeat.")
+
+
+@cli.group("executor", help="View/set the tenant code-execution policy.")
+def executor() -> None:
+    pass
+
+
+@executor.command("show", help="Show the current code-execution policy.")
+@click.pass_context
+def executor_show(ctx: click.Context) -> None:
+    config: WorkerConfig = ctx.obj["config"]
+    click.echo(f"execute_tenant_code: {config.execute_tenant_code}")
+    click.echo(f"auto_acquire:        {config.auto_acquire}")
+
+
+@executor.command(
+    "set", help="Set the code-execution policy (writes worker.toml; restart to apply)."
+)
+@click.argument("policy", type=click.Choice(["synthetic", "provisioned", "off"]))
+@click.option(
+    "--auto-acquire/--no-auto-acquire",
+    "auto_acquire",
+    default=None,
+    help="Also set auto_acquire (M3 pull-then-run; only effective under provisioned).",
+)
+@click.pass_context
+def executor_set(ctx: click.Context, policy: str, auto_acquire: bool | None) -> None:
+    """Deliberate, owner-driven change to what third-party code this worker runs.
+    Writes the `[executor]` block of worker.toml in place (preserving the rest of
+    the file). Restart the daemon to apply. Not exposed on the localhost dashboard
+    — enabling third-party code execution should be a deliberate config act."""
+    target = ctx.obj.get("config_path") or default_worker_toml_path()
+    updates = {"execute_tenant_code": f'"{policy}"'}
+    if auto_acquire is not None:
+        updates["auto_acquire"] = "true" if auto_acquire else "false"
+    try:
+        _upsert_toml_section(target, "executor", updates)
+    except OSError as e:
+        click.echo(f"ERROR: could not write {target}: {e}", err=True)
+        sys.exit(1)
+    click.echo(
+        f"set [executor] execute_tenant_code = {policy}"
+        + (f", auto_acquire = {auto_acquire}" if auto_acquire is not None else "")
+    )
+    click.echo(
+        f"wrote {target} — restart the daemon to apply (e.g. `systemctl --user restart auspexai-worker`)."
+    )
+    if policy == "provisioned":
+        click.echo(
+            "note: provisioned runs ONLY operator-staged executors whose hash matches "
+            "the coordinator's manifest_sha256 (refuse-don't-echo otherwise)."
         )
 
 
@@ -157,6 +262,48 @@ def logs(ctx: click.Context, lines: int, follow: bool) -> None:
 @cli.group("model", help="Manage local inference models (BYOM model store).")
 def model() -> None:
     pass
+
+
+def _upsert_toml_section(path: Path, section: str, updates: dict[str, str]) -> None:
+    """Set `key = value_literal` for each (key, value_literal) in `updates` inside
+    `[section]` of a TOML file, preserving everything else (comments + other
+    sections). Replaces a key already present in the section, inserts it right
+    after the section header otherwise, and appends a new `[section]` if absent.
+    A targeted text edit (no TOML round-trip) so the volunteer's file stays intact.
+    `value_literal` is the raw TOML value (e.g. '"provisioned"', 'true')."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    lines = text.splitlines()
+
+    # Find the section's line span: from its header to the next header (or EOF).
+    header = f"[{section}]"
+    start = next((i for i, ln in enumerate(lines) if ln.strip() == header), None)
+    if start is None:
+        block = [header] + [f"{k} = {v}" for k, v in updates.items()]
+        if lines and lines[-1].strip() != "":
+            lines.append("")
+        lines.extend(block)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return
+    end = next(
+        (i for i in range(start + 1, len(lines)) if lines[i].lstrip().startswith("[")),
+        len(lines),
+    )
+    for key, value in updates.items():
+        idx = next(
+            (
+                i
+                for i in range(start + 1, end)
+                if lines[i].lstrip().startswith((f"{key} ", f"{key}="))
+            ),
+            None,
+        )
+        if idx is not None:
+            lines[idx] = f"{key} = {value}"
+        else:
+            lines.insert(start + 1, f"{key} = {value}")
+            end += 1
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 # M3 disk-exposure: leave a safety margin of free disk untouched when sizing a
@@ -666,6 +813,9 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
                 # (provisioned policy), so the coordinator routes model-gated
                 # units here only if we'll truly pull+run them.
                 auto_acquire=(config.auto_acquire and config.execute_tenant_code == "provisioned"),
+                # §2.1 #11: declare the volunteer self-pause so the coordinator
+                # routes around this worker (read fresh from local state each beat).
+                self_paused=bool(getattr(repo.get(), "self_paused", False)),
             ),
             interval_seconds=config.heartbeat_interval_seconds,
         )
@@ -678,6 +828,7 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
             audit=audit,
             interval_seconds=config.assignment_poll_interval_seconds,
             dispatcher=dispatcher,
+            worker_self=repo,  # §2.1 #11: self-pause check + operator-hold cache
         )
 
         # M3b: pre-stage loop — pulls models the conductor directs this worker to

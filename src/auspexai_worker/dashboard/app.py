@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from auspexai_worker import __version__
 from auspexai_worker.accelerator import detect_accelerator
@@ -221,10 +221,41 @@ def build_app(*, db: Database, config: WorkerConfig) -> FastAPI:
       <dt>models in store</dt><dd>{model_count} (<a href="/models">manage</a>)</dd>
     </dl>"""
 
+        # §2.1 #11 holds: the operator hold (read-only, with the operator's reason)
+        # + the volunteer self-pause toggle (the one mutating control on this
+        # otherwise read-only dashboard — a low-risk operational lever).
+        holds_parts: list[str] = []
+        if worker is not None and worker.operator_hold_kind == "pause":
+            holds_parts.append(
+                '    <div class="notice">Operator hold: <strong>paused</strong> (no-fault) — '
+                f"reason: {html.escape(worker.operator_hold_reason or '—')}</div>\n"
+            )
+        elif worker is not None and worker.operator_hold_kind == "quarantine":
+            holds_parts.append(
+                '    <div class="notice">Operator hold: <strong>quarantined</strong> — '
+                f"reason: {html.escape(worker.operator_hold_reason or '—')}</div>\n"
+            )
+        if worker is not None and worker.self_paused:
+            holds_parts.append(
+                '    <div class="notice">You self-paused this worker — it stays enrolled '
+                "(tier preserved) but receives no work. "
+                '<form method="post" action="/self-unpause" style="display:inline">'
+                '<button type="submit">resume (unpause)</button></form></div>\n'
+            )
+        else:
+            holds_parts.append(
+                '    <form method="post" action="/self-pause" style="margin:0.75em 0">'
+                '<button type="submit">pause this worker</button> '
+                '<span class="muted">— stop receiving work; keep enrollment + tier</span>'
+                "</form>\n"
+            )
+        holds_html = "".join(holds_parts)
+
         body = (
             "    <h2>Identity</h2>\n"
             + kv
             + "\n"
+            + holds_html
             + upgrade_html
             + health_html
             + "\n"
@@ -233,6 +264,21 @@ def build_app(*, db: Database, config: WorkerConfig) -> FastAPI:
             + counts
         )
         return render_page(title="Overview", body=body, active_nav="/")
+
+    @app.post("/self-pause")
+    def self_pause() -> RedirectResponse:
+        """§2.1 #11: the one mutating control on the dashboard — the volunteer's
+        own no-fault pause (low-risk; localhost-only). Takes effect within a
+        heartbeat (the daemon declares self_paused + stops polling for work)."""
+        if self_repo.get() is not None:
+            self_repo.set_self_pause(True, reason="paused from dashboard")
+        return RedirectResponse("/", status_code=303)
+
+    @app.post("/self-unpause")
+    def self_unpause() -> RedirectResponse:
+        if self_repo.get() is not None:
+            self_repo.set_self_pause(False)
+        return RedirectResponse("/", status_code=303)
 
     @app.get("/activity", response_class=HTMLResponse)
     def activity() -> str:
