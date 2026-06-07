@@ -131,7 +131,9 @@ class TestConfig:
 
     def test_config_page_shows_new_blocks(self, client: TestClient) -> None:
         r = client.get("/config")
-        assert "execute tenant code" in r.text
+        # execute_tenant_code now lives in its own live "Code-execution policy"
+        # section (not the read-only table, which would show a stale snapshot).
+        assert "Code-execution policy" in r.text
         assert "model store dir" in r.text
         assert "thermal thresholds" in r.text
 
@@ -269,6 +271,10 @@ class TestExecutorSetter:
         assert "Pending restart" not in r.text  # no stale-snapshot banner anymore
         assert "set synthetic (echo only)" in r.text  # offers downgrades from provisioned
         assert "enable provisioned" not in r.text
+        assert "runs provisioned tenant code" in r.text
+        # the mayhem1 bug: NO stale "synthetic only" badge from a snapshot read
+        # while the live policy is provisioned (the read-only kv row was removed).
+        assert "synthetic only" not in r.text
         # overview shows the live mode too
         ov = client.get("/")
         assert "runs provisioned tenant code" in ov.text

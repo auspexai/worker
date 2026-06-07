@@ -505,11 +505,9 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
                 f"{config.runner_timeout_seconds}s",
                 False,
             ),
-            (
-                "execute tenant code",
-                _executor_badge(config.execute_tenant_code),
-                False,
-            ),
+            # NB: execute_tenant_code is NOT listed here — it has its own live
+            # "Code-execution policy" section above (this table reads the frozen
+            # daemon-start snapshot, which would disagree after a hot-reload).
             ("provisioning dir", html.escape(str(config.provisioning_path)), True),
             ("model store dir", html.escape(str(config.models_store_path)), True),
             (
