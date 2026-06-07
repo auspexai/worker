@@ -205,8 +205,8 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
         progress = results_repo.progress_summary()
         progress_html = f"""    <h2>Progress</h2>
     <dl class="kv">
-      <dt>work units completed</dt><dd>{progress["completed_units"]}</dd>
-      <dt>distinct experiments</dt><dd>{progress["distinct_experiments"]}</dd>
+      <dt>work units completed</dt><dd><span data-live="completed_units">{progress["completed_units"]}</span></dd>
+      <dt>distinct experiments</dt><dd><span data-live="distinct_experiments">{progress["distinct_experiments"]}</span></dd>
     </dl>"""
 
         upgrade_html = ""
@@ -239,7 +239,7 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
     <dl class="kv">
       <dt>tenant code</dt><dd>{tenant_code_cell}</dd>
       <dt>accelerator</dt><dd>{html.escape(acc.label)}</dd>
-      <dt>thermal</dt><dd>{_thermal_html(config)}</dd>
+      <dt>thermal</dt><dd data-live="thermal">{_thermal_html(config)}</dd>
       <dt>models in store</dt><dd>{model_count} (<a href="/models">manage</a>)</dd>
     </dl>"""
 
@@ -584,6 +584,19 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
     def api_stats() -> JSONResponse:
         stats = _gather_stats()
         worker = stats["worker"]
+        # Continuous telemetry the baseline poll keeps live: thermal (changes every
+        # few seconds as the box works) + work-unit progress. Read fresh each call.
+        mon = _thermal_monitor(config)
+        thermal_enabled = mon.enabled
+        thermal_temp_c: float | None = None
+        thermal_state: str | None = None
+        if thermal_enabled:
+            snap = mon.snapshot()
+            thermal_temp_c = (
+                round(snap.current_temp_c, 1) if snap.current_temp_c is not None else None
+            )
+            thermal_state = snap.state.value
+        progress = results_repo.progress_summary()
         return JSONResponse(
             {
                 "worker_id": worker.worker_id if worker else None,
@@ -596,6 +609,11 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
                 "receipts_count": stats["receipts_count"],
                 "pending_submissions": stats["pending_submissions"],
                 "audit_count": stats["audit_count"],
+                "completed_units": progress["completed_units"],
+                "distinct_experiments": progress["distinct_experiments"],
+                "thermal_enabled": thermal_enabled,
+                "thermal_temp_c": thermal_temp_c,
+                "thermal_state": thermal_state,
                 "coordinator_url": config.coordinator_url,
             }
         )

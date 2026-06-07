@@ -78,15 +78,33 @@ class TestOverview:
 
     def test_enrolled_overview_is_live(self, client: TestClient, db: Database) -> None:
         """M6 #3: the overview carries the baseline-poll updater — a "● live"
-        indicator, the /api/stats poll script, and data-live markers on the
-        values the poll refreshes (heartbeat + activity counts)."""
+        indicator, the /api/stats poll script, and data-live markers on EVERY
+        metric the poll refreshes (heartbeat, activity counts, progress, thermal)
+        — not just one field."""
         _enroll(db)
         r = client.get("/")
         assert r.status_code == 200
         assert 'id="live-ind"' in r.text  # header indicator
         assert "/api/stats" in r.text  # the poll target is wired into the script
-        assert 'data-live="last_heartbeat_at"' in r.text
-        assert 'data-live="receipts_count"' in r.text
+        for marker in (
+            'data-live="last_heartbeat_at"',
+            'data-live="receipts_count"',
+            'data-live="pending_submissions"',
+            'data-live="audit_count"',
+            'data-live="completed_units"',
+            'data-live="distinct_experiments"',
+            'data-live="thermal"',
+        ):
+            assert marker in r.text, marker
+
+    def test_api_stats_includes_thermal_and_progress(
+        self, client: TestClient, db: Database
+    ) -> None:
+        """The poll source carries the continuous telemetry the overview refreshes."""
+        _enroll(db)
+        d = client.get("/api/stats").json()
+        for key in ("thermal_enabled", "completed_units", "distinct_experiments"):
+            assert key in d, key
 
     def test_static_pages_are_not_live(self, client: TestClient, db: Database) -> None:
         """Static log/config pages don't carry the poll script (no live data)."""

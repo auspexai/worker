@@ -74,6 +74,17 @@ _LIVE_SCRIPT = """  <script>
         .then(function (d) {
           document.querySelectorAll('[data-live]').forEach(function (el) {
             var k = el.getAttribute('data-live');
+            if (k === 'thermal') {
+              if (!d.thermal_enabled) {
+                el.innerHTML = '<span class="muted">no thermal sensor \\u2014 governor inactive on this host</span>';
+              } else {
+                var cls = { ok: 'ok', warm: 'warn', critical: 'error' }[d.thermal_state] || '';
+                var temp = (d.thermal_temp_c != null) ? (d.thermal_temp_c + '\\u00B0C') : '\\u2014';
+                var st = String(d.thermal_state == null ? '' : d.thermal_state).replace(/[<>&]/g, '');
+                el.innerHTML = temp + ' <span class="badge ' + cls + '">' + st + '</span>';
+              }
+              return;
+            }
             if (!(k in d)) return;
             el.textContent = (k === 'last_heartbeat_at') ? rel(d[k]) : d[k];
           });
