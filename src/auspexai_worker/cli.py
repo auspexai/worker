@@ -25,7 +25,12 @@ from .bootstrap import bootstrap as bootstrap_worker
 from .bootstrap import build_signer, initialize_state, open_keystore
 from .capabilities import DeclaredCaps
 from .capabilities import collect as collect_capabilities
-from .config import WorkerConfig, default_worker_toml_path, set_executor_policy
+from .config import (
+    WorkerConfig,
+    default_worker_toml_path,
+    read_executor_policy,
+    set_executor_policy,
+)
 from .coordinator import (
     BindingTokenConsumedError,
     BindingTokenExpiredError,
@@ -200,7 +205,7 @@ def executor_show(ctx: click.Context) -> None:
 
 
 @executor.command(
-    "set", help="Set the code-execution policy (writes worker.toml; restart to apply)."
+    "set", help="Set the code-execution policy (writes worker.toml; hot-reloaded, no restart)."
 )
 @click.argument("policy", type=click.Choice(["synthetic", "provisioned", "off"]))
 @click.option(
@@ -209,22 +214,15 @@ def executor_show(ctx: click.Context) -> None:
     default=None,
     help="Also set auto_acquire (M3 pull-then-run; only effective under provisioned).",
 )
-@click.option(
-    "--restart/--no-restart",
-    "restart",
-    default=True,
-    help="Restart the systemd user daemon so the change takes effect now (default). "
-    "Pass --no-restart to only write the config and apply on the next restart.",
-)
 @click.pass_context
-def executor_set(ctx: click.Context, policy: str, auto_acquire: bool | None, restart: bool) -> None:
+def executor_set(ctx: click.Context, policy: str, auto_acquire: bool | None) -> None:
     """Deliberate, owner-driven change to what third-party code this worker runs.
     Writes the `[executor]` block of worker.toml in place (preserving the rest of
-    the file). The daemon reads execute_tenant_code at start, so the change needs a
-    restart — done automatically by default (pass --no-restart to only write). Also
-    available on the localhost dashboard (M9 leg 4) — there, enabling `provisioned`
-    is gated behind a confirm step; both surfaces apply the change by restarting the
-    worker."""
+    the file). A running daemon **hot-reloads** the policy — per dispatch (execution)
+    and per heartbeat (the coordinator-facing capability) — so the change takes
+    effect within one heartbeat, **no restart needed**. Also available on the
+    localhost dashboard (M9 leg 4), where enabling `provisioned` is gated behind a
+    confirm step."""
     target = ctx.obj.get("config_path") or default_worker_toml_path()
     try:
         set_executor_policy(target, policy, auto_acquire=auto_acquire)
@@ -240,14 +238,7 @@ def executor_set(ctx: click.Context, policy: str, auto_acquire: bool | None, res
             "note: provisioned runs ONLY operator-staged executors whose hash matches "
             "the coordinator's manifest_sha256 (refuse-don't-echo otherwise)."
         )
-    if restart:
-        _restart_service()
-    else:
-        click.echo(
-            f"wrote {target} — restart the daemon to apply "
-            "(`auspexai-worker executor set … --restart`, or "
-            "`systemctl --user restart auspexai-worker`)."
-        )
+    click.echo("a running daemon picks this up within one heartbeat — no restart needed.")
 
 
 @cli.command(help="Tail the daemon log file.")
@@ -575,43 +566,6 @@ def _enable_and_start_service() -> None:
         click.echo(f"service start failed: {r.stderr.strip()}", err=True)
 
 
-def _restart_service() -> None:
-    """Restart the systemd user daemon so a config change takes effect now. Safe
-    from the CLI (a separate process, not in the daemon's cgroup). Falls back to a
-    clear manual instruction when systemd isn't managing the worker."""
-    import shutil
-    import subprocess
-
-    systemctl = shutil.which("systemctl")
-    if not systemctl:
-        click.echo("systemctl not found; restart the daemon manually to apply.")
-        return
-    if (
-        subprocess.run(
-            [systemctl, "--user", "is-active", "auspexai-worker.service"],
-            capture_output=True,
-            text=True,
-        ).returncode
-        != 0
-    ):
-        click.echo(
-            "auspexai-worker.service is not active under systemd --user; "
-            "restart the daemon manually to apply."
-        )
-        return
-    click.echo("restarting auspexai-worker.service …")
-    r = subprocess.run(
-        [systemctl, "--user", "restart", "auspexai-worker.service"],
-        capture_output=True,
-        text=True,
-    )
-    if r.returncode == 0:
-        click.echo("service restarted — the new policy is now active.")
-    else:
-        click.echo(f"restart failed: {r.stderr.strip()}", err=True)
-        click.echo("try manually: systemctl --user enable --now auspexai-worker.service")
-
-
 @cli.command(help="Generate identity and enroll with the coordinator (T0 anonymous).")
 @click.option(
     "--start", is_flag=True, help="Enable and start the systemd user service after enrollment."
@@ -777,6 +731,24 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
             crit_c=config.thermal_crit_c,
             resume_c=config.thermal_resume_c,
         )
+        # Hot-reload of the §9 #37 consent gate: re-read the owner's executor
+        # policy from disk so a worker.toml change (CLI or dashboard) applies
+        # WITHOUT a daemon restart — per heartbeat (the coordinator-facing
+        # capability) and per dispatch (the execution gate). Fail safe: a read
+        # error → OFF (refuse the unit; it's re-offered) rather than risk running
+        # under the wrong policy.
+        _cfg_path = ctx.obj.get("config_path")
+
+        def _live_executor() -> tuple[ExecutePolicy, bool]:
+            try:
+                pol, aa = read_executor_policy(_cfg_path)
+                return ExecutePolicy(pol), aa
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "could not re-read executor policy from disk; refusing this tick"
+                )
+                return ExecutePolicy.OFF, False
+
         dispatcher = RunnerDispatcher(
             coordinator=client,
             worker_id=worker.worker_id,
@@ -789,7 +761,9 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
             runner_timeout_seconds=config.runner_timeout_seconds,
             # §9 #37: tenant code-execution consent + provisioned-executor
             # resolution. Tenant allow/deny stays the poller's accept-time
-            # gate (DB-backed §5.14), so no tenant lists wired here.
+            # gate (DB-backed §5.14), so no tenant lists wired here. The static
+            # execute_policy/auto_acquire are the daemon-start values; live_executor
+            # re-reads them per unit so a policy change applies without a restart.
             execute_policy=ExecutePolicy(config.execute_tenant_code),
             executor_resolver=ProvisioningResolver(config.provisioning_path),
             model_store_dir=config.models_store_path,
@@ -802,12 +776,14 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
                 if config.auto_acquire
                 else None
             ),
+            live_executor=_live_executor,
         )
-        heartbeat = HeartbeatLoop(
-            coordinator=client,
-            repo=repo,
-            worker_id=worker.worker_id,
-            capability_collector=lambda: collect_capabilities(
+
+        def _collect_capabilities():
+            # Re-read the executor policy each beat so the coordinator-facing
+            # capability tracks the live worker.toml (hot-reload, no restart).
+            policy, auto_acquire = _live_executor()
+            return collect_capabilities(
                 declared_caps=declared_caps,
                 declared_gpus=config.declared_gpus,
                 # W-M: declare the BYOM store inventory so #30 can route on it.
@@ -815,18 +791,24 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
                 # W-H: report current thermal state so the coordinator can route
                 # work away from a degraded/overheating worker.
                 thermal=(thermal_monitor.snapshot().to_dict() if thermal_monitor.enabled else None),
-                # M3: declare auto-acquire only when it can actually take effect
-                # (provisioned policy), so the coordinator routes model-gated
-                # units here only if we'll truly pull+run them.
-                auto_acquire=(config.auto_acquire and config.execute_tenant_code == "provisioned"),
+                # M3: auto-acquire (already folded to provisioned-only by _live_executor).
+                auto_acquire=auto_acquire,
                 # §2.1 #11: declare the volunteer self-pause so the coordinator
                 # routes around this worker (read fresh from local state each beat).
                 self_paused=bool(getattr(repo.get(), "self_paused", False)),
                 # M9 leg 4: declare the owner's code-execution consent mode so the
                 # coordinator routes real (model-gated) experiments only to
-                # provisioned-mode workers (a synthetic worker would echo).
-                execute_tenant_code=config.execute_tenant_code,
-            ),
+                # provisioned-mode workers (a synthetic worker would echo). Live
+                # value (hot-reload) so a policy change reaches the coordinator on
+                # the next beat — no restart.
+                execute_tenant_code=policy.value,
+            )
+
+        heartbeat = HeartbeatLoop(
+            coordinator=client,
+            repo=repo,
+            worker_id=worker.worker_id,
+            capability_collector=_collect_capabilities,
             interval_seconds=config.heartbeat_interval_seconds,
         )
         poller = AssignmentPoller(

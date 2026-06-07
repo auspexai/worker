@@ -9,7 +9,6 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
 
-import auspexai_worker.dashboard.app as dash_app
 from auspexai_worker.config import WorkerConfig
 from auspexai_worker.dashboard import build_app
 from auspexai_worker.state import (
@@ -213,8 +212,8 @@ class TestSelfPause:
 
 class TestExecutorSetter:
     """M9 leg 4: the dashboard executor-policy setter — one-click downgrades, a
-    confirm step before enabling provisioned, writing the worker.toml the daemon
-    reads on its next restart."""
+    confirm step before enabling provisioned, written to worker.toml and HOT-RELOADED
+    by the daemon (no restart). The dashboard reflects the live on-disk value."""
 
     def test_config_page_shows_setter_with_current_mode(self, client: TestClient) -> None:
         r = client.get("/config")
@@ -222,26 +221,13 @@ class TestExecutorSetter:
         assert 'action="/executor"' in r.text
         # default config is synthetic → the page offers off + enable-provisioned
         assert "enable provisioned" in r.text
+        assert "no restart needed" in r.text  # hot-reload disclosed
 
-    def test_set_off_writes_toml_and_auto_restarts(
-        self, client: TestClient, toml_path: Path, monkeypatch
-    ) -> None:
-        # auto-restart on a UI config change (systemd present → scheduled)
-        monkeypatch.setattr(dash_app, "_schedule_detached_restart", lambda: True)
-        r = client.post("/executor", data={"policy": "off"})
-        assert r.status_code == 200
+    def test_set_off_writes_toml_and_redirects(self, client: TestClient, toml_path: Path) -> None:
+        r = client.post("/executor", data={"policy": "off"}, follow_redirects=False)
+        assert r.status_code == 303
+        assert r.headers["location"] == "/config"
         assert 'execute_tenant_code = "off"' in toml_path.read_text()
-        assert "restarting now" in r.text  # UI says it's restarting to apply
-
-    def test_set_without_systemd_shows_manual_restart(
-        self, client: TestClient, toml_path: Path, monkeypatch
-    ) -> None:
-        # no systemd managing the worker → fall back to a manual-restart instruction
-        monkeypatch.setattr(dash_app, "_schedule_detached_restart", lambda: False)
-        r = client.post("/executor", data={"policy": "off"})
-        assert r.status_code == 200
-        assert 'execute_tenant_code = "off"' in toml_path.read_text()
-        assert "systemctl --user restart auspexai-worker" in r.text
 
     def test_enable_provisioned_without_confirm_redirects_to_confirm(
         self, client: TestClient, toml_path: Path
@@ -254,46 +240,40 @@ class TestExecutorSetter:
             toml_path.read_text()
         )
 
-    def test_enable_provisioned_with_confirm_writes_and_restarts(
-        self, client: TestClient, toml_path: Path, monkeypatch
+    def test_enable_provisioned_with_confirm_writes_toml(
+        self, client: TestClient, toml_path: Path
     ) -> None:
-        monkeypatch.setattr(dash_app, "_schedule_detached_restart", lambda: True)
-        r = client.post("/executor", data={"policy": "provisioned", "confirm": "yes"})
-        assert r.status_code == 200
+        r = client.post(
+            "/executor", data={"policy": "provisioned", "confirm": "yes"}, follow_redirects=False
+        )
+        assert r.status_code == 303
+        assert r.headers["location"] == "/config"
         assert 'execute_tenant_code = "provisioned"' in toml_path.read_text()
-        assert "restarting now" in r.text
 
-    def test_confirm_page_warns_and_mentions_restart(self, client: TestClient) -> None:
+    def test_confirm_page_discloses_no_restart(self, client: TestClient) -> None:
         r = client.get("/executor/confirm")
         assert r.status_code == 200
         assert "third-party tenant code" in r.text
-        assert "restarts the worker" in r.text  # the action's restart is disclosed
-        assert "enable provisioned + restart" in r.text
+        assert "no restart needed" in r.text  # hot-reload, not a restart
+        assert "Yes, enable provisioned execution" in r.text
 
-    def test_pending_restart_surfaced_when_file_differs_from_running(
+    def test_dashboard_reflects_live_on_disk_policy(
         self, client: TestClient, db: Database, toml_path: Path
     ) -> None:
-        """The dashboard reflects the running daemon's snapshot (synthetic here);
-        once worker.toml is changed to provisioned, /config shows a pending-restart
-        banner and drives the buttons off the configured (on-disk) value — the
-        mayhem0 confusion (file=provisioned, daemon still synthetic)."""
-        _enroll(db)  # the overview health block (with the badge) renders when enrolled
+        """No stale snapshot / pending-restart split — the dashboard reads the live
+        on-disk policy (which the daemon hot-reloads). Writing provisioned → /config
+        shows it as current immediately + offers downgrades, no banner."""
+        _enroll(db)  # overview health block (with the badge) renders when enrolled
         toml_path.write_text('[executor]\nexecute_tenant_code = "provisioned"\n')
         r = client.get("/config")
-        assert "Pending restart" in r.text
-        assert "running" in r.text  # shows the still-running mode
-        # buttons reflect configured=provisioned → offers downgrades, NOT "enable provisioned"
-        assert "set synthetic (echo only)" in r.text
+        assert "Pending restart" not in r.text  # no stale-snapshot banner anymore
+        assert "set synthetic (echo only)" in r.text  # offers downgrades from provisioned
         assert "enable provisioned" not in r.text
-        # overview surfaces it too
+        # overview shows the live mode too
         ov = client.get("/")
-        assert "pending restart" in ov.text
+        assert "runs provisioned tenant code" in ov.text
 
-    def test_invalid_policy_is_ignored(
-        self, client: TestClient, toml_path: Path, monkeypatch
-    ) -> None:
-        # never restarts on a rejected/invalid policy
-        monkeypatch.setattr(dash_app, "_schedule_detached_restart", lambda: True)
+    def test_invalid_policy_is_ignored(self, client: TestClient, toml_path: Path) -> None:
         r = client.post("/executor", data={"policy": "bogus"}, follow_redirects=False)
         assert r.status_code == 303
         assert r.headers["location"] == "/config"

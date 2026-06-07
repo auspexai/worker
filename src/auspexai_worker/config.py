@@ -415,12 +415,24 @@ def _upsert_toml_section(path: Path, section: str, updates: dict[str, str]) -> N
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def read_executor_policy(config_path: Path | None) -> tuple[str, bool]:
+    """Freshly resolve `(execute_tenant_code, effective_auto_acquire)` from disk —
+    the live owner-consent state, NOT a daemon-start snapshot. Used for hot-reload:
+    the daemon re-reads this per-heartbeat (capability declaration) and per-dispatch
+    (execution gate) so a policy change applies WITHOUT a daemon restart. Raises if
+    the config can't be loaded (callers fail safe). `effective_auto_acquire` already
+    folds in the "only under provisioned" rule, matching the daemon's wiring."""
+    cfg = WorkerConfig.load(config_path=config_path)
+    return cfg.execute_tenant_code, (cfg.auto_acquire and cfg.execute_tenant_code == "provisioned")
+
+
 def set_executor_policy(config_path: Path, policy: str, *, auto_acquire: bool | None = None) -> str:
     """Persist `[executor] execute_tenant_code` (+ optional `auto_acquire`) to the
     worker.toml at `config_path`, preserving the rest of the file. Validates the
     policy (raises ValueError on an unknown value). Shared by the CLI `executor
-    set` and the M9 leg-4 dashboard setter — the single owner-consent write path.
-    Returns the normalized policy. The change applies on the next daemon restart."""
+    set` and the dashboard setter — the single owner-consent write path. Returns the
+    normalized policy. The daemon hot-reloads it (per-heartbeat + per-dispatch), so
+    it takes effect within one heartbeat — no restart needed."""
     policy = _validate_policy(policy)
     updates = {"execute_tenant_code": f'"{policy}"'}
     if auto_acquire is not None:

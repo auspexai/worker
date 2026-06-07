@@ -79,62 +79,16 @@ def _executor_badge(policy: str) -> str:
     return f'<span class="badge {cls}">{html.escape(label)}</span>'
 
 
-def _executor_state(config: WorkerConfig, config_path: Path | None) -> tuple[str, str, bool]:
-    """Return (active, configured, pending_restart) for the executor policy.
-
-    `active` is what the RUNNING daemon loaded at start (the snapshot in `config`,
-    which is what the heartbeat declares + dispatch enforces right now). `configured`
-    is what a fresh load from disk would pick up — i.e. what a restart would apply.
-    They differ after the setter writes worker.toml but before the daemon restarts;
-    `pending_restart` flags that so the dashboard never silently shows a stale mode
-    (the M9-leg-4 setter applies on restart, like the CLI)."""
-    active = config.execute_tenant_code
+def _current_executor_policy(config: WorkerConfig, config_path: Path | None) -> str:
+    """The live executor policy the daemon enforces — read fresh from worker.toml
+    (the source of truth) so the dashboard reflects a change immediately. The daemon
+    hot-reloads the same value (per dispatch + per heartbeat), so there's no
+    stale-snapshot / pending-restart split. Falls back to the daemon-start snapshot
+    if the file can't be read."""
     try:
-        configured = WorkerConfig.load(config_path=config_path).execute_tenant_code
+        return WorkerConfig.load(config_path=config_path).execute_tenant_code
     except Exception:
-        configured = active
-    return active, configured, configured != active
-
-
-def _schedule_detached_restart() -> bool:
-    """Schedule a worker-daemon restart ~2s out, **detached** from this process, so
-    the dashboard's HTTP response flushes before systemd bounces the daemon. The
-    dashboard runs INSIDE the daemon, so it can't restart synchronously; a transient
-    `systemd-run --on-active=2` timer fires the restart after the response is sent.
-    Returns True if scheduled; False when systemd isn't managing the worker (the
-    caller then shows a manual-restart instruction). Best-effort, never raises."""
-    import shutil
-    import subprocess
-
-    systemd_run = shutil.which("systemd-run")
-    systemctl = shutil.which("systemctl")
-    if not systemd_run or not systemctl:
-        return False
-    try:
-        active = subprocess.run(
-            [systemctl, "--user", "is-active", "auspexai-worker.service"],
-            capture_output=True,
-            text=True,
-        )
-        if active.returncode != 0:
-            return False
-        r = subprocess.run(
-            [
-                systemd_run,
-                "--user",
-                "--on-active=2",
-                "--quiet",
-                systemctl,
-                "--user",
-                "restart",
-                "auspexai-worker.service",
-            ],
-            capture_output=True,
-            text=True,
-        )
-        return r.returncode == 0
-    except Exception:
-        return False
+        return config.execute_tenant_code
 
 
 def _thermal_monitor(config: WorkerConfig) -> ThermalMonitor:
@@ -279,12 +233,7 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
         # Health & execution — what this machine is set to run + its physical state.
         model_count = len(ModelStore(config.models_store_path).list())
         acc = detect_accelerator()
-        active_mode, configured_mode, pending_restart = _executor_state(config, config_path)
-        tenant_code_cell = _executor_badge(active_mode)
-        if pending_restart:
-            tenant_code_cell += (
-                f' <span class="badge warn">pending restart → {html.escape(configured_mode)}</span>'
-            )
+        tenant_code_cell = _executor_badge(_current_executor_policy(config, config_path))
         health_html = f"""    <h2>Health &amp; execution</h2>
     <dl class="kv">
       <dt>tenant code</dt><dd>{tenant_code_cell}</dd>
@@ -370,8 +319,8 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
     # permanently withheld. Localhost-only ⇒ only the box owner reaches it, but
     # enabling `provisioned` (consenting to run third-party code) is gated behind
     # an explicit confirm step so it stays a *deliberate act*; downgrading toward
-    # a safer mode is one click. The write applies on the next daemon restart
-    # (same as `executor set`). Tier-agnostic by design — owner consent is a
+    # a safer mode is one click. The daemon HOT-RELOADS the change (no restart) —
+    # effective within one heartbeat. Tier-agnostic by design — owner consent is a
     # different axis than the network's trust tier (see M9 leg-4 design).
     @app.get("/executor/confirm", response_class=HTMLResponse)
     def executor_confirm() -> str:
@@ -381,12 +330,12 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
             "this machine will run <strong>third-party tenant code</strong> — but only "
             "executors that were operator-staged locally and whose hash matches the "
             "coordinator's manifest (anything else is refused, never echoed). This is "
-            "your consent, on your hardware. <strong>Applying this restarts the worker "
-            "daemon</strong> (any in-flight unit is re-offered).</div>\n"
+            "your consent, on your hardware. It takes effect within one heartbeat "
+            "(no restart needed).</div>\n"
             '    <form method="post" action="/executor" style="margin:1em 0">\n'
             '      <input type="hidden" name="policy" value="provisioned">\n'
             '      <input type="hidden" name="confirm" value="yes">\n'
-            '      <button type="submit">Yes, enable provisioned + restart</button>\n'
+            '      <button type="submit">Yes, enable provisioned execution</button>\n'
             '      <a href="/config" style="margin-left:1em">Cancel</a>\n'
             "    </form>\n"
         )
@@ -412,28 +361,10 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
                 '    <p><a href="/config">back to config</a></p>'
             )
             return HTMLResponse(render_page(title="Config", body=body, active_nav="/config"))
-        # A config change needs a daemon restart to take effect; the dashboard runs
-        # inside the daemon, so it can't restart synchronously — schedule a detached
-        # restart that fires after this response flushes. The UI told the user this
-        # action restarts the service (button label + confirm page).
-        restarting = _schedule_detached_restart()
-        if restarting:
-            body = (
-                '    <div class="notice">✓ Code-execution policy set to '
-                f"<strong>{html.escape(policy)}</strong>. The worker is "
-                "<strong>restarting now</strong> to apply — this dashboard will be "
-                "briefly unavailable; it reloads automatically.</div>\n"
-                '    <p><a href="/config">reload now</a></p>\n'
-                "    <script>setTimeout(function(){location.href='/config';}, 5000);</script>\n"
-            )
-        else:
-            body = (
-                '    <div class="notice">✓ Code-execution policy set to '
-                f"<strong>{html.escape(policy)}</strong>. Restart the worker to apply: "
-                "<code>systemctl --user restart auspexai-worker</code>.</div>\n"
-                '    <p><a href="/config">back to config</a></p>\n'
-            )
-        return HTMLResponse(render_page(title="Applied", body=body, active_nav="/config"))
+        # The daemon hot-reloads execute_tenant_code (per dispatch + per heartbeat),
+        # so the change is live without a restart — just redirect back to /config,
+        # which now reflects the new policy immediately.
+        return RedirectResponse("/config", status_code=303)
 
     @app.get("/activity", response_class=HTMLResponse)
     def activity() -> str:
@@ -603,51 +534,38 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
         # M9 leg 4: the one writable control on this page — the executor-policy
         # setter. Downgrades toward safer modes are one click; enabling
         # provisioned routes through the /executor/confirm deliberate-act step.
-        # Buttons reflect the CONFIGURED (on-disk) value so they track what you last
-        # set; a pending-restart banner appears when that differs from the running
-        # daemon (the change applies on restart, like the CLI).
-        active_mode, configured, pending_restart = _executor_state(config, config_path)
+        # Buttons + badge reflect the LIVE on-disk policy (the daemon hot-reloads
+        # the same value, so there's no stale-snapshot/pending-restart split).
+        current = _current_executor_policy(config, config_path)
         setter_buttons: list[str] = []
-        if configured != "synthetic":
+        if current != "synthetic":
             setter_buttons.append(
                 '<form method="post" action="/executor" style="display:inline">'
                 '<input type="hidden" name="policy" value="synthetic">'
                 '<button type="submit">set synthetic (echo only)</button></form>'
             )
-        if configured != "off":
+        if current != "off":
             setter_buttons.append(
                 '<form method="post" action="/executor" style="display:inline;margin-left:0.5em">'
                 '<input type="hidden" name="policy" value="off">'
                 '<button type="submit">set off (refuse all)</button></form>'
             )
-        if configured != "provisioned":
+        if current != "provisioned":
             # the deliberate-act path (confirm step before enabling 3rd-party code)
             setter_buttons.append(
                 '<a href="/executor/confirm" style="margin-left:0.5em" '
                 'role="button">enable provisioned…</a>'
             )
-        pending_banner = (
-            (
-                '    <div class="notice">⏳ <strong>Pending restart.</strong> Configured '
-                f"<strong>{html.escape(configured)}</strong>, but the running daemon is "
-                f"still <strong>{html.escape(active_mode)}</strong> — restart the worker "
-                "to apply (e.g. <code>systemctl --user restart auspexai-worker</code>).</div>\n"
-            )
-            if pending_restart
-            else ""
-        )
         executor_setter = (
             "    <h3>Code-execution policy</h3>\n"
-            + pending_banner
-            + f"    <p>configured: {_executor_badge(configured)}"
-            + (f" &nbsp;·&nbsp; running: {_executor_badge(active_mode)}" if pending_restart else "")
-            + "</p>\n"
+            f"    <p>current: {_executor_badge(current)}</p>\n"
             f'    <div style="margin:0.5em 0">{"".join(setter_buttons)}</div>\n'
             '    <p class="muted">Your consent to run third-party tenant code on this '
-            "machine. <strong>Changing the policy restarts the worker daemon</strong> to "
-            "apply (any in-flight unit is re-offered). Enabling <strong>provisioned</strong> "
-            "asks for confirmation first; the network only routes real (model-gated) "
-            "experiments to provisioned workers.</p>\n"
+            "machine. The running daemon <strong>hot-reloads</strong> the change — "
+            "effective within one heartbeat, <strong>no restart needed</strong>. "
+            "Enabling <strong>provisioned</strong> asks for confirmation first; the "
+            "network only routes real (model-gated) experiments to provisioned "
+            "workers.</p>\n"
         )
         body = (
             "    <h2>Configuration</h2>\n"
@@ -655,11 +573,9 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
             + "    <h3>Other settings (read-only)</h3>\n"
             + render_kv(rows)
             + "\n"
-            '    <p class="muted">Edit '
-            "<code>~/.config/auspexai-worker/worker.toml</code> or set the "
-            "matching env var to change a value, then restart the daemon. "
-            "The dashboard reflects the loaded values, not the current "
-            "file contents.</p>"
+            '    <p class="muted">The code-execution policy above is live-editable. '
+            "Other settings: edit <code>~/.config/auspexai-worker/worker.toml</code> or "
+            "the matching env var, then restart the daemon.</p>"
         )
         return render_page(title="Config", body=body, active_nav="/config")
 

@@ -169,6 +169,7 @@ def _dispatcher(
     pub,
     model_store_dir=None,
     thermal_monitor=None,
+    live_executor=None,
 ):
     return RunnerDispatcher(
         coordinator=client,
@@ -184,7 +185,31 @@ def _dispatcher(
         executor_resolver=ProvisioningResolver(provisioning_dir),
         model_store_dir=model_store_dir,
         thermal_monitor=thermal_monitor,
+        live_executor=live_executor,
     )
+
+
+def test_live_executor_hot_reload_overrides_static_policy(tmp_path: Path, db: Database):
+    """Hot-reload: a live_executor is re-read PER UNIT and overrides the daemon-start
+    static policy — so an owner's policy change applies without a restart. Static
+    SYNTHETIC + a live OFF → the unit is refused (not echoed)."""
+    privkey, pub = _make_key()
+    prov = tmp_path / "tenants"
+    sha = _provision(prov, EXECUTOR_DOUBLER)
+    captured: dict = {}
+    with _client(captured, privkey, pub) as client:
+        disp = _dispatcher(
+            client,
+            db,
+            tmp_path / "runs",
+            policy=ExecutePolicy.SYNTHETIC,  # daemon-start snapshot
+            provisioning_dir=prov,
+            privkey=privkey,
+            pub=pub,
+            live_executor=lambda: (ExecutePolicy.OFF, False),  # live owner consent
+        )
+        outcome = disp.run_unit(_envelope(sha, value=21))
+    assert outcome.kind == DispatchOutcomeKind.EXECUTOR_REFUSED
 
 
 def test_provisioned_real_executor_submits_its_output(tmp_path: Path, db: Database):

@@ -27,6 +27,7 @@ import logging
 import os
 import subprocess
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -127,6 +128,13 @@ class RunnerDispatcher:
         # refused. Default off keeps refuse-don't-echo.
         auto_acquire: bool = False,
         model_acquirer=None,  # provisioning.ModelAcquirer | None
+        # Hot-reload of the consent gate (no daemon restart): when provided, the
+        # dispatcher calls this PER UNIT to get the live (ExecutePolicy, auto_acquire)
+        # from disk, so an owner's policy change applies to the next unit without a
+        # restart. The provider folds in its own fail-safe (a read error → refuse).
+        # When None, the static `execute_policy`/`auto_acquire` above are used
+        # (back-compat for tests + callers that don't wire hot-reload).
+        live_executor: Callable[[], tuple[ExecutePolicy, bool]] | None = None,
     ) -> None:
         self._coordinator = coordinator
         self._worker_id = worker_id
@@ -148,6 +156,7 @@ class RunnerDispatcher:
         self._thermal_monitor = thermal_monitor
         self._thermal_poll_interval_seconds = thermal_poll_interval_seconds
         self._auto_acquire = auto_acquire
+        self._live_executor = live_executor
         self._model_acquirer = model_acquirer
 
     def run_unit(self, response: AssignmentResponse) -> DispatchOutcome:
@@ -188,16 +197,23 @@ class RunnerDispatcher:
 
         # §9 #37 consent + resolution gate. Decide BEFORE spawning anything:
         # refuse (decline the unit, re-offer), synthetic (built-in echo), or
-        # real (a hash-verified, consented tenant executor).
+        # real (a hash-verified, consented tenant executor). Hot-reload: when a
+        # live_executor is wired, re-read the owner's policy from disk PER UNIT so a
+        # config change applies without a daemon restart (the provider fails safe to
+        # refuse on a read error); otherwise use the daemon-start snapshot.
+        if self._live_executor is not None:
+            policy, auto_acquire = self._live_executor()
+        else:
+            policy, auto_acquire = self._execute_policy, self._auto_acquire
         decision = decide_execution(
-            policy=self._execute_policy,
+            policy=policy,
             tenant_id=unit.tenant_id,
             manifest_sha256=unit.manifest_sha256,
             resolver=self._executor_resolver,
             model_store_dir=self._model_store_dir,
             allow_list=self._tenant_allow_list,
             deny_list=self._tenant_deny_list,
-            auto_acquire=self._auto_acquire,
+            auto_acquire=auto_acquire,
             acquirer=self._model_acquirer,
         )
         if decision.mode is ExecutionMode.REFUSE:

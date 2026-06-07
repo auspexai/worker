@@ -66,10 +66,9 @@ def test_pause_requires_enrollment(tmp_path: Path) -> None:
 
 def test_executor_set_writes_toml(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path)
-    # --no-restart isolates the write path (restart defaults ON now).
     r = CliRunner().invoke(
         cli,
-        ["--config", str(cfg), "executor", "set", "provisioned", "--auto-acquire", "--no-restart"],
+        ["--config", str(cfg), "executor", "set", "provisioned", "--auto-acquire"],
         env=_env(tmp_path),
     )
     assert r.exit_code == 0, r.output
@@ -78,38 +77,5 @@ def test_executor_set_writes_toml(tmp_path: Path) -> None:
     assert loaded.auto_acquire is True
     # The pre-existing [coordinator] section is preserved (targeted upsert).
     assert loaded.coordinator_url == "http://t.invalid"
-    # With --no-restart, it tells the user a restart is needed.
-    assert "restart the daemon to apply" in r.output
-
-
-def test_executor_set_restart_invokes_systemctl(tmp_path: Path, monkeypatch) -> None:
-    """--restart applies the change now by restarting the systemd user daemon."""
-    import shutil
-    import subprocess
-
-    calls: list[list[str]] = []
-
-    def fake_run(args, capture_output=True, text=True):
-        calls.append(args)
-
-        class _R:
-            returncode = 0
-            stderr = ""
-
-        return _R()
-
-    # _restart_service imports shutil/subprocess locally → patch the real modules.
-    monkeypatch.setattr(shutil, "which", lambda _name: "/usr/bin/systemctl")
-    monkeypatch.setattr(subprocess, "run", fake_run)
-
-    cfg = _cfg(tmp_path)
-    r = CliRunner().invoke(
-        cli,
-        ["--config", str(cfg), "executor", "set", "synthetic", "--restart"],
-        env=_env(tmp_path),
-    )
-    assert r.exit_code == 0, r.output
-    # is-active probe + the restart were both issued
-    assert any("is-active" in c for c in calls)
-    assert any("restart" in c for c in calls)
-    assert "service restarted" in r.output
+    # Hot-reload: no restart — the daemon picks it up within a heartbeat.
+    assert "no restart needed" in r.output
