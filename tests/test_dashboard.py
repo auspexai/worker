@@ -76,6 +76,24 @@ class TestOverview:
         assert "T0 anonymous" in r.text
         assert "coord.auspexai.network" in r.text or "Coordinator" in r.text
 
+    def test_enrolled_overview_is_live(self, client: TestClient, db: Database) -> None:
+        """M6 #3: the overview carries the baseline-poll updater — a "● live"
+        indicator, the /api/stats poll script, and data-live markers on the
+        values the poll refreshes (heartbeat + activity counts)."""
+        _enroll(db)
+        r = client.get("/")
+        assert r.status_code == 200
+        assert 'id="live-ind"' in r.text  # header indicator
+        assert "/api/stats" in r.text  # the poll target is wired into the script
+        assert 'data-live="last_heartbeat_at"' in r.text
+        assert 'data-live="receipts_count"' in r.text
+
+    def test_static_pages_are_not_live(self, client: TestClient, db: Database) -> None:
+        """Static log/config pages don't carry the poll script (no live data)."""
+        _enroll(db)
+        assert 'id="live-ind"' not in client.get("/activity").text
+        assert 'id="live-ind"' not in client.get("/config").text
+
 
 class TestActivity:
     def test_activity_empty_state(self, client: TestClient, db: Database) -> None:

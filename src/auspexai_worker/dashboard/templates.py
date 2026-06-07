@@ -40,6 +40,50 @@ code { font-family: ui-monospace, monospace; background: #1a1e2a; padding: 0.1em
 .empty { color: #6b7280; font-style: italic; padding: 1em 0; }
 .notice { background: #1e3a5f; border: 1px solid #3b82f6; border-radius: 6px; padding: 0.75em 1em; margin: 1em 0; color: #93c5fd; }
 .notice code { background: #0a0e1a; }
+.live-ind { font-size: 0.6em; font-weight: 500; color: #86efac; margin-left: 0.5em; vertical-align: middle; }
+"""
+
+# Baseline-poll live updater (M6 #3, worker side). Completes the same principle
+# the consoles use — "poll is the truth" — on the worker dashboard: a small
+# vanilla-JS loop re-reads /api/stats and refreshes any element tagged
+# data-live="<key>", flipping the header indicator to "stale" if the poll fails.
+# No SSE doorbell here (the worker daemon has no event bus yet; that's a flagged
+# follow-on) — but a 10s poll on a localhost page is indistinguishable from live.
+_LIVE_SCRIPT = """  <script>
+  (function () {
+    var ind = document.getElementById('live-ind');
+    function rel(iso) {
+      if (!iso) return 'never';
+      var s = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+      if (s < 0) return new Date(iso).toLocaleString();
+      if (s < 60) return s + 's ago';
+      if (s < 3600) return Math.floor(s / 60) + 'm ago';
+      if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+      return Math.floor(s / 86400) + 'd ago';
+    }
+    function setLive(ok) {
+      if (!ind) return;
+      ind.textContent = ok ? '\\u25CF live' : '\\u25CF stale';
+      ind.style.color = ok ? '#86efac' : '#fbbf24';
+      ind.title = ok ? 'live \\u2014 this page auto-updates (poll); no refresh needed'
+                     : 'stale \\u2014 auto-refresh is failing right now';
+    }
+    function tick() {
+      fetch('/api/stats', { cache: 'no-store' })
+        .then(function (r) { if (!r.ok) throw new Error('http ' + r.status); return r.json(); })
+        .then(function (d) {
+          document.querySelectorAll('[data-live]').forEach(function (el) {
+            var k = el.getAttribute('data-live');
+            if (!(k in d)) return;
+            el.textContent = (k === 'last_heartbeat_at') ? rel(d[k]) : d[k];
+          });
+          setLive(true);
+        })
+        .catch(function () { setLive(false); });
+    }
+    setInterval(tick, 10000);
+  })();
+  </script>
 """
 
 _NAV_ITEMS = [
@@ -51,14 +95,25 @@ _NAV_ITEMS = [
 ]
 
 
-def render_page(*, title: str, body: str, active_nav: str) -> str:
+def render_page(*, title: str, body: str, active_nav: str, live: bool = False) -> str:
     """Wrap a body fragment in the base layout. `active_nav` is the
-    path of the current page so we can highlight the right nav item."""
+    path of the current page so we can highlight the right nav item.
+
+    `live=True` adds the header "● live" indicator + the baseline-poll script
+    (the overview passes it; static log/config pages don't need it)."""
     nav_html_parts = []
     for path, label in _NAV_ITEMS:
         cls = "active" if path == active_nav else ""
         nav_html_parts.append(f'<a href="{path}" class="{cls}">{label}</a>')
     nav_html = "\n      ".join(nav_html_parts)
+
+    live_ind = (
+        ' <span id="live-ind" class="live-ind"'
+        ' title="live — this page auto-updates (poll); no refresh needed">● live</span>'
+        if live
+        else ""
+    )
+    live_script = _LIVE_SCRIPT if live else ""
 
     return f"""<!doctype html>
 <html lang="en">
@@ -70,7 +125,7 @@ def render_page(*, title: str, body: str, active_nav: str) -> str:
 </head>
 <body>
   <header>
-    <h1><span class="brand">auspex[ai]</span> worker</h1>
+    <h1><span class="brand">auspex[ai]</span> worker{live_ind}</h1>
     <nav>
       {nav_html}
     </nav>
@@ -81,7 +136,7 @@ def render_page(*, title: str, body: str, active_nav: str) -> str:
   <p class="meta">Local volunteer dashboard · localhost-only · read-only.
     Withdrawal and tier upgrades remain CLI-only.
     See <a href="https://github.com/auspexai/worker" style="color:#A78BFA">github.com/auspexai/worker</a>.</p>
-</body>
+{live_script}</body>
 </html>"""
 
 

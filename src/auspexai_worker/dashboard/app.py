@@ -190,7 +190,8 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
             ),
             (
                 "last heartbeat",
-                html.escape(_fmt_relative(worker.last_heartbeat_at)),
+                f'<span data-live="last_heartbeat_at">'
+                f"{html.escape(_fmt_relative(worker.last_heartbeat_at))}</span>",
                 False,
             ),
             (
@@ -224,9 +225,9 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
 
         counts = f"""    <h2>Activity</h2>
     <dl class="kv">
-      <dt>receipts earned</dt><dd>{stats["receipts_count"]}</dd>
-      <dt>pending submissions</dt><dd>{stats["pending_submissions"]}</dd>
-      <dt>audit-log rows</dt><dd>{stats["audit_count"]}</dd>
+      <dt>receipts earned</dt><dd><span data-live="receipts_count">{stats["receipts_count"]}</span></dd>
+      <dt>pending submissions</dt><dd><span data-live="pending_submissions">{stats["pending_submissions"]}</span></dd>
+      <dt>audit-log rows</dt><dd><span data-live="audit_count">{stats["audit_count"]}</span></dd>
       <dt>tenant allow / deny</dt><dd>{stats["tenant_allow_count"]} / {stats["tenant_deny_count"]}</dd>
     </dl>"""
 
@@ -291,7 +292,7 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
             + "\n"
             + counts
         )
-        return render_page(title="Overview", body=body, active_nav="/")
+        return render_page(title="Overview", body=body, active_nav="/", live=True)
 
     @app.post("/self-pause")
     async def self_pause(request: Request) -> RedirectResponse:
