@@ -34,6 +34,7 @@ from auspexai_worker.state import (
     TenantListRepository,
     WorkerSelfRepository,
 )
+from auspexai_worker.worker_state import SelfState, derive_self_state
 
 from .templates import render_kv, render_page, render_table
 
@@ -111,6 +112,13 @@ def _thermal_html(config: WorkerConfig) -> str:
     return f'{html.escape(temp)} <span class="badge {cls}">{snap.state.value}</span>'
 
 
+def _thermal_critical(config: WorkerConfig) -> bool:
+    """True when the host is thermal-CRITICAL (auto-refusing work). WARM is
+    advisory and does not count. Off where there's no sensor."""
+    mon = _thermal_monitor(config)
+    return mon.enabled and mon.snapshot().state is ThermalState.CRITICAL
+
+
 def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = None) -> FastAPI:
     """Build the dashboard FastAPI app.
 
@@ -177,7 +185,16 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
             )
             return render_page(title="Overview", body=body, active_nav="/")
 
+        state = derive_self_state(
+            worker, thermal_critical=_thermal_critical(config), now=datetime.now(UTC)
+        )
         rows: list[tuple[str, str, bool]] = [
+            (
+                "status",
+                f'<span class="badge {state.tone}" data-live="worker_state">'
+                f"{html.escape(state.label)}</span>",
+                False,
+            ),
             ("worker_id", html.escape(worker.worker_id), True),
             ("worker version", f"<code>{html.escape(__version__)}</code>", False),
             ("trust tier", _tier_badge(int(worker.trust_tier)), False),
@@ -243,33 +260,32 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
       <dt>models in store</dt><dd>{model_count} (<a href="/models">manage</a>)</dd>
     </dl>"""
 
-        # §2.1 #11 holds: the operator hold (read-only, with the operator's reason)
-        # + the volunteer self-pause toggle (the one mutating control on this
-        # otherwise read-only dashboard — a low-risk operational lever).
+        # §2.1 #11 (volunteer surface): explain the current non-active state with
+        # the right tone (quarantine = fault → red notice; every other hold is
+        # no-fault → neutral), then offer the volunteer's self-pause control ONLY
+        # where the volunteer can actually act. An operator hold (pause OR
+        # quarantine) is operator-controlled — don't dangle a pause/unpause that
+        # wouldn't change the work state; if the volunteer is self-paused *under*
+        # an operator hold, say resuming won't restore work until the hold lifts.
         holds_parts: list[str] = []
-        if worker is not None and worker.operator_hold_kind == "pause":
+        if state.state is not SelfState.ACTIVE:
+            cls = "notice fault" if state.fault else "notice"
             holds_parts.append(
-                '    <div class="notice">Operator hold: <strong>paused</strong> (no-fault) — '
-                f"reason: {html.escape(worker.operator_hold_reason or '—')}</div>\n"
+                f'    <div class="{cls}"><strong>{html.escape(state.label)}</strong> — '
+                f"{html.escape(state.detail)}</div>\n"
             )
-        elif worker is not None and worker.operator_hold_kind == "quarantine":
+        if worker.self_paused:
+            note = ""
+            if worker.operator_hold_kind is not None:
+                note = (
+                    ' <span class="muted">(an operator hold is also active — resuming '
+                    "won't restore work until the operator lifts it)</span>"
+                )
             holds_parts.append(
-                '    <div class="notice">Operator hold: <strong>quarantined</strong> — '
-                f"reason: {html.escape(worker.operator_hold_reason or '—')}</div>\n"
+                '    <form method="post" action="/self-unpause" style="margin:0.75em 0">'
+                '<button type="submit">resume (unpause)</button>' + note + "</form>\n"
             )
-        if worker is not None and worker.self_paused:
-            sp_reason = (
-                f" reason: {html.escape(worker.self_pause_reason)}"
-                if worker.self_pause_reason
-                else ""
-            )
-            holds_parts.append(
-                '    <div class="notice">You self-paused this worker — it stays enrolled '
-                f"(tier preserved) but receives no work.{sp_reason} "
-                '<form method="post" action="/self-unpause" style="display:inline">'
-                '<button type="submit">resume (unpause)</button></form></div>\n'
-            )
-        else:
+        elif worker.operator_hold_kind is None:
             holds_parts.append(
                 '    <form method="post" action="/self-pause" style="margin:0.75em 0">'
                 '<input type="text" name="reason" placeholder="reason (optional)" '
@@ -597,10 +613,23 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
             )
             thermal_state = snap.state.value
         progress = results_repo.progress_summary()
+        # Derived volunteer-facing state (§2.1 #11) — kept live by the poll so the
+        # status badge flips within a tick on an operator hold / self-pause / etc.
+        state_key = state_label = state_tone = None
+        if worker is not None:
+            st = derive_self_state(
+                worker,
+                thermal_critical=(thermal_enabled and thermal_state == "critical"),
+                now=datetime.now(UTC),
+            )
+            state_key, state_label, state_tone = st.state.value, st.label, st.tone
         return JSONResponse(
             {
                 "worker_id": worker.worker_id if worker else None,
                 "trust_tier": int(worker.trust_tier) if worker else None,
+                "worker_state": state_key,
+                "state_label": state_label,
+                "state_tone": state_tone,
                 "last_heartbeat_at": (
                     worker.last_heartbeat_at.isoformat()
                     if worker and worker.last_heartbeat_at

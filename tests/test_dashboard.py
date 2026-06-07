@@ -94,17 +94,56 @@ class TestOverview:
             'data-live="completed_units"',
             'data-live="distinct_experiments"',
             'data-live="thermal"',
+            'data-live="worker_state"',
         ):
             assert marker in r.text, marker
 
-    def test_api_stats_includes_thermal_and_progress(
+    def test_api_stats_includes_thermal_progress_and_state(
         self, client: TestClient, db: Database
     ) -> None:
-        """The poll source carries the continuous telemetry the overview refreshes."""
+        """The poll source carries the telemetry + derived state the overview shows."""
         _enroll(db)
         d = client.get("/api/stats").json()
-        for key in ("thermal_enabled", "completed_units", "distinct_experiments"):
+        for key in (
+            "thermal_enabled",
+            "completed_units",
+            "distinct_experiments",
+            "worker_state",
+            "state_label",
+            "state_tone",
+        ):
             assert key in d, key
+
+    def test_overview_status_badge_and_fault_tone(
+        self, client: TestClient, db: Database
+    ) -> None:
+        """§2.1 #11: the overview shows a single worker-state badge, and a
+        quarantine (the one fault signal) renders the fault-toned notice while a
+        no-fault operator pause does not."""
+        from auspexai_worker.state import WorkerSelfRepository
+
+        _enroll(db)
+        repo = WorkerSelfRepository(db)
+        # Fresh heartbeat → active; no fault notice; the volunteer pause control is offered.
+        repo.record_heartbeat(datetime.now(UTC), trust_tier=0)
+        r = client.get("/")
+        assert "active" in r.text
+        assert "notice fault" not in r.text
+        assert "pause this worker" in r.text
+
+        # Quarantine = fault → fault-toned notice; the pause control is withdrawn
+        # (operator-controlled, the volunteer can't lift it).
+        repo.record_operator_hold("quarantine", reason="manipulation suspected")
+        r = client.get("/")
+        assert "quarantined" in r.text
+        assert "notice fault" in r.text
+        assert "pause this worker" not in r.text
+
+        # No-fault operator pause → neutral notice (no fault tone).
+        repo.record_operator_hold("pause", reason="rolling upgrade")
+        r = client.get("/")
+        assert "paused by operator" in r.text
+        assert "notice fault" not in r.text
 
     def test_static_pages_are_not_live(self, client: TestClient, db: Database) -> None:
         """Static log/config pages don't carry the poll script (no live data)."""

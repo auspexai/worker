@@ -39,6 +39,7 @@ th { color: #9ca3af; font-weight: 500; }
 code { font-family: ui-monospace, monospace; background: #1a1e2a; padding: 0.1em 0.35em; border-radius: 3px; font-size: 0.85em; }
 .empty { color: #6b7280; font-style: italic; padding: 1em 0; }
 .notice { background: #1e3a5f; border: 1px solid #3b82f6; border-radius: 6px; padding: 0.75em 1em; margin: 1em 0; color: #93c5fd; }
+.notice.fault { background: #3a1e1e; border-color: #b91c1c; color: #fca5a5; }
 .notice code { background: #0a0e1a; }
 .live-ind { font-size: 0.6em; font-weight: 500; color: #86efac; margin-left: 0.5em; vertical-align: middle; }
 """
@@ -83,6 +84,11 @@ _LIVE_SCRIPT = """  <script>
                 var st = String(d.thermal_state == null ? '' : d.thermal_state).replace(/[<>&]/g, '');
                 el.innerHTML = temp + ' <span class="badge ' + cls + '">' + st + '</span>';
               }
+              return;
+            }
+            if (k === 'worker_state') {
+              if (d.state_label != null) el.textContent = d.state_label;
+              el.className = 'badge ' + (d.state_tone || '');
               return;
             }
             if (!(k in d)) return;

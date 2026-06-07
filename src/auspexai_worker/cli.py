@@ -109,7 +109,23 @@ def status(ctx: click.Context) -> None:
         click.echo("")
         click.echo("Run `auspexai-worker bootstrap` to enroll as T0 anonymous.")
         return
+    from datetime import UTC, datetime
+
+    from auspexai_worker.worker_state import derive_self_state
+
+    _tm = ThermalMonitor(
+        warn_c=config.thermal_warn_c,
+        crit_c=config.thermal_crit_c,
+        resume_c=config.thermal_resume_c,
+    )
+    _snap = _tm.snapshot() if _tm.enabled else None
+    _state = derive_self_state(
+        worker,
+        thermal_critical=(_snap is not None and _snap.state.value == "critical"),
+        now=datetime.now(UTC),
+    )
     click.echo(f"worker-id:   {worker.worker_id}")
+    click.echo(f"state:       {_state.label}")
     click.echo(f"tier:        T{worker.trust_tier}")
     click.echo(f"pubkey:      {worker.pubkey_hex[:16]}… ({worker.pubkey_hex})")
     click.echo(f"enrolled-at: {worker.enrolled_at.isoformat()}")
@@ -119,13 +135,7 @@ def status(ctx: click.Context) -> None:
         f"progress:    {progress['completed_units']} units completed "
         f"across {progress['distinct_experiments']} experiments"
     )
-    _tm = ThermalMonitor(
-        warn_c=config.thermal_warn_c,
-        crit_c=config.thermal_crit_c,
-        resume_c=config.thermal_resume_c,
-    )
-    if _tm.enabled:
-        _snap = _tm.snapshot()
+    if _snap is not None:
         click.echo(f"thermal:     {_snap.current_temp_c}°C ({_snap.state.value})")
     # §2.1 #11: surface the holds — the volunteer's own self-pause and the
     # operator's pause/quarantine (with the operator's reason, cached from the
