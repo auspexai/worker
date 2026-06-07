@@ -14,6 +14,7 @@ from auspexai_worker.provisioning import (
     ProvisioningIntegrityError,
     ProvisioningResolver,
     ResolvedExecutor,
+    compute_package_digest,
     decide_execution,
     hash_manifest,
     resolve_model_dir,
@@ -91,6 +92,54 @@ def test_resolve_is_case_insensitive_on_sha(tmp_path: Path):
     resolved = ProvisioningResolver(tmp_path).resolve(sha.upper())
     assert resolved is not None
     assert resolved.manifest_sha256 == sha  # normalized to lowercase
+
+
+# ---- executor package digest (§9 #37 code content-addressing) --------------
+
+
+def _package_digest(*files: tuple[str, bytes]) -> str:
+    """The shared contract (mirror of auspexai_tenant.manifest.compute_package_digest)."""
+    lines = [f"{rel}\x00{hashlib.sha256(c).hexdigest()}" for rel, c in sorted(files)]
+    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
+
+
+def test_compute_package_digest_matches_shared_contract(tmp_path: Path):
+    (tmp_path / "executor.py").write_bytes(b"# executor")
+    (tmp_path / "manifest.json").write_bytes(b'{"x":1}')  # excluded
+    cache = tmp_path / "__pycache__"
+    cache.mkdir()
+    (cache / "x.pyc").write_bytes(b"\x00")  # excluded
+    assert compute_package_digest(tmp_path) == _package_digest(("executor.py", b"# executor"))
+
+
+def test_resolve_accepts_matching_package_digest(tmp_path: Path):
+    # _stage writes executor.py = b"# executor"; pin its digest in the manifest.
+    manifest = {
+        **MANIFEST,
+        "executor": {
+            "command": ["python", "executor.py"],
+            "package_sha256": _package_digest(("executor.py", b"# executor")),
+        },
+    }
+    sha = _stage(tmp_path, manifest)
+    resolved = ProvisioningResolver(tmp_path).resolve(sha)
+    assert resolved is not None
+
+
+def test_resolve_refuses_package_digest_mismatch(tmp_path: Path):
+    manifest = {
+        **MANIFEST,
+        "executor": {"command": ["python", "executor.py"], "package_sha256": "ab" * 32},
+    }
+    sha = _stage(tmp_path, manifest)
+    with pytest.raises(ProvisioningIntegrityError, match="content-addressing"):
+        ProvisioningResolver(tmp_path).resolve(sha)
+
+
+def test_resolve_ignores_absent_package_digest(tmp_path: Path):
+    # No package_sha256 → Phase-1 backward-compatible (operator trust), still resolves.
+    sha = _stage(tmp_path, MANIFEST)
+    assert ProvisioningResolver(tmp_path).resolve(sha) is not None
 
 
 # ---- decide_execution: the consent + resolution gate -----------------------

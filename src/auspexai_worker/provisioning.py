@@ -72,6 +72,33 @@ def hash_manifest(manifest: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+# Files never part of the executor package digest (mirror of the SDK's helper).
+_PACKAGE_DIGEST_EXCLUDE = ("manifest.json",)
+
+
+def compute_package_digest(package_dir: Path) -> str:
+    """Digest over the executor *files* in `package_dir`, byte-for-byte identical
+    to `auspexai_tenant.manifest.compute_package_digest` (the tenant computes it;
+    we re-derive it to verify the staged code matches the signed manifest's
+    `executor.package_sha256`). Standalone replica, not an import — the shared
+    contract is the format, not shared code (worker AGPL, SDK Apache).
+
+    Each regular file except `manifest.json` / `__pycache__` / `*.pyc` contributes
+    ``<posix-relpath>\\x00<sha256-hex>``; lines sorted by relpath, joined by ``\\n``,
+    SHA-256'd."""
+    lines: list[str] = []
+    for path in sorted(package_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(package_dir).as_posix()
+        parts = rel.split("/")
+        if rel in _PACKAGE_DIGEST_EXCLUDE or rel.endswith(".pyc") or "__pycache__" in parts:
+            continue
+        file_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+        lines.append(f"{rel}\x00{file_hash}")
+    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
+
+
 @dataclass(frozen=True)
 class ResolvedExecutor:
     """A tenant executor the worker is cleared to run for one unit. Models are
@@ -128,6 +155,19 @@ class ProvisioningResolver:
             raise ProvisioningIntegrityError(
                 f"staged manifest {manifest_sha256} has no valid executor.command"
             )
+        # Code content-addressing (§9 #37 hardening): when the signed manifest pins
+        # the executor *files'* digest, verify the staged files match it — so we run
+        # the code the tenant signed, not just whatever was staged. Absent pin =
+        # Phase-1 'operator is the trust root' behavior (backward compatible).
+        package_sha256 = executor.get("package_sha256")
+        if package_sha256 is not None:
+            computed_pkg = compute_package_digest(pkg)
+            if computed_pkg != str(package_sha256).lower():
+                raise ProvisioningIntegrityError(
+                    f"staged executor package digest {computed_pkg} != manifest "
+                    f"executor.package_sha256 {str(package_sha256).lower()} for "
+                    f"{manifest_sha256} (code content-addressing violation; refusing)"
+                )
         return ResolvedExecutor(
             manifest_sha256=manifest_sha256.lower(),
             command=list(command),
