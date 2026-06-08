@@ -114,9 +114,7 @@ class TestOverview:
         ):
             assert key in d, key
 
-    def test_overview_status_badge_and_fault_tone(
-        self, client: TestClient, db: Database
-    ) -> None:
+    def test_overview_status_badge_and_fault_tone(self, client: TestClient, db: Database) -> None:
         """§2.1 #11: the overview shows a single worker-state badge, and a
         quarantine (the one fault signal) renders the fault-toned notice while a
         no-fault operator pause does not."""

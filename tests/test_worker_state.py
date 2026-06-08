@@ -83,5 +83,7 @@ def test_offline_when_never_heartbeated() -> None:
 
 def test_naive_heartbeat_is_treated_as_utc() -> None:
     # A naive (tz-less) recent heartbeat must read as fresh, not crash/offline.
-    s = derive_self_state(_w(last_heartbeat_at=(NOW - timedelta(seconds=5)).replace(tzinfo=None)), now=NOW)
+    s = derive_self_state(
+        _w(last_heartbeat_at=(NOW - timedelta(seconds=5)).replace(tzinfo=None)), now=NOW
+    )
     assert s.state is SelfState.ACTIVE
