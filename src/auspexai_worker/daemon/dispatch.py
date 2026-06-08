@@ -253,6 +253,11 @@ class RunnerDispatcher:
                 "tenant_id": unit.tenant_id,
                 "experiment_id": unit.experiment_id,
                 "manifest_sha256": unit.manifest_sha256,
+                # created_at is REQUIRED by the SDK WorkUnit (extra=forbid) that
+                # the real-executor harness validates; the runner forwards it
+                # into the executor --input. Omitting it made the official
+                # ExecutorHarness refuse every unit.
+                "created_at": unit.created_at.isoformat(),
                 "payload": unit.payload,
             }
         ).encode("utf-8")

@@ -24,6 +24,7 @@ Wire shape on the way in (from the daemon, via stdin):
       "tenant_id": "...",
       "experiment_id": "...",       # tenant's experiment_label
       "manifest_sha256": "...",
+      "created_at": "ISO 8601",     # both required by the SDK WorkUnit harness
       "payload": {...}              # opaque to the runner
     }
 
@@ -125,12 +126,18 @@ def _run_real_executor(envelope: dict[str, Any], output_path: str) -> int:
     package_dir = os.environ.get("AUSPEXAI_EXECUTOR_DIR") or None
     workspace = Path(output_path).parent
 
-    # Materialize the SDK WorkUnit JSON the executor reads via --input.
+    # Materialize the SDK WorkUnit JSON the executor reads via --input. This
+    # MUST carry every field the SDK `WorkUnit` model requires — it is
+    # `extra="forbid"` AND requires `manifest_sha256` + `created_at`, so the
+    # official `ExecutorHarness` rejects any unit missing them (which silently
+    # refused every unit for SDK-harness tenants until this was fixed).
     workunit = {
         "schema_version": "0.1",
         "unit_id": envelope.get("unit_id"),
         "tenant_id": envelope.get("tenant_id"),
         "experiment_id": envelope.get("experiment_id"),
+        "manifest_sha256": envelope.get("manifest_sha256"),
+        "created_at": envelope.get("created_at"),
         "payload": envelope.get("payload"),
     }
     input_path = workspace / "exec_input.json"

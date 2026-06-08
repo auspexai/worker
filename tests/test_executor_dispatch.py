@@ -84,6 +84,42 @@ out = {
 open(a.output, "w").write(json.dumps(out))
 """
 
+# Enforces the SDK `auspexai_tenant.workunits.WorkUnit` contract (extra=forbid +
+# required manifest_sha256/created_at) WITHOUT importing the SDK, so the
+# runner->harness seam is actually exercised. The other fixtures read
+# unit["payload"] directly and would MASK a dropped required field — the exact
+# regression this guards: the worker once materialized --input without
+# manifest_sha256/created_at, which the real ExecutorHarness rejects -> every
+# unit refused.
+EXECUTOR_VALIDATES_CONTRACT = """
+import argparse, json, re, sys
+from datetime import datetime
+p = argparse.ArgumentParser()
+for f in ("input", "output", "models"):
+    p.add_argument(f"--{f}", required=True)
+p.add_argument("--timeout", type=int, default=600)
+a = p.parse_args()
+unit = json.loads(open(a.input).read())
+required = {"schema_version", "unit_id", "tenant_id", "experiment_id", "manifest_sha256", "created_at", "payload"}
+missing = required - set(unit)
+extra = set(unit) - required
+if missing or extra:
+    sys.stderr.write("workunit contract violation: missing=%s extra=%s\\n" % (sorted(missing), sorted(extra)))
+    sys.exit(1)
+if not re.fullmatch(r"[a-f0-9]{64}", unit["manifest_sha256"] or ""):
+    sys.stderr.write("manifest_sha256 not 64-hex\\n")
+    sys.exit(1)
+datetime.fromisoformat(unit["created_at"])  # raises if missing/unparseable
+out = {
+    "schema_version": "0.1",
+    "unit_id": unit["unit_id"],
+    "completed_at": datetime.now().isoformat(),
+    "exit_code": 0,
+    "payload": {"contract": "ok"},
+}
+open(a.output, "w").write(json.dumps(out))
+"""
+
 
 def _make_key() -> tuple[Ed25519PrivateKey, str]:
     pk = Ed25519PrivateKey.generate()
@@ -233,6 +269,33 @@ def test_provisioned_real_executor_submits_its_output(tmp_path: Path, db: Databa
     # The REAL executor ran (doubled), not the synthetic echo.
     assert captured["body"]["payload"] == {"doubled": 42}
     assert "echo" not in captured["body"]["payload"]
+
+
+def test_real_executor_input_satisfies_sdk_workunit_contract(tmp_path: Path, db: Database):
+    """Regression guard for the worker->SDK ExecutorHarness seam: the
+    runner-materialized --input MUST satisfy the SDK WorkUnit contract
+    (extra=forbid + required manifest_sha256/created_at). A fixture executor that
+    enforces that exact contract (mirroring tenant-sdk) submits only if the input
+    is valid; a dropped field would make it exit non-zero -> refuse. The other
+    fixtures read payload directly and can't catch a missing required field."""
+    privkey, pub = _make_key()
+    prov = tmp_path / "tenants"
+    sha = _provision(prov, EXECUTOR_VALIDATES_CONTRACT)
+    captured: dict = {}
+    with _client(captured, privkey, pub) as client:
+        disp = _dispatcher(
+            client,
+            db,
+            tmp_path / "runs",
+            policy=ExecutePolicy.PROVISIONED,
+            provisioning_dir=prov,
+            privkey=privkey,
+            pub=pub,
+        )
+        outcome = disp.run_unit(_envelope(sha))
+
+    assert outcome.kind == DispatchOutcomeKind.SUBMITTED, getattr(outcome, "reason", outcome)
+    assert captured["body"]["payload"] == {"contract": "ok"}
 
 
 def test_provisioned_unresolved_refuses_does_not_echo(tmp_path: Path, db: Database):
