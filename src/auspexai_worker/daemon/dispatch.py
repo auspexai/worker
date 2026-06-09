@@ -135,6 +135,12 @@ class RunnerDispatcher:
         # When None, the static `execute_policy`/`auto_acquire` above are used
         # (back-compat for tests + callers that don't wire hot-reload).
         live_executor: Callable[[], tuple[ExecutePolicy, bool]] | None = None,
+        # W-S (§9 #43): opens the per-unit inference-broker session for a
+        # real-executor unit — `(model_id, socket_dir) -> session` where the
+        # session exposes `.socket_path` and `.close()`. None (default — and
+        # whenever `[inference] backend = "none"`) means no broker socket and
+        # no serving: the entire W-S surface stays dormant.
+        open_inference_session: Callable[[str, object], object] | None = None,
     ) -> None:
         self._coordinator = coordinator
         self._worker_id = worker_id
@@ -158,6 +164,11 @@ class RunnerDispatcher:
         self._auto_acquire = auto_acquire
         self._live_executor = live_executor
         self._model_acquirer = model_acquirer
+        self._open_inference_session = open_inference_session
+        # The live per-unit broker session. Dispatch is sequential (one unit
+        # per tick), so a single slot closed in run_unit's finally covers
+        # every return path without re-indenting the whole inner method.
+        self._inference_session = None
 
     def run_unit(self, response: AssignmentResponse) -> DispatchOutcome:
         """Execute the assigned unit and submit the result. Always cleans
@@ -168,6 +179,12 @@ class RunnerDispatcher:
         try:
             return self._run_unit_inner(response, workspace)
         finally:
+            if self._inference_session is not None:
+                try:
+                    self._inference_session.close()
+                except Exception:
+                    logger.exception("failed to close inference session; continuing")
+                self._inference_session = None
             workspace.cleanup()
 
     # ---- internals ------------------------------------------------------
@@ -226,6 +243,37 @@ class RunnerDispatcher:
         models_dir = decision.models_dir
         has_models = models_dir is not None and models_dir.is_dir()
 
+        # W-S (§9 #43): on an inference-enabled worker, a real-executor unit
+        # with a model requirement gets the model served (loaded + warm in the
+        # backend) and a per-unit broker socket in its workspace BEFORE the
+        # runner spawns. Serving failure is a refusal (refuse-don't-echo) so
+        # the coordinator re-offers — same posture as provisioning.
+        inference_socket: str | None = None
+        inference_model: str | None = None
+        if (
+            self._open_inference_session is not None
+            and decision.mode is ExecutionMode.REAL
+            and has_models
+        ):
+            model_id = models_dir.name
+            try:
+                self._inference_session = self._open_inference_session(
+                    model_id, workspace.workspace_dir
+                )
+            except Exception as exc:
+                logger.warning(
+                    "declining unit %s: inference serving failed for %s: %s",
+                    unit.unit_id,
+                    model_id,
+                    exc,
+                )
+                return DispatchOutcome(
+                    kind=DispatchOutcomeKind.EXECUTOR_REFUSED,
+                    reason=f"inference serving unavailable for {model_id}: {exc}",
+                )
+            inference_socket = str(self._inference_session.socket_path)
+            inference_model = model_id
+
         sandbox_config = SandboxConfig(
             use_bubblewrap=self._use_bubblewrap,
             runner_bin=self._runner_bin,
@@ -237,6 +285,8 @@ class RunnerDispatcher:
             executor_package_dir=str(resolved.package_dir) if resolved else None,
             models_dir=str(models_dir) if has_models else None,
             executor_timeout_seconds=self._runner_timeout_seconds,
+            inference_socket=inference_socket,
+            inference_model=inference_model,
         )
         try:
             argv = build_argv(sandbox_config)
@@ -283,6 +333,10 @@ class RunnerDispatcher:
                     env["AUSPEXAI_MODELS_DIR"] = str(models_dir)
                 if self._runner_timeout_seconds is not None:
                     env["AUSPEXAI_EXECUTOR_TIMEOUT"] = str(int(self._runner_timeout_seconds))
+                if inference_socket is not None:
+                    env["AUSPEXAI_INFERENCE_SOCKET"] = inference_socket
+                if inference_model is not None:
+                    env["AUSPEXAI_INFERENCE_MODEL"] = inference_model
         else:
             # bwrap mode: env is injected via --setenv (in argv); strip any
             # inherited executor vars so a real-executor unit never leaks into
@@ -292,6 +346,8 @@ class RunnerDispatcher:
                 "AUSPEXAI_EXECUTOR_DIR",
                 "AUSPEXAI_MODELS_DIR",
                 "AUSPEXAI_EXECUTOR_TIMEOUT",
+                "AUSPEXAI_INFERENCE_SOCKET",
+                "AUSPEXAI_INFERENCE_MODEL",
             ):
                 env.pop(k, None)
 

@@ -206,6 +206,7 @@ def _dispatcher(
     model_store_dir=None,
     thermal_monitor=None,
     live_executor=None,
+    open_inference_session=None,
 ):
     return RunnerDispatcher(
         coordinator=client,
@@ -222,6 +223,7 @@ def _dispatcher(
         model_store_dir=model_store_dir,
         thermal_monitor=thermal_monitor,
         live_executor=live_executor,
+        open_inference_session=open_inference_session,
     )
 
 
@@ -450,3 +452,165 @@ def test_synthetic_policy_echoes_not_real(tmp_path: Path, db: Database):
     assert outcome.kind == DispatchOutcomeKind.SUBMITTED
     # synthetic policy ignores the staged executor and echoes.
     assert captured["body"]["payload"]["echo"] == {"input": 21}
+
+
+# ---- W-S (§9 #43): per-unit inference broker through dispatch ---------------
+
+# An executor that talks to the worker's inference broker over the per-unit
+# unix socket using ONLY the stdlib — this doubles as the prototype of the
+# vendorable stdlib InferenceClient (W-S build step 4).
+EXECUTOR_USES_INFERENCE = """
+import argparse, json, os, socket
+from datetime import datetime, timezone
+p = argparse.ArgumentParser()
+for f in ("input", "output", "models"):
+    p.add_argument(f"--{f}", required=True)
+p.add_argument("--timeout", type=int, default=600)
+a = p.parse_args()
+unit = json.loads(open(a.input).read())
+
+def ask(body):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(10.0)
+    s.connect(os.environ["AUSPEXAI_INFERENCE_SOCKET"])
+    s.sendall(json.dumps(body).encode() + b"\\n")
+    buf = b""
+    while b"\\n" not in buf:
+        chunk = s.recv(65536)
+        if not chunk:
+            break
+        buf += chunk
+    s.close()
+    return json.loads(buf.split(b"\\n", 1)[0])
+
+model = os.environ["AUSPEXAI_INFERENCE_MODEL"]
+gen = ask({"op": "generate", "model": model,
+           "messages": [{"role": "user", "content": "hello"}],
+           "options": {"seed": 0}})
+info = ask({"op": "info"})
+out = {
+    "schema_version": "0.1",
+    "unit_id": unit["unit_id"],
+    "completed_at": datetime.now(timezone.utc).isoformat(),
+    "exit_code": 0,
+    "payload": {
+        "generation": gen["message"]["content"],
+        "gen_ok": gen["ok"],
+        "model_digest": info["gguf_sha256"],
+    },
+}
+open(a.output, "w").write(json.dumps(out))
+"""
+
+
+class _FakeChatBackend:
+    """Inference backend double for dispatch-level tests."""
+
+    def is_healthy(self):
+        return True
+
+    def has_model(self, handle):
+        return True
+
+    def create_model(self, handle, modelfile):
+        pass
+
+    def chat(self, handle, messages, options):
+        return {
+            "message": {"role": "assistant", "content": f"reply-from-{handle}"},
+            "eval_count": 2,
+        }
+
+
+def test_inference_broker_e2e_through_dispatch(tmp_path: Path, db: Database):
+    """Full W-S slice in passthrough mode: dispatch serves the unit's model,
+    opens the broker socket in the workspace, the (subprocess) executor reaches
+    it via env + a stdlib socket client, the generation lands in the submitted
+    payload, and the session is closed (socket gone) when the unit ends."""
+    from auspexai_worker.inference import ServedModel, open_unit_session
+
+    privkey, pub = _make_key()
+    prov = tmp_path / "tenants"
+    store = tmp_path / "models"
+    (store / "tiny-q4").mkdir(parents=True)
+    (store / "tiny-q4" / "weights.gguf").write_bytes(b"fake gguf")
+    sha = _provision(
+        prov,
+        EXECUTOR_USES_INFERENCE,
+        models=[{"id": "tiny-q4", "local_weights_required": True}],
+    )
+
+    opened: list = []
+
+    def provider(model_id: str, socket_dir):
+        served = ServedModel(
+            model_id=model_id,
+            handle=f"auspex-{model_id}",
+            gguf_sha256="cd" * 32,
+            gguf_path=store / model_id / "weights.gguf",
+        )
+        session = open_unit_session(
+            served=served, backend=_FakeChatBackend(), socket_dir=socket_dir
+        )
+        opened.append(session)
+        return session
+
+    captured: dict = {}
+    with _client(captured, privkey, pub) as client:
+        disp = _dispatcher(
+            client,
+            db,
+            tmp_path / "runs",
+            policy=ExecutePolicy.PROVISIONED,
+            provisioning_dir=prov,
+            privkey=privkey,
+            pub=pub,
+            model_store_dir=store,
+            open_inference_session=provider,
+        )
+        outcome = disp.run_unit(_envelope(sha))
+
+    assert outcome.kind == DispatchOutcomeKind.SUBMITTED, outcome.reason
+    payload = captured["body"]["payload"]
+    assert payload["gen_ok"] is True
+    assert payload["generation"] == "reply-from-auspex-tiny-q4"
+    # op:"info" provenance: the served GGUF digest reached the result payload.
+    assert payload["model_digest"] == "cd" * 32
+    # The session was opened in the unit workspace and closed after the unit.
+    assert len(opened) == 1
+    assert not opened[0].socket_path.exists()
+
+
+def test_inference_serving_failure_refuses_not_echoes(tmp_path: Path, db: Database):
+    privkey, pub = _make_key()
+    prov = tmp_path / "tenants"
+    store = tmp_path / "models"
+    (store / "tiny-q4").mkdir(parents=True)
+    (store / "tiny-q4" / "weights.gguf").write_bytes(b"fake gguf")
+    sha = _provision(
+        prov,
+        EXECUTOR_USES_INFERENCE,
+        models=[{"id": "tiny-q4", "local_weights_required": True}],
+    )
+
+    def provider(model_id: str, socket_dir):
+        raise RuntimeError("ollama is down")
+
+    captured: dict = {}
+    with _client(captured, privkey, pub) as client:
+        disp = _dispatcher(
+            client,
+            db,
+            tmp_path / "runs",
+            policy=ExecutePolicy.PROVISIONED,
+            provisioning_dir=prov,
+            privkey=privkey,
+            pub=pub,
+            model_store_dir=store,
+            open_inference_session=provider,
+        )
+        outcome = disp.run_unit(_envelope(sha))
+
+    assert outcome.kind == DispatchOutcomeKind.EXECUTOR_REFUSED
+    assert "inference serving unavailable" in outcome.reason
+    assert "body" not in captured  # nothing submitted, nothing echoed

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from auspexai_worker.config import WorkerConfig
 
 
@@ -99,3 +101,30 @@ class TestEnvOverrides:
             env={"AUSPEXAI_COORDINATOR_URL": "http://from-env:18080"},
         )
         assert cfg.coordinator_url == "http://from-env:18080"
+
+
+class TestInferenceConfig:
+    """W-S (§9 #43) [inference] block."""
+
+    def test_defaults_dormant(self, tmp_path):
+        cfg_file = tmp_path / "worker.toml"
+        cfg_file.write_text("", encoding="utf-8")
+        cfg = WorkerConfig.load(config_path=cfg_file, env={})
+        assert cfg.inference_backend == "none"
+        assert cfg.inference_ollama_url == "http://127.0.0.1:11434"
+
+    def test_toml_block_parsed(self, tmp_path):
+        cfg_file = tmp_path / "worker.toml"
+        cfg_file.write_text(
+            '[inference]\nbackend = "ollama"\nollama_url = "http://127.0.0.1:9999/"\n',
+            encoding="utf-8",
+        )
+        cfg = WorkerConfig.load(config_path=cfg_file, env={})
+        assert cfg.inference_backend == "ollama"
+        assert cfg.inference_ollama_url == "http://127.0.0.1:9999"  # trailing / stripped
+
+    def test_unknown_backend_rejected(self, tmp_path):
+        cfg_file = tmp_path / "worker.toml"
+        cfg_file.write_text('[inference]\nbackend = "vllm"\n', encoding="utf-8")
+        with pytest.raises(ValueError, match="backend must be one of"):
+            WorkerConfig.load(config_path=cfg_file, env={})

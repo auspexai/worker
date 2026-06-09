@@ -102,6 +102,13 @@ class Capabilities:
     # empty. The coordinator stores capabilities as an opaque dict, so this is
     # forward-compatible — it consumes `models` only once #30 lands.
     models: list[str] = field(default_factory=list)
+    # W-S (§9 #43): model ids currently LOADED in the inference backend (not
+    # merely present on disk). Sharpens the routing predicate from "holds the
+    # model" (`models`) to "holds it AND has it serve-ready" — the scheduler
+    # routes inference experiments to serve-ready workers once it consumes
+    # this. Omitted from the wire when empty (incl. `[inference] backend =
+    # "none"` workers — absent == not an inference host).
+    served_models: list[str] = field(default_factory=list)
     # Current thermal/health snapshot (W-H), or None where no sensor exists.
     # Lets the coordinator route work away from a degraded/overheating worker
     # (forward-compatible; opaque until consumed).
@@ -148,6 +155,8 @@ class Capabilities:
             d.pop("declared_caps", None)
         if not self.models:
             d.pop("models", None)  # compact wire when the store is empty
+        if not self.served_models:
+            d.pop("served_models", None)  # absent == not an inference host
         if self.thermal is None:
             d.pop("thermal", None)  # omit where no sensor / health disabled
         if self.worker_version is None:
@@ -250,6 +259,9 @@ def collect(
     # Locally-available model ids (BYOM store inventory). Caller-supplied — the
     # collector doesn't read the store itself (keeps detection store-agnostic).
     models: list[str] | None = None,
+    # W-S: model ids loaded in the inference backend (caller-supplied from the
+    # daemon's ModelServer; empty/None on non-inference hosts).
+    served_models: list[str] | None = None,
     # Current thermal snapshot (W-H), caller-supplied (the daemon owns the
     # stateful monitor so hysteresis is shared with the dispatch gate).
     thermal: dict[str, Any] | None = None,
@@ -281,6 +293,7 @@ def collect(
         gpus_declared=declared_gpus or GpuDeclaration(),
         declared_caps=resolved_caps,
         models=models or [],
+        served_models=served_models or [],
         thermal=thermal,
         worker_version=worker_version,
         auto_acquire=auto_acquire,

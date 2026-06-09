@@ -95,6 +95,14 @@ class WorkerConfig:
     thermal_warn_c: float = 70.0
     thermal_crit_c: float = 82.0
     thermal_resume_c: float = 68.0
+    # [inference] — W-S (§9 #43) worker model-serving + sandbox inference
+    # broker. "none" (default) keeps the whole feature dormant — no backend
+    # management, no broker sockets, no served_models declaration. "ollama"
+    # opts this worker into serving its BYOM models to sandboxed executors
+    # via the per-unit unix-socket broker (the operator's opt-in IS the
+    # signal that this worker hosts inference tenants).
+    inference_backend: str = "none"
+    inference_ollama_url: str = "http://127.0.0.1:11434"
     # NB: per-tenant §5.14 consent (allow/deny lists) is owned by the DB-backed
     # TenantListRepository + the `auspexai-worker tenant` CLI, enforced at the
     # poller's accept-time gate — NOT duplicated here as config.
@@ -182,6 +190,8 @@ class WorkerConfig:
             "thermal_warn_c": 70.0,
             "thermal_crit_c": 82.0,
             "thermal_resume_c": 68.0,
+            "inference_backend": "none",
+            "inference_ollama_url": "http://127.0.0.1:11434",
             "dashboard_enabled": True,
             "dashboard_host": "127.0.0.1",
             "dashboard_port": 7799,
@@ -260,6 +270,11 @@ class WorkerConfig:
             ):
                 if short in health_block:
                     merged[full] = health_block[short]
+            inference_block = data.get("inference") or {}
+            if "backend" in inference_block:
+                merged["inference_backend"] = inference_block["backend"]
+            if "ollama_url" in inference_block:
+                merged["inference_ollama_url"] = inference_block["ollama_url"]
             dashboard_block = data.get("dashboard") or {}
             if "enabled" in dashboard_block:
                 merged["dashboard_enabled"] = dashboard_block["enabled"]
@@ -340,6 +355,10 @@ class WorkerConfig:
             thermal_warn_c=float(merged.get("thermal_warn_c", 70.0)),
             thermal_crit_c=float(merged.get("thermal_crit_c", 82.0)),
             thermal_resume_c=float(merged.get("thermal_resume_c", 68.0)),
+            inference_backend=_validate_inference_backend(merged.get("inference_backend", "none")),
+            inference_ollama_url=str(
+                merged.get("inference_ollama_url", "http://127.0.0.1:11434")
+            ).rstrip("/"),
             dashboard_enabled=bool(merged.get("dashboard_enabled", True)),
             dashboard_host=str(merged.get("dashboard_host", "127.0.0.1")),
             dashboard_port=int(merged.get("dashboard_port", 7799)),
@@ -349,12 +368,20 @@ class WorkerConfig:
 
 
 _EXECUTE_POLICIES = ("synthetic", "provisioned", "off")
+_INFERENCE_BACKENDS = ("none", "ollama")
 
 
 def _validate_policy(raw: object) -> str:
     val = str(raw)
     if val not in _EXECUTE_POLICIES:
         raise ValueError(f"execute_tenant_code must be one of {_EXECUTE_POLICIES}, got {val!r}")
+    return val
+
+
+def _validate_inference_backend(raw: object) -> str:
+    val = str(raw)
+    if val not in _INFERENCE_BACKENDS:
+        raise ValueError(f"[inference] backend must be one of {_INFERENCE_BACKENDS}, got {val!r}")
     return val
 
 

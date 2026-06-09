@@ -64,6 +64,13 @@ class SandboxConfig:
     executor_package_dir: str | None = None
     models_dir: str | None = None
     executor_timeout_seconds: float | None = None
+    # W-S (§9 #43): the per-unit inference broker socket. A unix socket is a
+    # filesystem object, so it crosses --unshare-net — the executor reaches
+    # the worker-served model with the external network still cut. The socket
+    # normally lives in the workspace (already bound); the explicit bind of
+    # its parent dir keeps this working when Phase-2 STRICT drops --dev-bind.
+    inference_socket: str | None = None
+    inference_model: str | None = None
 
 
 def check_bubblewrap_available(bwrap_path: str = "bwrap") -> bool:
@@ -199,6 +206,9 @@ def build_argv(config: SandboxConfig) -> list[str]:
             argv += ["--ro-bind", config.executor_package_dir, config.executor_package_dir]
         if config.models_dir:
             argv += ["--ro-bind-try", config.models_dir, config.models_dir]
+        if config.inference_socket:
+            sock_dir = str(Path(config.inference_socket).parent)
+            argv += ["--bind", sock_dir, sock_dir]
     # Absolute path so bwrap's execvp finds the runner (the sandbox PATH won't
     # include the venv bin dir). Passthrough mode (above) leaves resolution to
     # the daemon's own PATH, unchanged.
@@ -235,4 +245,8 @@ def _env_argv(config: SandboxConfig) -> list[str]:
                 "AUSPEXAI_EXECUTOR_TIMEOUT",
                 str(int(config.executor_timeout_seconds)),
             ]
+        if config.inference_socket:
+            args += ["--setenv", "AUSPEXAI_INFERENCE_SOCKET", config.inference_socket]
+        if config.inference_model:
+            args += ["--setenv", "AUSPEXAI_INFERENCE_MODEL", config.inference_model]
     return args

@@ -759,6 +759,25 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
                 )
                 return ExecutePolicy.OFF, False
 
+        # W-S (§9 #43): inference serving + per-unit broker — dormant unless
+        # the operator opts this worker in via `[inference] backend = "ollama"`.
+        # The session provider serves the unit's model out of the BYOM store
+        # (eager: loaded + warm before the runner spawns) and opens the broker
+        # socket in the unit workspace; dispatch closes it when the unit ends.
+        model_server = None
+        open_inference_session = None
+        if config.inference_backend == "ollama":
+            from .inference import ModelServer, OllamaBackend, open_unit_session
+
+            _inference_backend = OllamaBackend(config.inference_ollama_url)
+            model_server = ModelServer(ModelStore(config.models_store_path), _inference_backend)
+
+            def open_inference_session(model_id: str, socket_dir):
+                served = model_server.serve(model_id)
+                return open_unit_session(
+                    served=served, backend=_inference_backend, socket_dir=socket_dir
+                )
+
         dispatcher = RunnerDispatcher(
             coordinator=client,
             worker_id=worker.worker_id,
@@ -787,6 +806,7 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
                 else None
             ),
             live_executor=_live_executor,
+            open_inference_session=open_inference_session,
         )
 
         def _collect_capabilities():
@@ -798,6 +818,9 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
                 declared_gpus=config.declared_gpus,
                 # W-M: declare the BYOM store inventory so #30 can route on it.
                 models=ModelStore(config.models_store_path).inventory(),
+                # W-S: declare what's serve-ready (loaded in the backend) so the
+                # scheduler can route inference experiments to warm workers.
+                served_models=(model_server.served_ids() if model_server is not None else None),
                 # W-H: report current thermal state so the coordinator can route
                 # work away from a degraded/overheating worker.
                 thermal=(thermal_monitor.snapshot().to_dict() if thermal_monitor.enabled else None),

@@ -176,3 +176,15 @@ class TestCollect:
         so existing callers don't break during the M2-tail rename."""
         caps = collect(sysroot=tmp_path, declared=DeclaredCaps(max_cpu_cores=2))
         assert caps.declared_caps.max_cpu_cores == 2
+
+
+class TestServedModels:
+    """W-S (§9 #43): served_models heartbeat declaration."""
+
+    def test_served_models_in_wire_payload(self):
+        caps = collect(served_models=["tiny-q4"])
+        assert caps.to_dict()["served_models"] == ["tiny-q4"]
+
+    def test_served_models_omitted_when_empty(self):
+        assert "served_models" not in collect().to_dict()
+        assert "served_models" not in collect(served_models=[]).to_dict()
