@@ -59,14 +59,16 @@ class WorkerSelfRepository:
             operator_hold_at=row["operator_hold_at"],
         )
 
-    def set_self_pause(self, paused: bool, *, reason: str | None = None) -> None:
+    def set_self_pause(self, paused: bool) -> None:
         """§2.1 #11: the volunteer's own pause hold (resource-owner sovereignty).
         Persisted so it survives a daemon restart; declared to the coordinator as
-        the `self_paused` capability + short-circuits the assignment poller."""
+        the `self_paused` capability + short-circuits the assignment poller. No
+        reason is collected — pausing one's own worker needs no justification (the
+        legacy `self_pause_reason` column is left dormant/NULL)."""
         with self._db.transaction() as cur:
             cur.execute(
-                "UPDATE worker_self SET self_paused = ?, self_pause_reason = ? WHERE id = 1",
-                (1 if paused else 0, reason if paused else None),
+                "UPDATE worker_self SET self_paused = ?, self_pause_reason = NULL WHERE id = 1",
+                (1 if paused else 0,),
             )
 
     def record_operator_hold(

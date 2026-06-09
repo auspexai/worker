@@ -292,48 +292,45 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
         state = derive_self_state(
             worker, thermal_critical=_thermal_critical(config), now=datetime.now(UTC)
         )
-        rows: list[tuple[str, str, bool]] = [
-            (
-                "status",
-                f'<span class="badge {state.tone}" data-live="worker_state">'
-                f"{html.escape(state.label)}</span>",
-                False,
-            ),
-            ("worker_id", html.escape(worker.worker_id), True),
-            ("worker version", f"<code>{html.escape(__version__)}</code>", False),
-            ("trust tier", _tier_badge(int(worker.trust_tier)), False),
-            ("public key", html.escape(worker.pubkey_hex), True),
-            (
-                "enrolled",
-                html.escape(worker.enrolled_at.isoformat())
-                + f' <span class="muted">({_fmt_relative(worker.enrolled_at)})</span>',
-                False,
-            ),
-            (
-                "last heartbeat",
-                f'<span data-live="last_heartbeat_at">'
-                f"{html.escape(_fmt_relative(worker.last_heartbeat_at))}</span>",
-                False,
-            ),
-            (
-                "coordinator",
-                f"<code>{html.escape(config.coordinator_url)}</code>",
-                False,
-            ),
-        ]
-        kv = render_kv(rows)
 
+        # ── Status: every live "right now" signal in ONE place (the state itself
+        # is the banner above; here are the supporting live signals the volunteer
+        # asked to have grouped — heartbeat, thermal, what's executing, serving).
+        # Current temp/thermal lives here (status); the thresholds are a setting,
+        # on Config. Executor mode is read-only here (change it on Config).
+        model_count = len(ModelStore(config.models_store_path).list())
+        acc = detect_accelerator()
+        executor_cell = (
+            f"{_executor_badge(_current_executor_policy(config, config_path))} "
+            '<a href="/config" class="dim">change</a>'
+        )
+        # W-S: the inference-backend reachability row (only when configured).
+        inference_row = _inference_html(config)
+        status_html = f"""    <h2>Status</h2>
+    <dl class="kv">
+      <dt>last heartbeat</dt><dd><span data-live="last_heartbeat_at">{html.escape(_fmt_relative(worker.last_heartbeat_at))}</span></dd>
+      <dt>thermal</dt><dd data-live="thermal">{_thermal_html(config)}</dd>
+      <dt>accelerator</dt><dd>{html.escape(acc.label)}</dd>
+      <dt>executor mode</dt><dd>{executor_cell}</dd>
+      <dt>models in store</dt><dd>{model_count} (<a href="/models">manage</a>)</dd>{inference_row}
+    </dl>"""
+
+        # ── Contribution: what this worker has done (Progress + Activity merged —
+        # they answered the same question in two boxes).
         progress = results_repo.progress_summary()
-        progress_html = f"""    <h2>Progress</h2>
+        contribution_html = f"""    <h2>Contribution</h2>
     <dl class="kv">
       <dt>work units completed</dt><dd><span data-live="completed_units">{progress["completed_units"]}</span></dd>
       <dt>distinct experiments</dt><dd><span data-live="distinct_experiments">{progress["distinct_experiments"]}</span></dd>
+      <dt>receipts earned</dt><dd><span data-live="receipts_count">{stats["receipts_count"]}</span></dd>
+      <dt>pending submissions</dt><dd><span data-live="pending_submissions">{stats["pending_submissions"]}</span></dd>
+      <dt>audit-log rows</dt><dd><span data-live="audit_count">{stats["audit_count"]}</span></dd>
+      <dt>tenant allow / deny</dt><dd>{stats["tenant_allow_count"]} / {stats["tenant_deny_count"]}</dd>
     </dl>"""
 
         upgrade_html = ""
         if (
-            worker is not None
-            and int(worker.trust_tier) == 0
+            int(worker.trust_tier) == 0
             and config.upgrade_prompt_enabled
             and progress["completed_units"] >= config.upgrade_prompt_threshold
         ):
@@ -344,30 +341,21 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
                 "</div>\n"
             )
 
-        counts = f"""    <h2>Activity</h2>
-    <dl class="kv">
-      <dt>receipts earned</dt><dd><span data-live="receipts_count">{stats["receipts_count"]}</span></dd>
-      <dt>pending submissions</dt><dd><span data-live="pending_submissions">{stats["pending_submissions"]}</span></dd>
-      <dt>audit-log rows</dt><dd><span data-live="audit_count">{stats["audit_count"]}</span></dd>
-      <dt>tenant allow / deny</dt><dd>{stats["tenant_allow_count"]} / {stats["tenant_deny_count"]}</dd>
-    </dl>"""
-
-        # Health & execution — what this machine is set to run + its physical state.
-        model_count = len(ModelStore(config.models_store_path).list())
-        acc = detect_accelerator()
-        tenant_code_cell = _executor_badge(_current_executor_policy(config, config_path))
-        # W-S: surface the inference backend (model serving) when configured. The
-        # dashboard doesn't own the live ModelServer, so it reports the config +
-        # a direct backend health probe — the honest "is inference set up and
-        # reachable" signal. Omitted when backend = none (mirrors the wire).
-        inference_row = _inference_html(config)
-        health_html = f"""    <h2>Health &amp; execution</h2>
-    <dl class="kv">
-      <dt>tenant code</dt><dd>{tenant_code_cell}</dd>
-      <dt>accelerator</dt><dd>{html.escape(acc.label)}</dd>
-      <dt>thermal</dt><dd data-live="thermal">{_thermal_html(config)}</dd>
-      <dt>models in store</dt><dd>{model_count} (<a href="/models">manage</a>)</dd>{inference_row}
-    </dl>"""
+        # ── Identity: the static "who is this worker" facts.
+        identity_rows: list[tuple[str, str, bool]] = [
+            ("worker_id", html.escape(worker.worker_id), True),
+            ("worker version", f"<code>{html.escape(__version__)}</code>", False),
+            ("trust tier", _tier_badge(int(worker.trust_tier)), False),
+            ("public key", html.escape(worker.pubkey_hex), True),
+            (
+                "enrolled",
+                html.escape(worker.enrolled_at.isoformat())
+                + f' <span class="muted">({_fmt_relative(worker.enrolled_at)})</span>',
+                False,
+            ),
+            ("coordinator", f"<code>{html.escape(config.coordinator_url)}</code>", False),
+        ]
+        identity_html = "    <h2>Identity</h2>\n" + render_kv(identity_rows)
 
         # §2.1 #11 (volunteer surface) + I4 (ui_triage_first_ia_redesign.md §5):
         # the state banner leads the page so "is anything wrong with my box?" is
@@ -410,8 +398,6 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
         elif worker.operator_hold_kind is None:
             pause_control = (
                 '    <form method="post" action="/self-pause" style="margin:0.75em 0">'
-                '<input type="text" name="reason" placeholder="reason (optional)" '
-                'style="padding:0.3em;min-width:18em;margin-right:0.4em"> '
                 '<button type="submit">pause this worker</button> '
                 '<span class="muted">— stop receiving work; keep enrollment + tier</span>'
                 "</form>\n"
@@ -419,32 +405,24 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
 
         body = (
             state_banner
-            + "    <h2>Identity</h2>\n"
-            + kv
-            + "\n"
             + pause_control
+            + status_html
+            + "\n"
+            + contribution_html
+            + "\n"
             + upgrade_html
-            + health_html
-            + "\n"
-            + progress_html
-            + "\n"
-            + counts
+            + identity_html
         )
         return render_page(title="Overview", body=body, active_nav="/", live=True)
 
     @app.post("/self-pause")
-    async def self_pause(request: Request) -> RedirectResponse:
-        """§2.1 #11: the one mutating control on the dashboard — the volunteer's
-        own no-fault pause (low-risk; localhost-only). Takes effect within a
-        heartbeat (the daemon declares self_paused + stops polling for work).
-
-        The optional `reason` is parsed straight from the urlencoded form body
-        (no `python-multipart` dependency) and stored as a local note, mirroring
-        the CLI `pause --reason`; empty ⇒ None (no synthetic placeholder)."""
-        raw = (await request.body()).decode("utf-8", "replace")
-        reason = (parse_qs(raw).get("reason", [""])[0] or "").strip() or None
+    def self_pause() -> RedirectResponse:
+        """§2.1 #11: the volunteer's own no-fault pause (low-risk; localhost-only).
+        Takes effect within a heartbeat (the daemon declares self_paused + stops
+        polling for work). No reason is collected — pausing your own box is the
+        owner's prerogative, not something to justify."""
         if self_repo.get() is not None:
-            self_repo.set_self_pause(True, reason=reason)
+            self_repo.set_self_pause(True)
         return RedirectResponse("/", status_code=303)
 
     @app.post("/self-unpause")

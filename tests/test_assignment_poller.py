@@ -377,7 +377,7 @@ class TestPollerHolds:
 
     def test_self_paused_short_circuits_the_poll(self, db: Database) -> None:
         repo = self._enroll(db)
-        repo.set_self_pause(True, reason="brb")
+        repo.set_self_pause(True)
         # Handler would hand out work — but a self-paused poller never calls it.
         poller, client = _make_poller(db, _route([_work_response()]), worker_self=repo)
         try:

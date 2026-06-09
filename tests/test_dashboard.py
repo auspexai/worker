@@ -94,7 +94,7 @@ class TestOverview:
             'data-live="completed_units"',
             'data-live="distinct_experiments"',
             'data-live="thermal"',
-            'data-live="worker_state"',
+            'data-live="state_banner"',  # the state is the live banner now
         ):
             assert marker in r.text, marker
 
@@ -182,14 +182,21 @@ class TestReceipts:
 
 
 class TestConfig:
-    def test_overview_surfaces_health_and_execution(self, client: TestClient, db: Database) -> None:
+    def test_overview_status_section_groups_live_signals(
+        self, client: TestClient, db: Database
+    ) -> None:
+        """The consolidated Status section gathers the live signals (heartbeat,
+        thermal, executor mode, models) in one place + the executor badge."""
         _enroll(db)
         r = client.get("/")
         assert r.status_code == 200
-        # the new transparency block + executor-policy badge (default synthetic)
-        assert "Health" in r.text and "execution" in r.text
-        assert "synthetic only" in r.text
+        assert "<h2>Status</h2>" in r.text
+        assert "executor mode" in r.text
+        assert "synthetic only" in r.text  # the executor badge (default synthetic)
         assert "models in store" in r.text
+        # Status comes before Contribution + Identity (status-first ordering).
+        assert r.text.index("<h2>Status</h2>") < r.text.index("<h2>Contribution</h2>")
+        assert r.text.index("<h2>Contribution</h2>") < r.text.index("<h2>Identity</h2>")
 
     def test_models_page_renders_store_and_accelerator(self, client: TestClient) -> None:
         r = client.get("/models")
@@ -240,45 +247,26 @@ class TestAPI:
 
 
 class TestSelfPause:
-    """§2.1 #11 + follow-on: the dashboard self-pause form carries an optional
-    reason (parsed from the urlencoded body, no python-multipart), stored as a
-    local note and surfaced back on the overview — mirroring `pause --reason`."""
+    """§2.1 #11: the dashboard self-pause is a single no-argument button — no
+    reason is collected (pausing your own box needs no justification)."""
 
-    def test_self_pause_form_has_reason_input(self, client: TestClient, db: Database) -> None:
+    def test_self_pause_form_has_no_reason_input(self, client: TestClient, db: Database) -> None:
         _enroll(db)
         r = client.get("/")
         assert 'action="/self-pause"' in r.text
-        assert 'name="reason"' in r.text  # the operator can now enter a reason
+        assert 'name="reason"' not in r.text  # the reason field is gone
 
-    def test_self_pause_with_reason_is_stored_and_surfaced(
-        self, client: TestClient, db: Database
-    ) -> None:
+    def test_self_pause_toggles_state(self, client: TestClient, db: Database) -> None:
         _enroll(db)
-        r = client.post(
-            "/self-pause",
-            data={"reason": "rebooting the box"},
-            follow_redirects=False,
-        )
+        r = client.post("/self-pause", follow_redirects=False)
         assert r.status_code == 303
         self_ = WorkerSelfRepository(db).get()
         assert self_ is not None and self_.self_paused is True
-        assert self_.self_pause_reason == "rebooting the box"
-        # and it surfaces on the overview's self-paused notice
-        overview = client.get("/")
-        assert "rebooting the box" in overview.text
-
-    def test_self_pause_without_reason_stores_none(self, client: TestClient, db: Database) -> None:
-        _enroll(db)
-        r = client.post("/self-pause", data={"reason": "   "}, follow_redirects=False)
-        assert r.status_code == 303
-        self_ = WorkerSelfRepository(db).get()
-        assert self_ is not None and self_.self_paused is True
-        # blank ⇒ None (no synthetic "paused from dashboard" placeholder)
-        assert self_.self_pause_reason is None
+        assert self_.self_pause_reason is None  # column stays dormant
 
     def test_self_unpause_clears(self, client: TestClient, db: Database) -> None:
         _enroll(db)
-        WorkerSelfRepository(db).set_self_pause(True, reason="x")
+        WorkerSelfRepository(db).set_self_pause(True)
         r = client.post("/self-unpause", follow_redirects=False)
         assert r.status_code == 303
         self_ = WorkerSelfRepository(db).get()

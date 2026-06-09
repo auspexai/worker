@@ -47,9 +47,7 @@ def _self_paused(tmp_path: Path) -> bool:
 def test_pause_then_unpause_toggles_state(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path)
     _enroll(tmp_path)
-    r = CliRunner().invoke(
-        cli, ["--config", str(cfg), "pause", "--reason", "brb"], env=_env(tmp_path)
-    )
+    r = CliRunner().invoke(cli, ["--config", str(cfg), "pause"], env=_env(tmp_path))
     assert r.exit_code == 0, r.output
     assert _self_paused(tmp_path) is True
     r2 = CliRunner().invoke(cli, ["--config", str(cfg), "unpause"], env=_env(tmp_path))

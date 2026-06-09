@@ -141,8 +141,7 @@ def status(ctx: click.Context) -> None:
     # operator's pause/quarantine (with the operator's reason, cached from the
     # last assignment poll).
     if worker.self_paused:
-        sp = f" (reason: {worker.self_pause_reason})" if worker.self_pause_reason else ""
-        click.echo(f"self-paused: yes{sp} — run `auspexai-worker unpause` to resume")
+        click.echo("self-paused: yes — run `auspexai-worker unpause` to resume")
     if worker.operator_hold_kind == "pause":
         click.echo(
             f"operator hold: PAUSED by operator (no-fault) "
@@ -166,9 +165,8 @@ def status(ctx: click.Context) -> None:
 
 
 @cli.command(help="Self-pause this worker: keep enrolled + your tier, but stop receiving work.")
-@click.option("--reason", default=None, help="Optional note, shown locally in `status`/dashboard.")
 @click.pass_context
-def pause(ctx: click.Context, reason: str | None) -> None:
+def pause(ctx: click.Context) -> None:
     """Volunteer self-pause (§2.1 #11) — a no-fault, owner-controlled hold. The
     daemon keeps heartbeating (you stay enrolled, your tier is preserved) but the
     coordinator stops sending work until you `unpause`. A softer alternative to
@@ -179,7 +177,7 @@ def pause(ctx: click.Context, reason: str | None) -> None:
         if repo.get() is None:
             click.echo("not enrolled; nothing to pause", err=True)
             sys.exit(1)
-        repo.set_self_pause(True, reason=reason)
+        repo.set_self_pause(True)
     finally:
         db.close()
     click.echo("worker self-paused — the coordinator will stop sending it work.")

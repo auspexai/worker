@@ -91,12 +91,11 @@ def derive_self_state(
             fault=False,
         )
     if worker.self_paused:
-        sp = f" Reason: {worker.self_pause_reason}" if worker.self_pause_reason else ""
         return StatePresentation(
             SelfState.SELF_PAUSED,
             "self-paused",
             "You paused this worker — it stays enrolled (tier preserved) but "
-            f"receives no work until you resume.{sp}",
+            "receives no work until you resume.",
             "",
             fault=False,
         )
