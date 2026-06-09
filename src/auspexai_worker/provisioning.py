@@ -73,7 +73,10 @@ def hash_manifest(manifest: dict[str, Any]) -> str:
 
 
 # Files never part of the executor package digest (mirror of the SDK's helper).
-_PACKAGE_DIGEST_EXCLUDE = ("manifest.json",)
+# manifest.json.sig: the SDK's `manifest sign` drops the signature file into
+# the package dir by default, so it must not contribute to the digest — kept
+# in lockstep with auspexai_tenant.manifest._PACKAGE_DIGEST_EXCLUDE.
+_PACKAGE_DIGEST_EXCLUDE = ("manifest.json", "manifest.json.sig")
 
 
 def compute_package_digest(package_dir: Path) -> str:

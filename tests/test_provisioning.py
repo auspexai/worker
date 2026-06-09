@@ -467,3 +467,16 @@ def test_config_rejects_unknown_policy(tmp_path: Path):
     cfg_file.write_text('[executor]\nexecute_tenant_code = "yolo"\n', encoding="utf-8")
     with pytest.raises(ValueError, match="execute_tenant_code"):
         WorkerConfig.load(config_path=cfg_file, env={})
+
+
+def test_package_digest_excludes_manifest_sig(tmp_path):
+    """Lockstep with the SDK: a manifest.json.sig staged alongside the package
+    (the SDK `manifest sign` default drops it into the package dir) must not
+    change the digest the worker re-derives against the signed manifest."""
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "executor.py").write_text("print('hi')")
+    before = compute_package_digest(pkg)
+    (pkg / "manifest.json").write_text("{}")
+    (pkg / "manifest.json.sig").write_text('{"sig": "..."}')
+    assert compute_package_digest(pkg) == before
