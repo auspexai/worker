@@ -510,6 +510,11 @@ Done. Useful commands:
   auspexai-worker model setup    # pick + download models that fit this host
   auspexai-worker model list     # models you have (your network inventory)
 
+Your worker also has a local web dashboard (while the daemon is running):
+
+  http://127.0.0.1:7799          # status, activity, receipts, models, settings
+                                 # local-only; never exposed to the network
+
 EOF
 }
 
