@@ -371,3 +371,39 @@ class TestNoExternalSurface:
             # care about 405 vs 404 — what matters is there's no
             # 2xx success.
             assert r.status_code >= 400, f"{path} accepted POST: {r.status_code}"
+
+
+class TestI4Overview:
+    """I4 (ui_triage_first_ia_redesign.md §5): state-banner-first + inference."""
+
+    def test_active_worker_shows_calm_state_banner_first(
+        self, client: TestClient, db: Database
+    ) -> None:
+        from auspexai_worker.state import WorkerSelfRepository
+
+        _enroll(db)
+        WorkerSelfRepository(db).record_heartbeat(datetime.now(UTC), trust_tier=0)
+        r = client.get("/")
+        # An always-on banner (calm when active) leads the page — BEFORE Identity.
+        assert "running normally" in r.text
+        assert 'data-live="state_banner"' in r.text
+        assert r.text.index("running normally") < r.text.index("<h2>Identity</h2>")
+
+    def test_inference_row_absent_when_backend_none(self, client: TestClient, db: Database) -> None:
+        _enroll(db)
+        r = client.get("/")
+        assert "inference backend" not in r.text  # default backend = none
+
+    def test_inference_row_present_when_ollama(
+        self, db: Database, config: WorkerConfig, tmp_path: Path
+    ) -> None:
+        import dataclasses
+
+        cfg = dataclasses.replace(config, inference_backend="ollama")
+        c = TestClient(build_app(db=db, config=cfg, config_path=tmp_path / "worker.toml"))
+        _enroll(db)
+        r = c.get("/")
+        assert "inference backend" in r.text
+        assert "ollama @" in r.text
+        # No Ollama running in the test → the honest "unreachable" probe result.
+        assert "unreachable" in r.text

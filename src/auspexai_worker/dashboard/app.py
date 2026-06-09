@@ -119,6 +119,32 @@ def _thermal_critical(config: WorkerConfig) -> bool:
     return mon.enabled and mon.snapshot().state is ThermalState.CRITICAL
 
 
+def _inference_html(config: WorkerConfig) -> str:
+    """W-S: an extra Health & execution row when the worker is configured to
+    serve models for inference tenants. Returns '' (no row) when
+    `[inference] backend = "none"` — absent means 'not an inference host',
+    mirroring the heartbeat wire. When ollama, probes the backend directly so
+    the volunteer sees whether it's actually reachable."""
+    backend = getattr(config, "inference_backend", "none")
+    if backend == "none":
+        return ""
+    if backend == "ollama":
+        try:
+            from auspexai_worker.inference import OllamaBackend
+
+            healthy = OllamaBackend(config.inference_ollama_url).is_healthy()
+        except Exception:
+            healthy = False
+        badge = (
+            '<span class="badge ok">reachable</span>'
+            if healthy
+            else '<span class="badge error">unreachable — start Ollama</span>'
+        )
+        url = html.escape(config.inference_ollama_url)
+        return f"\n      <dt>inference backend</dt><dd>ollama @ <code>{url}</code> {badge}</dd>"
+    return f"\n      <dt>inference backend</dt><dd>{html.escape(str(backend))}</dd>"
+
+
 def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = None) -> FastAPI:
     """Build the dashboard FastAPI app.
 
@@ -252,28 +278,44 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
         model_count = len(ModelStore(config.models_store_path).list())
         acc = detect_accelerator()
         tenant_code_cell = _executor_badge(_current_executor_policy(config, config_path))
+        # W-S: surface the inference backend (model serving) when configured. The
+        # dashboard doesn't own the live ModelServer, so it reports the config +
+        # a direct backend health probe — the honest "is inference set up and
+        # reachable" signal. Omitted when backend = none (mirrors the wire).
+        inference_row = _inference_html(config)
         health_html = f"""    <h2>Health &amp; execution</h2>
     <dl class="kv">
       <dt>tenant code</dt><dd>{tenant_code_cell}</dd>
       <dt>accelerator</dt><dd>{html.escape(acc.label)}</dd>
       <dt>thermal</dt><dd data-live="thermal">{_thermal_html(config)}</dd>
-      <dt>models in store</dt><dd>{model_count} (<a href="/models">manage</a>)</dd>
+      <dt>models in store</dt><dd>{model_count} (<a href="/models">manage</a>)</dd>{inference_row}
     </dl>"""
 
-        # §2.1 #11 (volunteer surface): explain the current non-active state with
-        # the right tone (quarantine = fault → red notice; every other hold is
-        # no-fault → neutral), then offer the volunteer's self-pause control ONLY
-        # where the volunteer can actually act. An operator hold (pause OR
-        # quarantine) is operator-controlled — don't dangle a pause/unpause that
-        # wouldn't change the work state; if the volunteer is self-paused *under*
-        # an operator hold, say resuming won't restore work until the hold lifts.
-        holds_parts: list[str] = []
-        if state.state is not SelfState.ACTIVE:
+        # §2.1 #11 (volunteer surface) + I4 (ui_triage_first_ia_redesign.md §5):
+        # the state banner leads the page so "is anything wrong with my box?" is
+        # answered first — ALWAYS rendered (a calm one-liner when active, the
+        # right-toned notice when not: quarantine = fault → red; every other hold
+        # is no-fault → neutral).
+        if state.state is SelfState.ACTIVE:
+            state_banner = (
+                f'    <div class="notice ok" data-live="state_banner">'
+                f"<strong>{html.escape(state.label)}</strong> — running normally; "
+                "receiving work.</div>\n"
+            )
+        else:
             cls = "notice fault" if state.fault else "notice"
-            holds_parts.append(
-                f'    <div class="{cls}"><strong>{html.escape(state.label)}</strong> — '
+            state_banner = (
+                f'    <div class="{cls}" data-live="state_banner">'
+                f"<strong>{html.escape(state.label)}</strong> — "
                 f"{html.escape(state.detail)}</div>\n"
             )
+
+        # The self-pause control is an ACTION (not status) — offered only where
+        # the volunteer can actually act. An operator hold (pause OR quarantine)
+        # is operator-controlled — don't dangle a pause/unpause that wouldn't
+        # change the work state; if self-paused *under* an operator hold, say
+        # resuming won't restore work until the hold lifts.
+        pause_control = ""
         if worker.self_paused:
             note = ""
             if worker.operator_hold_kind is not None:
@@ -281,12 +323,12 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
                     ' <span class="muted">(an operator hold is also active — resuming '
                     "won't restore work until the operator lifts it)</span>"
                 )
-            holds_parts.append(
+            pause_control = (
                 '    <form method="post" action="/self-unpause" style="margin:0.75em 0">'
                 '<button type="submit">resume (unpause)</button>' + note + "</form>\n"
             )
         elif worker.operator_hold_kind is None:
-            holds_parts.append(
+            pause_control = (
                 '    <form method="post" action="/self-pause" style="margin:0.75em 0">'
                 '<input type="text" name="reason" placeholder="reason (optional)" '
                 'style="padding:0.3em;min-width:18em;margin-right:0.4em"> '
@@ -294,13 +336,13 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
                 '<span class="muted">— stop receiving work; keep enrollment + tier</span>'
                 "</form>\n"
             )
-        holds_html = "".join(holds_parts)
 
         body = (
-            "    <h2>Identity</h2>\n"
+            state_banner
+            + "    <h2>Identity</h2>\n"
             + kv
             + "\n"
-            + holds_html
+            + pause_control
             + upgrade_html
             + health_html
             + "\n"
