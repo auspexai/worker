@@ -92,6 +92,13 @@ _LIVE_SCRIPT = """  <script>
               el.className = 'badge ' + (d.state_tone || '');
               return;
             }
+            if (k === 'state_banner') {
+              // The dynamic state banner: server-built (already escaped) inner
+              // HTML + class, so "receiving work" vs "idle" flips live.
+              if (d.state_banner_html != null) el.innerHTML = d.state_banner_html;
+              if (d.state_banner_class != null) el.className = d.state_banner_class;
+              return;
+            }
             if (!(k in d)) return;
             el.textContent = (k === 'last_heartbeat_at') ? rel(d[k]) : d[k];
           });

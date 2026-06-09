@@ -35,6 +35,7 @@ from auspexai_worker.state import (
     WorkerSelfRepository,
 )
 from auspexai_worker.worker_state import SelfState, derive_self_state
+from auspexai_worker.workspace import workspace_runs_dir
 
 from .templates import render_kv, render_page, render_table
 
@@ -117,6 +118,83 @@ def _thermal_critical(config: WorkerConfig) -> bool:
     advisory and does not count. Off where there's no sensor."""
     mon = _thermal_monitor(config)
     return mon.enabled and mon.snapshot().state is ThermalState.CRITICAL
+
+
+def _inflight_unit(runs_dir: Path) -> str | None:
+    """The unit currently executing (a workspace with a LIVE runner pid), or
+    None. The dispatcher writes runner.pid per workspace and cleans the
+    workspace on completion, so a live pid == a unit running right now."""
+    import os
+
+    if not runs_dir.is_dir():
+        return None
+    for ws in sorted(runs_dir.iterdir()):
+        pid_file = ws / "runner.pid"
+        if not pid_file.is_file():
+            continue
+        try:
+            pid = int(pid_file.read_text(encoding="ascii").strip())
+            os.kill(pid, 0)  # liveness probe; raises if no such process
+        except (ValueError, OSError):
+            continue
+        return ws.name
+    return None
+
+
+def _work_activity(
+    config: WorkerConfig,
+    *,
+    runs_dir: Path,
+    last_submitted_at: datetime | None,
+    now: datetime,
+) -> tuple[str, str]:
+    """The accurate, dynamic (headline, detail) for an ACTIVE worker — only
+    claims 'Receiving work' when work is genuinely flowing. The headline
+    replaces the generic 'active' label so the banner reads as the actual
+    activity. Signals (most→least specific): a live runner = a unit running
+    now; a recently-submitted unit = receiving work; otherwise idle/available
+    (no overclaim)."""
+    if _inflight_unit(runs_dir) is not None:
+        return "Running a work unit", "executing now"
+    # "recently" tracks the assignment cadence — a few poll intervals, floored
+    # so a slow poll config doesn't make a busy worker read as idle.
+    window = max(3 * config.assignment_poll_interval_seconds, 180)
+    if last_submitted_at is not None:
+        ts = last_submitted_at
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC)
+        if (now - ts).total_seconds() <= window:
+            return "Receiving work", f"last unit completed {_fmt_relative(ts)}"
+        return "Idle", f"available; no work assigned recently (last unit {_fmt_relative(ts)})"
+    return (
+        "Idle",
+        "available; no work has been assigned yet — the network has no matching work for it right now",
+    )
+
+
+def _state_banner(
+    worker,
+    state,
+    config: WorkerConfig,
+    *,
+    runs_dir: Path,
+    last_submitted_at: datetime | None,
+    now: datetime,
+) -> tuple[str, str]:
+    """Return (css_class, inner_html) for the overview state banner. Shared by
+    the server render and /api/stats so the banner updates live + identically.
+    ACTIVE uses the dynamic work-activity headline (accurate, never
+    overclaiming); every hold state uses its own already-accurate label+detail."""
+    if state.state is SelfState.ACTIVE:
+        headline, detail = _work_activity(
+            config, runs_dir=runs_dir, last_submitted_at=last_submitted_at, now=now
+        )
+        cls = "notice ok"
+    else:
+        headline, detail = state.label, state.detail
+        cls = "notice fault" if state.fault else "notice"
+    inner = f"<strong>{html.escape(headline)}</strong> — {html.escape(detail)}"
+    return cls, inner
 
 
 def _inference_html(config: WorkerConfig) -> str:
@@ -293,22 +371,24 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
 
         # §2.1 #11 (volunteer surface) + I4 (ui_triage_first_ia_redesign.md §5):
         # the state banner leads the page so "is anything wrong with my box?" is
-        # answered first — ALWAYS rendered (a calm one-liner when active, the
-        # right-toned notice when not: quarantine = fault → red; every other hold
-        # is no-fault → neutral).
-        if state.state is SelfState.ACTIVE:
-            state_banner = (
-                f'    <div class="notice ok" data-live="state_banner">'
-                f"<strong>{html.escape(state.label)}</strong> — running normally; "
-                "receiving work.</div>\n"
-            )
-        else:
-            cls = "notice fault" if state.fault else "notice"
-            state_banner = (
-                f'    <div class="{cls}" data-live="state_banner">'
-                f"<strong>{html.escape(state.label)}</strong> — "
-                f"{html.escape(state.detail)}</div>\n"
-            )
+        # answered first — ALWAYS rendered. For an ACTIVE worker the second
+        # clause is DYNAMIC + accurate: it claims "receiving work" only when work
+        # is actually flowing (a live runner / a recently-submitted unit), else
+        # it says idle/available. Hold states use their own accurate detail
+        # (quarantine = fault → red; every other hold is no-fault → neutral).
+        recent_submitted = results_repo.recent(limit=1)
+        last_submitted_at = recent_submitted[0].submitted_at if recent_submitted else None
+        banner_cls, banner_inner = _state_banner(
+            worker,
+            state,
+            config,
+            runs_dir=workspace_runs_dir(config.state_dir),
+            last_submitted_at=last_submitted_at,
+            now=datetime.now(UTC),
+        )
+        state_banner = (
+            f'    <div class="{banner_cls}" data-live="state_banner">{banner_inner}</div>\n'
+        )
 
         # The self-pause control is an ACTION (not status) — offered only where
         # the volunteer can actually act. An operator hold (pause OR quarantine)
@@ -658,13 +738,28 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
         # Derived volunteer-facing state (§2.1 #11) — kept live by the poll so the
         # status badge flips within a tick on an operator hold / self-pause / etc.
         state_key = state_label = state_tone = None
+        banner_class = banner_html = None
         if worker is not None:
+            now = datetime.now(UTC)
             st = derive_self_state(
                 worker,
                 thermal_critical=(thermal_enabled and thermal_state == "critical"),
-                now=datetime.now(UTC),
+                now=now,
             )
             state_key, state_label, state_tone = st.state.value, st.label, st.tone
+            # The dynamic state banner (kept live so "receiving work" vs "idle"
+            # flips within a tick as work starts/stops) — same helper the page
+            # render uses, so server + poll agree exactly.
+            recent_submitted = results_repo.recent(limit=1)
+            last_submitted_at = recent_submitted[0].submitted_at if recent_submitted else None
+            banner_class, banner_html = _state_banner(
+                worker,
+                st,
+                config,
+                runs_dir=workspace_runs_dir(config.state_dir),
+                last_submitted_at=last_submitted_at,
+                now=now,
+            )
         return JSONResponse(
             {
                 "worker_id": worker.worker_id if worker else None,
@@ -672,6 +767,8 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
                 "worker_state": state_key,
                 "state_label": state_label,
                 "state_tone": state_tone,
+                "state_banner_class": banner_class,
+                "state_banner_html": banner_html,
                 "last_heartbeat_at": (
                     worker.last_heartbeat_at.isoformat()
                     if worker and worker.last_heartbeat_at
