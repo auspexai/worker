@@ -463,6 +463,10 @@ class TestUpdateNotice:
         assert "Worker flavors + official Ollama" in r.text
         assert "getworker.auspexai.network" in r.text
         assert "never automatic" in r.text
+        # one-click copy affordance: command in data-cmd, copied via the
+        # volunteer's clipboard — still PRINTED/copied, never executed.
+        assert 'class="copy-cmd"' in r.text
+        assert "data-cmd=" in r.text
         stats = client.get("/api/stats").json()
         assert stats["update_available"] is True
         assert "v99.0.0" in stats["update_notice_html"]

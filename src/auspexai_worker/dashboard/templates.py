@@ -42,6 +42,8 @@ code { font-family: ui-monospace, monospace; background: #1a1e2a; padding: 0.1em
 .notice.ok { background: #0f2a1a; border-color: #14532d; color: #86efac; }
 .notice.fault { background: #3a1e1e; border-color: #b91c1c; color: #fca5a5; }
 .notice code { background: #0a0e1a; }
+.notice .copy-cmd { background: #1f2937; border: 1px solid #3b82f6; color: inherit; border-radius: 4px; padding: 0.15em 0.6em; margin-left: 0.4em; font: inherit; font-size: 0.85em; cursor: pointer; }
+.notice .copy-cmd:hover { background: #2a2e3a; }
 .live-ind { font-size: 0.6em; font-weight: 500; color: #86efac; margin-left: 0.5em; vertical-align: middle; }
 """
 

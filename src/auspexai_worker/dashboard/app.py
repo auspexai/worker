@@ -203,7 +203,14 @@ def _update_notice(worker, config: WorkerConfig) -> tuple[str, str]:
     persistent (no dismissal state to manage) — display-time version
     comparison hides it the moment the worker upgrades. The headline is
     coordinator-supplied text: treat as UNTRUSTED display input — escaped
-    here, truncated at the wire parse. The command is PRINTED, never run."""
+    here, truncated at the wire parse.
+
+    The command is PRINTED + one-click COPIED, never run: the dashboard's
+    mutating controls only write config values; executing a network-fetched
+    installer (which needs sudo) from a localhost HTTP endpoint would be a
+    different class of surface entirely (§9 #41). The copy button keeps the
+    volunteer's terminal as the executor — the click is the election, the
+    paste is the consent."""
     from auspexai_worker import __version__
     from auspexai_worker.updates import is_newer_version, upgrade_command
 
@@ -219,9 +226,18 @@ def _update_notice(worker, config: WorkerConfig) -> tuple[str, str]:
     if url and url.startswith("https://"):
         link = f' (<a href="{html.escape(url)}" target="_blank" rel="noreferrer">release notes</a>)'
     cmd = html.escape(upgrade_command(config.flavor))
+    copy_btn = (
+        f'<button type="button" class="copy-cmd" data-cmd="{cmd}" '
+        'onclick="navigator.clipboard.writeText(this.dataset.cmd)'
+        ".then(()=>{this.textContent='copied!';"
+        "setTimeout(()=>{this.textContent='copy command';},2000);})\">"
+        "copy command</button>"
+    )
     inner = (
-        " ".join(parts) + f"{link}<br>To upgrade, run <code>{cmd}</code> from a terminal. "
-        "Updates are never automatic — upgrading is always your choice."
+        " ".join(parts) + f"{link}<br>To upgrade, paste this in a terminal: "
+        f"<code>{cmd}</code> {copy_btn}<br>"
+        '<span class="muted">Updates are never automatic — upgrading is always your choice; '
+        "your enrollment, keys, and models survive the upgrade.</span>"
     )
     return "notice", inner
 
