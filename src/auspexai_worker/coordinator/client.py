@@ -159,6 +159,17 @@ class EnrollmentResponse:
 
 
 @dataclass(frozen=True)
+class LatestRelease:
+    """§9 #46: the coordinator's release announcement, relayed in the
+    heartbeat response. Informational only — upgrading is the volunteer's
+    election; the worker never acts on this beyond surfacing it."""
+
+    version: str
+    notes: str | None
+    url: str | None
+
+
+@dataclass(frozen=True)
 class WorkerStatusResponse:
     """Subset of WorkerResponse the coordinator returns to a worker calling
     its own endpoints. operator_only fields (pubkey_hex, account_id,
@@ -169,6 +180,7 @@ class WorkerStatusResponse:
     registered_at: datetime | None
     last_heartbeat_at: datetime | None
     retired_at: datetime | None
+    latest_release: LatestRelease | None = None
 
 
 @dataclass(frozen=True)
@@ -872,6 +884,26 @@ def _parse_worker_status(payload: dict[str, Any]) -> WorkerStatusResponse:
         registered_at=_parse_optional_datetime(payload.get("registered_at")),
         last_heartbeat_at=_parse_optional_datetime(payload.get("last_heartbeat_at")),
         retired_at=_parse_optional_datetime(payload.get("retired_at")),
+        latest_release=_parse_latest_release(payload.get("latest_release")),
+    )
+
+
+def _parse_latest_release(raw: object) -> LatestRelease | None:
+    """Tolerant parse of the §9 #46 announcement block. The announcement is
+    coordinator-supplied display data — a malformed block must NEVER fail the
+    heartbeat, so anything unexpected collapses to None. Notes are truncated
+    at this wire boundary; the dashboard additionally HTML-escapes."""
+    if not isinstance(raw, dict):
+        return None
+    version = raw.get("version")
+    if not isinstance(version, str) or not version:
+        return None
+    notes = raw.get("headline")
+    url = raw.get("release_url")
+    return LatestRelease(
+        version=version,
+        notes=notes[:500] if isinstance(notes, str) else None,
+        url=url if isinstance(url, str) else None,
     )
 
 

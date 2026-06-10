@@ -24,6 +24,12 @@ class WorkerSelf:
     operator_hold_kind: str | None = None  # 'pause' | 'quarantine' | None
     operator_hold_reason: str | None = None
     operator_hold_at: str | None = None
+    # §9 #46: last release announcement relayed by the heartbeat response
+    # (informational — upgrading is always the volunteer's election):
+    latest_release_version: str | None = None
+    latest_release_notes: str | None = None
+    latest_release_url: str | None = None
+    latest_release_at: str | None = None
 
 
 class AlreadyEnrolledError(Exception):
@@ -40,7 +46,9 @@ class WorkerSelfRepository:
         row = self._db.connection.execute(
             "SELECT worker_id, trust_tier, pubkey_hex, enrolled_at, "
             "last_heartbeat_at, account_binding_json, self_paused, self_pause_reason, "
-            "operator_hold_kind, operator_hold_reason, operator_hold_at "
+            "operator_hold_kind, operator_hold_reason, operator_hold_at, "
+            "latest_release_version, latest_release_notes, latest_release_url, "
+            "latest_release_at "
             "FROM worker_self WHERE id = 1"
         ).fetchone()
         if row is None:
@@ -57,6 +65,10 @@ class WorkerSelfRepository:
             operator_hold_kind=row["operator_hold_kind"],
             operator_hold_reason=row["operator_hold_reason"],
             operator_hold_at=row["operator_hold_at"],
+            latest_release_version=row["latest_release_version"],
+            latest_release_notes=row["latest_release_notes"],
+            latest_release_url=row["latest_release_url"],
+            latest_release_at=row["latest_release_at"],
         )
 
     def set_self_pause(self, paused: bool) -> None:
@@ -154,6 +166,21 @@ class WorkerSelfRepository:
                     "UPDATE worker_self SET last_heartbeat_at = ?, trust_tier = ? WHERE id = 1",
                     (_format_ts(at), trust_tier),
                 )
+
+    def record_latest_release(
+        self, *, version: str, notes: str | None, url: str | None, at: datetime
+    ) -> None:
+        """Cache the coordinator's release announcement from the heartbeat
+        response (§9 #46). Unconditional singleton UPDATE — the row is always
+        just the LAST announcement; display-time version comparison decides
+        whether to surface it. Nothing in the worker ever acts on it."""
+        with self._db.transaction() as conn:
+            conn.execute(
+                "UPDATE worker_self SET latest_release_version = ?, "
+                "latest_release_notes = ?, latest_release_url = ?, "
+                "latest_release_at = ? WHERE id = 1",
+                (version, notes, url, _format_ts(at)),
+            )
 
     def delete(self) -> None:
         with self._db.transaction() as conn:

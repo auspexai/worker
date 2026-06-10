@@ -112,6 +112,15 @@ class HeartbeatLoop:
             # network standing (a coord-side promotion/demotion is otherwise
             # invisible locally).
             self._repo.record_heartbeat(now, trust_tier=status.trust_tier)
+            # §9 #46: cache the release announcement (if any) for the status/
+            # dashboard surfaces. Informational only — never acted on.
+            if status.latest_release is not None:
+                self._repo.record_latest_release(
+                    version=status.latest_release.version,
+                    notes=status.latest_release.notes,
+                    url=status.latest_release.url,
+                    at=now,
+                )
             self._stats.ticks_succeeded += 1
             self._stats.last_success_at = now
             logger.debug("heartbeat ok (tick=%d)", self._stats.ticks_attempted)

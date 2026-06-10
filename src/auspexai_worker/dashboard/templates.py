@@ -99,6 +99,14 @@ _LIVE_SCRIPT = """  <script>
               if (d.state_banner_class != null) el.className = d.state_banner_class;
               return;
             }
+            if (k === 'update_notice') {
+              // §9 #46 update-available notice: server-built (escaped) inner
+              // HTML + class, so a release announcement appears without a
+              // page reload (and disappears after an upgrade).
+              if (d.update_notice_html != null) el.innerHTML = d.update_notice_html;
+              if (d.update_notice_class != null) el.className = d.update_notice_class;
+              return;
+            }
             if (!(k in d)) return;
             el.textContent = (k === 'last_heartbeat_at') ? rel(d[k]) : d[k];
           });

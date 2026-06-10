@@ -175,3 +175,20 @@ def test_ollama_create_model_failure_raises():
     backend = OllamaBackend(cli_runner=fake_run)
     with pytest.raises(BackendError, match="exit=1"):
         backend.create_model("auspex-m", "FROM /nope\n")
+
+
+def test_ollama_version_probe():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/version":
+            return httpx.Response(200, json={"version": "0.6.5"})
+        return httpx.Response(404)
+
+    assert OllamaBackend(transport=httpx.MockTransport(handler)).version() == "0.6.5"
+
+
+def test_ollama_version_probe_tolerates_failure():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    # §9 #46: provenance probe must never raise — None when unreachable.
+    assert OllamaBackend(transport=httpx.MockTransport(handler)).version() is None

@@ -437,3 +437,70 @@ class TestI4Overview:
         assert "ollama @" in r.text
         # No Ollama running in the test → the honest "unreachable" probe result.
         assert "unreachable" in r.text
+
+
+class TestUpdateNotice:
+    """§9 #46: the update-available notice (server-built, escaped, election-only)."""
+
+    def test_no_notice_when_nothing_announced(self, client: TestClient, db: Database) -> None:
+        _enroll(db)
+        r = client.get("/")
+        assert "Update available" not in r.text
+        stats = client.get("/api/stats").json()
+        assert stats["update_available"] is False
+        assert stats["update_notice_html"] == ""
+
+    def test_notice_renders_when_newer_announced(self, client: TestClient, db: Database) -> None:
+        _enroll(db)
+        WorkerSelfRepository(db).record_latest_release(
+            version="99.0.0",
+            notes="Worker flavors + official Ollama",
+            url="https://github.com/auspexai/worker/releases/tag/v99.0.0",
+            at=datetime.now(UTC),
+        )
+        r = client.get("/")
+        assert "Update available: v99.0.0" in r.text
+        assert "Worker flavors + official Ollama" in r.text
+        assert "getworker.auspexai.network" in r.text
+        assert "never automatic" in r.text
+        stats = client.get("/api/stats").json()
+        assert stats["update_available"] is True
+        assert "v99.0.0" in stats["update_notice_html"]
+
+    def test_notice_hidden_when_current(self, client: TestClient, db: Database) -> None:
+        # Announcing an OLDER version than the running build shows nothing —
+        # display-time comparison, no clearing logic needed.
+        _enroll(db)
+        WorkerSelfRepository(db).record_latest_release(
+            version="0.0.1", notes="ancient", url=None, at=datetime.now(UTC)
+        )
+        assert "Update available" not in client.get("/").text
+        assert client.get("/api/stats").json()["update_available"] is False
+
+    def test_notes_are_escaped(self, client: TestClient, db: Database) -> None:
+        # The headline is coordinator-supplied text — treat as untrusted input.
+        _enroll(db)
+        WorkerSelfRepository(db).record_latest_release(
+            version="99.0.0",
+            notes='<script>alert("xss")</script>',
+            url="javascript:alert(1)",  # non-https → not linked
+            at=datetime.now(UTC),
+        )
+        text = client.get("/").text
+        assert "<script>alert" not in text
+        assert "&lt;script&gt;" in text
+        assert 'href="javascript:' not in text
+
+    def test_flavor_shown_in_identity_and_stats(self, db: Database, tmp_path: Path) -> None:
+        _enroll(db)
+        cfg = WorkerConfig.load(
+            config_path=tmp_path / "no-such-config.toml",
+            env={
+                "AUSPEXAI_WORKER_STATE_DIR": str(tmp_path / "state"),
+                "AUSPEXAI_WORKER_DATA_DIR": str(tmp_path / "data"),
+                "AUSPEXAI_WORKER_FLAVOR": "inference",
+            },
+        )
+        c = TestClient(build_app(db=db, config=cfg, config_path=tmp_path / "worker.toml"))
+        assert ">inference<" in c.get("/").text.replace("<code>inference</code>", ">inference<")
+        assert c.get("/api/stats").json()["flavor"] == "inference"

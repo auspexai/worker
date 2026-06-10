@@ -103,6 +103,17 @@ class OllamaBackend:
         except BackendError:
             return False
 
+    def version(self) -> str | None:
+        """The serving Ollama's version (GET /api/version), or None when
+        unreachable/odd. Determinism provenance (§9 #46): the runtime version
+        affects inference outputs, so the daemon probes it once at start and
+        declares it in heartbeat capabilities."""
+        try:
+            v = self._get("/api/version").get("version")
+        except BackendError:
+            return None
+        return v if isinstance(v, str) and v else None
+
     def has_model(self, handle: str) -> bool:
         try:
             self._post("/api/show", {"model": handle}, timeout=10.0)

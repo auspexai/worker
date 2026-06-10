@@ -197,6 +197,35 @@ def _state_banner(
     return cls, inner
 
 
+def _update_notice(worker, config: WorkerConfig) -> tuple[str, str]:
+    """§9 #46: (css_class, inner_html) for the update-available notice, or
+    ('', '') when the worker is current / nothing announced. Quiet and
+    persistent (no dismissal state to manage) — display-time version
+    comparison hides it the moment the worker upgrades. The headline is
+    coordinator-supplied text: treat as UNTRUSTED display input — escaped
+    here, truncated at the wire parse. The command is PRINTED, never run."""
+    from auspexai_worker import __version__
+    from auspexai_worker.updates import is_newer_version, upgrade_command
+
+    latest = getattr(worker, "latest_release_version", None) if worker else None
+    if not latest or not is_newer_version(latest, __version__):
+        return "", ""
+    notes = getattr(worker, "latest_release_notes", None)
+    url = getattr(worker, "latest_release_url", None)
+    parts = [f"<strong>Update available: v{html.escape(latest)}</strong>"]
+    if notes:
+        parts.append(f"— {html.escape(notes)}")
+    link = ""
+    if url and url.startswith("https://"):
+        link = f' (<a href="{html.escape(url)}" target="_blank" rel="noreferrer">release notes</a>)'
+    cmd = html.escape(upgrade_command(config.flavor))
+    inner = (
+        " ".join(parts) + f"{link}<br>To upgrade, run <code>{cmd}</code> from a terminal. "
+        "Updates are never automatic — upgrading is always your choice."
+    )
+    return "notice", inner
+
+
 def _inference_html(config: WorkerConfig) -> str:
     """W-S: an extra Health & execution row when the worker is configured to
     serve models for inference tenants. Returns '' (no row) when
@@ -207,10 +236,14 @@ def _inference_html(config: WorkerConfig) -> str:
     if backend == "none":
         return ""
     if backend == "ollama":
+        version: str | None = None
         try:
             from auspexai_worker.inference import OllamaBackend
 
-            healthy = OllamaBackend(config.inference_ollama_url).is_healthy()
+            be = OllamaBackend(config.inference_ollama_url)
+            healthy = be.is_healthy()
+            if healthy:
+                version = be.version()
         except Exception:
             healthy = False
         badge = (
@@ -218,8 +251,12 @@ def _inference_html(config: WorkerConfig) -> str:
             if healthy
             else '<span class="badge error">unreachable — start Ollama</span>'
         )
+        # §9 #46 determinism provenance: show the serving runtime's version.
+        ver = f" <code>v{html.escape(version)}</code>" if version else ""
         url = html.escape(config.inference_ollama_url)
-        return f"\n      <dt>inference backend</dt><dd>ollama @ <code>{url}</code> {badge}</dd>"
+        return (
+            f"\n      <dt>inference backend</dt><dd>ollama @ <code>{url}</code>{ver} {badge}</dd>"
+        )
     return f"\n      <dt>inference backend</dt><dd>{html.escape(str(backend))}</dd>"
 
 
@@ -345,6 +382,11 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
         identity_rows: list[tuple[str, str, bool]] = [
             ("worker_id", html.escape(worker.worker_id), True),
             ("worker version", f"<code>{html.escape(__version__)}</code>", False),
+            *(
+                [("flavor", f"<code>{html.escape(config.flavor)}</code>", False)]
+                if config.flavor
+                else []
+            ),
             ("trust tier", _tier_badge(int(worker.trust_tier)), False),
             ("public key", html.escape(worker.pubkey_hex), True),
             (
@@ -376,6 +418,13 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
         )
         state_banner = (
             f'    <div class="{banner_cls}" data-live="state_banner">{banner_inner}</div>\n'
+        )
+        # §9 #46: the update-available notice sits right under the state banner.
+        # ALWAYS render the container (possibly empty) so the live poll can flip
+        # it on without a page reload.
+        notice_cls, notice_inner = _update_notice(worker, config)
+        state_banner += (
+            f'    <div class="{notice_cls}" data-live="update_notice">{notice_inner}</div>\n'
         )
 
         # The self-pause control is an ACTION (not status) — offered only where
@@ -717,6 +766,9 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
         # status badge flips within a tick on an operator hold / self-pause / etc.
         state_key = state_label = state_tone = None
         banner_class = banner_html = None
+        notice_class = notice_html = ""
+        if worker is not None:
+            notice_class, notice_html = _update_notice(worker, config)
         if worker is not None:
             now = datetime.now(UTC)
             st = derive_self_state(
@@ -761,6 +813,11 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
                 "thermal_temp_c": thermal_temp_c,
                 "thermal_state": thermal_state,
                 "coordinator_url": config.coordinator_url,
+                # §9 #46: update-available notice (server-built, escaped) + flavor.
+                "update_available": bool(notice_html),
+                "update_notice_class": notice_class,
+                "update_notice_html": notice_html,
+                "flavor": config.flavor,
             }
         )
 

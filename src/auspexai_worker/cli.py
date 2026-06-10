@@ -127,6 +127,8 @@ def status(ctx: click.Context) -> None:
     click.echo(f"worker-id:   {worker.worker_id}")
     click.echo(f"state:       {_state.label}")
     click.echo(f"tier:        T{worker.trust_tier}")
+    if config.flavor:
+        click.echo(f"flavor:      {config.flavor}")
     click.echo(f"pubkey:      {worker.pubkey_hex[:16]}… ({worker.pubkey_hex})")
     click.echo(f"enrolled-at: {worker.enrolled_at.isoformat()}")
     if worker.last_heartbeat_at is not None:
@@ -162,6 +164,21 @@ def status(ctx: click.Context) -> None:
             "You've contributed enough to build a portable track record. "
             "Run `auspexai-worker login` to claim your contributions."
         )
+    # §9 #46: surface the coordinator's release announcement when it's newer
+    # than this worker. Informational — upgrading is always YOUR election.
+    from auspexai_worker import __version__ as _version
+    from auspexai_worker.updates import is_newer_version, upgrade_command
+
+    if worker.latest_release_version and is_newer_version(worker.latest_release_version, _version):
+        click.echo("")
+        click.echo(
+            f"update available: v{worker.latest_release_version}"
+            + (f" — {worker.latest_release_notes}" if worker.latest_release_notes else "")
+        )
+        if worker.latest_release_url:
+            click.echo(f"  release notes: {worker.latest_release_url}")
+        click.echo("  to upgrade (your choice — updates are never automatic):")
+        click.echo(f"    {upgrade_command(config.flavor)}")
 
 
 @cli.command(help="Self-pause this worker: keep enrolled + your tier, but stop receiving work.")
@@ -247,6 +264,92 @@ def executor_set(ctx: click.Context, policy: str, auto_acquire: bool | None) -> 
             "the coordinator's manifest_sha256 (refuse-don't-echo otherwise)."
         )
     click.echo("a running daemon picks this up within one heartbeat — no restart needed.")
+
+
+@cli.group("flavor", help="View/record this worker's install profile (§9 #46).")
+def flavor() -> None:
+    pass
+
+
+@flavor.command("show", help="Show the recorded install flavor.")
+@click.option("--raw", is_flag=True, help="Print the bare flavor token (for scripting).")
+@click.pass_context
+def flavor_show(ctx: click.Context, raw: bool) -> None:
+    config: WorkerConfig = ctx.obj["config"]
+    if raw:
+        click.echo(config.flavor or "lean")
+        return
+    if config.flavor:
+        click.echo(f"flavor: {config.flavor}")
+    else:
+        click.echo("flavor: lean (default — not recorded; pre-flavor install)")
+
+
+@flavor.command(
+    "set", help="Record the install flavor in worker.toml (normally written by the onramp)."
+)
+@click.argument("name")
+@click.pass_context
+def flavor_set(ctx: click.Context, name: str) -> None:
+    """Bookkeeping only — recording a flavor does NOT install anything; the
+    onramp's apply_flavor step does the installs. Recorded so upgrades preserve
+    the volunteer's chosen profile and the fleet view can show it."""
+    from .config import set_worker_flavor
+
+    target = ctx.obj.get("config_path") or default_worker_toml_path()
+    try:
+        normalized = set_worker_flavor(target, name)
+    except ValueError as e:
+        click.echo(f"ERROR: {e}", err=True)
+        sys.exit(1)
+    except OSError as e:
+        click.echo(f"ERROR: could not write {target}: {e}", err=True)
+        sys.exit(1)
+    click.echo(f"set [worker] flavor = {normalized}")
+
+
+@cli.group("inference", help="View/set the inference-serving backend (W-S, §9 #43).")
+def inference() -> None:
+    pass
+
+
+@inference.command("show", help="Show the inference backend configuration.")
+@click.pass_context
+def inference_show(ctx: click.Context) -> None:
+    config: WorkerConfig = ctx.obj["config"]
+    click.echo(f"backend:    {config.inference_backend}")
+    if config.inference_backend == "ollama":
+        click.echo(f"ollama_url: {config.inference_ollama_url}")
+
+
+@inference.command(
+    "set-backend",
+    help="Set [inference] backend in worker.toml (none|ollama). Needs a daemon restart.",
+)
+@click.argument("backend", type=click.Choice(["none", "ollama"]))
+@click.pass_context
+def inference_set_backend(ctx: click.Context, backend: str) -> None:
+    """The owner's opt-in to serving local models to sandboxed executors.
+    Written by the onramp's inference flavor; also available here directly.
+    NOT hot-reloaded: the daemon builds the backend at start, so restart it
+    (`systemctl --user restart auspexai-worker` or re-run the daemon)."""
+    from .config import set_inference_backend
+
+    target = ctx.obj.get("config_path") or default_worker_toml_path()
+    try:
+        set_inference_backend(target, backend)
+    except OSError as e:
+        click.echo(f"ERROR: could not write {target}: {e}", err=True)
+        sys.exit(1)
+    click.echo(f"set [inference] backend = {backend}")
+    click.echo(
+        "restart the daemon to apply — [inference] is read at daemon start, not hot-reloaded."
+    )
+    if backend == "ollama":
+        click.echo(
+            "note: serving needs Ollama installed + running (the inference-flavor "
+            "onramp installs it), and GGUF models in the BYOM store."
+        )
 
 
 @cli.command(help="Tail the daemon log file.")
@@ -764,11 +867,15 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
         # socket in the unit workspace; dispatch closes it when the unit ends.
         model_server = None
         open_inference_session = None
+        _ollama_version: str | None = None
         if config.inference_backend == "ollama":
             from .inference import ModelServer, OllamaBackend, open_unit_session
 
             _inference_backend = OllamaBackend(config.inference_ollama_url)
             model_server = ModelServer(ModelStore(config.models_store_path), _inference_backend)
+            # §9 #46 determinism provenance: probe the serving Ollama's version
+            # ONCE at daemon start (no per-tick HTTP); declared in heartbeats.
+            _ollama_version = _inference_backend.version()
 
             def open_inference_session(model_id: str, socket_dir):
                 served = model_server.serve(model_id)
@@ -833,6 +940,9 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
                 # value (hot-reload) so a policy change reaches the coordinator on
                 # the next beat — no restart.
                 execute_tenant_code=policy.value,
+                # §9 #46: install-profile bookkeeping + serving-runtime provenance.
+                flavor=config.flavor,
+                ollama_version=_ollama_version,
             )
 
         heartbeat = HeartbeatLoop(

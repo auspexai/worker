@@ -188,3 +188,18 @@ class TestServedModels:
     def test_served_models_omitted_when_empty(self):
         assert "served_models" not in collect().to_dict()
         assert "served_models" not in collect(served_models=[]).to_dict()
+
+
+class TestFlavorAndOllamaVersion:
+    """§9 #46: flavor bookkeeping + serving-runtime provenance on the wire."""
+
+    def test_omitted_when_unset(self, tmp_path: Path) -> None:
+        payload = collect(sysroot=tmp_path).to_dict()
+        assert "flavor" not in payload
+        assert "ollama_version" not in payload
+
+    def test_included_when_set(self, tmp_path: Path) -> None:
+        caps = collect(sysroot=tmp_path, flavor="inference", ollama_version="0.6.5")
+        payload = caps.to_dict()
+        assert payload["flavor"] == "inference"
+        assert payload["ollama_version"] == "0.6.5"

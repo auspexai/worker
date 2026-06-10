@@ -38,6 +38,187 @@ need_cmd() {
     command -v "$1" >/dev/null 2>&1 || fail "'$1' is required but not found. Install it and retry."
 }
 
+# ── Flavors (§9 #46) ─────────────────────────────────────────────────
+# Install profiles, defined HERE as data (this script is served live from
+# main via getworker.auspexai.network, so the registry can't be a sibling
+# file). One codebase, one release train — a flavor only changes what the
+# onramp installs/configures. Adding a flavor = new case arms, no engine
+# changes. The worker records its flavor in worker.toml so upgrades
+# preserve it; scheduling stays capability-based (flavor is NOT a routing
+# key).
+
+FLAVOR_NAMES="lean inference full"
+
+flavor_desc() {
+    case "$1" in
+        lean)      echo "minimal worker — synthetic + staged work only (default)" ;;
+        inference) echo "serves local models to experiments — installs Ollama (a local model server) + model tooling, and enables serving on this machine" ;;
+        full)      echo "everything: inference serving + all optional extras" ;;
+    esac
+}
+
+# pip packages installed into the worker venv for this flavor
+flavor_pip() {
+    case "$1" in
+        inference|full) echo "huggingface_hub>=0.20" ;;
+    esac
+}
+
+# system-level installs for this flavor (each token has an install_<token> fn)
+flavor_system() {
+    case "$1" in
+        inference|full) echo "ollama" ;;
+    esac
+}
+
+# worker.toml settings applied for this flavor (token = setter shorthand)
+flavor_config() {
+    case "$1" in
+        inference|full) echo "inference-backend=ollama" ;;
+    esac
+}
+
+flavor_valid() {
+    case " ${FLAVOR_NAMES} " in
+        *" $1 "*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+list_flavors() {
+    echo "Available flavors:"
+    for f in $FLAVOR_NAMES; do
+        printf '  %-10s %s\n' "$f" "$(flavor_desc "$f")"
+    done
+}
+
+# Idempotent Ollama install via the official installer (arm64/Jetson-capable;
+# sets up its own systemd service). Failure is NON-FATAL: the worker still
+# installs, the dashboard's reachability badge shows the gap, and re-running
+# this installer heals it. The flavor choice IS the volunteer's consent to
+# this third-party install — the menu text says so plainly.
+install_ollama() {
+    if command -v ollama >/dev/null 2>&1; then
+        info "Ollama already installed ($(ollama --version 2>/dev/null || echo 'version unknown')) — skipping"
+        return 0
+    fi
+    info "Installing Ollama (official installer from ollama.com; can be a large download) …"
+    if ! curl -fsSL https://ollama.com/install.sh | sh; then
+        warn "Ollama install failed — the worker will still install, but inference"
+        warn "serving stays unavailable until Ollama is present. Re-run this"
+        warn "installer (same --flavor) to retry."
+        return 0
+    fi
+    # Surface the installed version (determinism provenance; the daemon
+    # re-reports it in heartbeat capabilities once serving).
+    local tries=0
+    while [ $tries -lt 15 ]; do
+        if curl -fsS http://127.0.0.1:11434/api/version >/dev/null 2>&1; then
+            info "Ollama serving: $(curl -fsS http://127.0.0.1:11434/api/version 2>/dev/null)"
+            return 0
+        fi
+        tries=$((tries + 1))
+        sleep 2
+    done
+    warn "Ollama installed but not reachable on 127.0.0.1:11434 yet — it may still be starting."
+}
+
+# Apply the chosen flavor AFTER the package install, BEFORE bootstrap/start
+# ([inference] is read at daemon start). Works identically on the deb and
+# wheel paths — both land the venv at ${INSTALL_PREFIX}.
+apply_flavor() {
+    local flavor="$1"
+    info "Applying flavor: ${flavor} — $(flavor_desc "$flavor")"
+
+    local pip_pkgs
+    pip_pkgs=$(flavor_pip "$flavor")
+    if [ -n "$pip_pkgs" ]; then
+        if [ -x "${INSTALL_PREFIX}/bin/pip" ]; then
+            info "Installing flavor pip packages: ${pip_pkgs} …"
+            # shellcheck disable=SC2086 — word-splitting the package list is intended
+            sudo "${INSTALL_PREFIX}/bin/pip" install -q $pip_pkgs \
+                || warn "could not install ${pip_pkgs}; some flavor features may be unavailable"
+        else
+            warn "pip not found in ${INSTALL_PREFIX}; install ${pip_pkgs} manually"
+        fi
+    fi
+
+    local sys_tokens
+    sys_tokens=$(flavor_system "$flavor")
+    for token in $sys_tokens; do
+        "install_${token}"
+    done
+
+    # Config writes run AS THE USER (XDG config), via the worker CLI so the
+    # volunteer's worker.toml is edited surgically. Guarded for --version
+    # installs of pre-flavor binaries (< v0.2.0).
+    if "${INSTALL_PREFIX}/bin/auspexai-worker" flavor --help >/dev/null 2>&1; then
+        local cfg_tokens
+        cfg_tokens=$(flavor_config "$flavor")
+        for token in $cfg_tokens; do
+            case "$token" in
+                inference-backend=*)
+                    "${INSTALL_PREFIX}/bin/auspexai-worker" inference set-backend "${token#inference-backend=}" >/dev/null \
+                        || warn "could not set [inference] backend"
+                    info "Enabled [inference] backend = ${token#inference-backend=}"
+                    ;;
+            esac
+        done
+        # Always record the flavor (lean included) so upgrades preserve it.
+        "${INSTALL_PREFIX}/bin/auspexai-worker" flavor set "$flavor" >/dev/null \
+            || warn "could not record the flavor in worker.toml"
+    else
+        warn "installed worker predates flavor support (< v0.2.0); flavor not recorded"
+    fi
+}
+
+# Resolution: explicit --flavor > recorded in worker.toml (version-independent
+# grep — works even when the OLD binary predates \`flavor show\`) > interactive
+# menu > lean.
+resolve_flavor() {
+    local requested="$1"
+    if [ -n "$requested" ]; then
+        echo "$requested"
+        return
+    fi
+    local toml="$HOME/.config/auspexai-worker/worker.toml"
+    if [ -f "$toml" ]; then
+        local recorded
+        recorded=$(grep -E '^[[:space:]]*flavor[[:space:]]*=' "$toml" 2>/dev/null \
+            | head -1 | sed 's/.*=[[:space:]]*"\{0,1\}//;s/"\{0,1\}[[:space:]]*$//') || true
+        if [ -n "$recorded" ] && flavor_valid "$recorded"; then
+            info "Keeping flavor: ${recorded} (recorded in worker.toml; pass --flavor to change)" >&2
+            echo "$recorded"
+            return
+        fi
+    fi
+    if [ -r /dev/tty ]; then
+        {
+            echo ""
+            echo "Choose an install flavor:"
+            local i=1
+            for f in $FLAVOR_NAMES; do
+                printf '  %d) %-10s %s\n' "$i" "$f" "$(flavor_desc "$f")"
+                i=$((i + 1))
+            done
+            printf 'Flavor [1]: '
+        } >&2
+        local reply
+        read -r reply </dev/tty
+        local n=1
+        for f in $FLAVOR_NAMES; do
+            if [ "$reply" = "$n" ] || [ "$reply" = "$f" ]; then
+                echo "$f"
+                return
+            fi
+            n=$((n + 1))
+        done
+        echo "lean"
+        return
+    fi
+    echo "lean"
+}
+
 # ── Detect Python ────────────────────────────────────────────────────
 
 find_python() {
@@ -131,6 +312,11 @@ do_uninstall() {
 
     info "Uninstalled."
     echo ""
+    if command -v ollama >/dev/null 2>&1; then
+        echo "Ollama (installed by the inference flavor, or already present) was NOT"
+        echo "removed — your machine may use it for other things. To remove it, see"
+        echo "https://github.com/ollama/ollama/blob/main/docs/linux.md#uninstall"
+    fi
     echo "Local state at ~/.local/state/auspexai-worker/ was NOT removed."
     models_dir="$HOME/.local/share/auspexai-worker/models"
     if [ -d "$models_dir" ] && [ -n "$(ls -A "$models_dir" 2>/dev/null)" ]; then
@@ -144,23 +330,38 @@ do_uninstall() {
 
 main() {
     local requested_version=""
+    local requested_flavor=""
 
     while [ $# -gt 0 ]; do
         case "$1" in
             --version) requested_version="$2"; shift 2 ;;
+            --flavor)
+                requested_flavor="$2"
+                flavor_valid "$requested_flavor" \
+                    || fail "unknown flavor: ${requested_flavor} (one of: ${FLAVOR_NAMES})"
+                shift 2
+                ;;
+            --list-flavors)
+                list_flavors
+                exit 0
+                ;;
             --uninstall)
                 do_uninstall
                 exit 0
                 ;;
             --help|-h)
-                echo "Usage: install.sh [--version VERSION] [--uninstall]"
+                echo "Usage: install.sh [--version VERSION] [--flavor NAME] [--uninstall]"
                 echo ""
                 echo "Installs the AuspexAI worker from the latest GitHub release."
                 echo "If a .deb exists for this architecture, it is preferred."
                 echo "Otherwise, a pip-based install into /opt/auspexai-worker/ is used."
                 echo ""
-                echo "  --uninstall   Stop, de-enroll, and remove the worker"
-                echo "  --version V   Install a specific version instead of latest"
+                echo "  --uninstall      Stop, de-enroll, and remove the worker"
+                echo "  --version V      Install a specific version instead of latest"
+                echo "  --flavor NAME    Install profile (upgrades keep the recorded one)"
+                echo "  --list-flavors   Show available flavors and exit"
+                echo ""
+                list_flavors
                 exit 0
                 ;;
             *) fail "unknown option: $1" ;;
@@ -193,6 +394,16 @@ main() {
             sleep 1
         fi
     fi
+
+    # ── Resolve the install flavor (§9 #46) ──────────────────────────
+    # One up-front decision: explicit flag > recorded (upgrades preserve the
+    # volunteer's choice) > interactive menu > lean. The inference flavor's
+    # menu text states plainly that it installs Ollama — choosing it IS the
+    # consent for that third-party install.
+
+    local flavor
+    flavor=$(resolve_flavor "$requested_flavor")
+    info "Flavor: ${flavor}"
 
     # ── Find Python ──────────────────────────────────────────────────
 
@@ -429,6 +640,13 @@ APPARMOR
             sudo loginctl enable-linger "$current_user" 2>/dev/null \
                 || warn "could not enable linger; worker may stop when you log out"
         fi
+    fi
+
+    # ── Apply flavor (§9 #46) ────────────────────────────────────────
+    # BEFORE bootstrap/start: [inference] backend is read at daemon start.
+
+    if [ -x "${INSTALL_PREFIX}/bin/auspexai-worker" ]; then
+        apply_flavor "$flavor"
     fi
 
     # ── Bootstrap + start ───────────────────────────────────────────

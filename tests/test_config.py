@@ -128,3 +128,74 @@ class TestInferenceConfig:
         cfg_file.write_text('[inference]\nbackend = "vllm"\n', encoding="utf-8")
         with pytest.raises(ValueError, match="backend must be one of"):
             WorkerConfig.load(config_path=cfg_file, env={})
+
+
+class TestWorkerFlavor:
+    """§9 #46 [worker] flavor — install-profile bookkeeping."""
+
+    def test_defaults_none(self, tmp_path):
+        cfg = WorkerConfig.load(config_path=tmp_path / "missing.toml", env={})
+        assert cfg.flavor is None
+
+    def test_toml_block_parsed(self, tmp_path):
+        cfg_file = tmp_path / "worker.toml"
+        cfg_file.write_text('[worker]\nflavor = "inference"\n', encoding="utf-8")
+        cfg = WorkerConfig.load(config_path=cfg_file, env={})
+        assert cfg.flavor == "inference"
+
+    def test_future_flavor_name_tolerated(self, tmp_path):
+        # Shape-validated, NOT an enum: an old binary must tolerate a flavor
+        # minted after it shipped.
+        cfg_file = tmp_path / "worker.toml"
+        cfg_file.write_text('[worker]\nflavor = "tensor-2"\n', encoding="utf-8")
+        assert WorkerConfig.load(config_path=cfg_file, env={}).flavor == "tensor-2"
+
+    def test_bad_shape_rejected(self, tmp_path):
+        cfg_file = tmp_path / "worker.toml"
+        cfg_file.write_text('[worker]\nflavor = "Not A Flavor!"\n', encoding="utf-8")
+        with pytest.raises(ValueError, match="flavor must match"):
+            WorkerConfig.load(config_path=cfg_file, env={})
+
+    def test_env_override(self, tmp_path):
+        cfg = WorkerConfig.load(
+            config_path=tmp_path / "missing.toml",
+            env={"AUSPEXAI_WORKER_FLAVOR": "full"},
+        )
+        assert cfg.flavor == "full"
+
+
+class TestFlavorAndInferenceSetters:
+    """set_worker_flavor / set_inference_backend — the onramp's config writes."""
+
+    def test_set_worker_flavor_preserves_file(self, tmp_path):
+        from auspexai_worker.config import set_worker_flavor
+
+        cfg_file = tmp_path / "worker.toml"
+        cfg_file.write_text(
+            "# volunteer's comment\n[coordinator]\nurl = 'http://x:1'\n", encoding="utf-8"
+        )
+        assert set_worker_flavor(cfg_file, "inference") == "inference"
+        text = cfg_file.read_text(encoding="utf-8")
+        assert "# volunteer's comment" in text
+        assert 'flavor = "inference"' in text
+        cfg = WorkerConfig.load(config_path=cfg_file, env={})
+        assert cfg.flavor == "inference"
+        assert cfg.coordinator_url == "http://x:1"
+
+    def test_set_worker_flavor_rejects_bad_shape(self, tmp_path):
+        from auspexai_worker.config import set_worker_flavor
+
+        with pytest.raises(ValueError):
+            set_worker_flavor(tmp_path / "worker.toml", "BAD NAME")
+
+    def test_set_inference_backend_round_trips(self, tmp_path):
+        from auspexai_worker.config import set_inference_backend
+
+        cfg_file = tmp_path / "worker.toml"
+        assert set_inference_backend(cfg_file, "ollama") == "ollama"
+        cfg = WorkerConfig.load(config_path=cfg_file, env={})
+        assert cfg.inference_backend == "ollama"
+        # second write replaces in place (no duplicate keys)
+        set_inference_backend(cfg_file, "none")
+        assert WorkerConfig.load(config_path=cfg_file, env={}).inference_backend == "none"
+        assert cfg_file.read_text(encoding="utf-8").count("backend =") == 1

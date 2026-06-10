@@ -11,6 +11,7 @@ Resolution order (low → high precedence):
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -115,6 +116,12 @@ class WorkerConfig:
     dashboard_port: int = 7799
     upgrade_prompt_enabled: bool = True
     upgrade_prompt_threshold: int = 10
+    # [worker] flavor — the install profile the onramp applied (§9 #46:
+    # lean / inference / full / future names). Bookkeeping + upgrade
+    # preservation ONLY: scheduling stays capability-based; nothing gates on
+    # the flavor name. Validated by shape (regex), NOT an enum — an old
+    # worker must tolerate a future flavor name.
+    flavor: str | None = None
 
     @property
     def state_db_path(self) -> Path:
@@ -197,6 +204,7 @@ class WorkerConfig:
             "dashboard_port": 7799,
             "upgrade_prompt_enabled": True,
             "upgrade_prompt_threshold": 10,
+            "flavor": None,
         }
 
         if config_path is not None:
@@ -288,6 +296,9 @@ class WorkerConfig:
                 merged["upgrade_prompt_enabled"] = upgrade_block["enabled"]
             if "threshold" in upgrade_block:
                 merged["upgrade_prompt_threshold"] = upgrade_block["threshold"]
+            worker_block = data.get("worker") or {}
+            if "flavor" in worker_block:
+                merged["flavor"] = worker_block["flavor"]
             # [tenants], [telemetry] are reserved for later milestones;
             # tolerated here without consumption.
 
@@ -317,6 +328,8 @@ class WorkerConfig:
                 "yes",
                 "on",
             )
+        if "AUSPEXAI_WORKER_FLAVOR" in env:
+            merged["flavor"] = env["AUSPEXAI_WORKER_FLAVOR"] or None
 
         return cls(
             coordinator_url=str(merged["coordinator_url"]).rstrip("/"),
@@ -364,6 +377,7 @@ class WorkerConfig:
             dashboard_port=int(merged.get("dashboard_port", 7799)),
             upgrade_prompt_enabled=bool(merged.get("upgrade_prompt_enabled", True)),
             upgrade_prompt_threshold=int(merged.get("upgrade_prompt_threshold", 10)),
+            flavor=_validate_flavor(merged.get("flavor")),
         )
 
 
@@ -382,6 +396,23 @@ def _validate_inference_backend(raw: object) -> str:
     val = str(raw)
     if val not in _INFERENCE_BACKENDS:
         raise ValueError(f"[inference] backend must be one of {_INFERENCE_BACKENDS}, got {val!r}")
+    return val
+
+
+# Shape-validated, NOT an enum: flavors are installer profiles defined in
+# install.sh's data block (§9 #46) — a worker binary must tolerate a flavor
+# name minted after it shipped.
+_FLAVOR_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+
+
+def _validate_flavor(raw: object) -> str | None:
+    if raw is None:
+        return None
+    val = str(raw)
+    if not _FLAVOR_RE.match(val):
+        raise ValueError(
+            f"[worker] flavor must match {_FLAVOR_RE.pattern} (lowercase token), got {val!r}"
+        )
     return val
 
 
@@ -466,3 +497,24 @@ def set_executor_policy(config_path: Path, policy: str, *, auto_acquire: bool | 
         updates["auto_acquire"] = "true" if auto_acquire else "false"
     _upsert_toml_section(config_path, "executor", updates)
     return policy
+
+
+def set_worker_flavor(config_path: Path, name: str) -> str:
+    """Persist `[worker] flavor` to worker.toml (§9 #46). Written by the
+    onramp's apply_flavor step (and `flavor set`) so upgrades can preserve the
+    volunteer's chosen profile. Validates by shape; returns the normalized
+    name."""
+    flavor = _validate_flavor(name)
+    assert flavor is not None
+    _upsert_toml_section(config_path, "worker", {"flavor": f'"{flavor}"'})
+    return flavor
+
+
+def set_inference_backend(config_path: Path, backend: str) -> str:
+    """Persist `[inference] backend` to worker.toml. The flavor choice at the
+    onramp IS the consent for `ollama`. NOT hot-reloaded — the daemon
+    instantiates the backend at start, so a change needs a daemon restart
+    (callers print that)."""
+    backend = _validate_inference_backend(backend)
+    _upsert_toml_section(config_path, "inference", {"backend": f'"{backend}"'})
+    return backend

@@ -130,6 +130,15 @@ class Capabilities:
     # the mode. Absent (an older worker) is read coordinator-side as not-provisioned
     # (conservative — no real work routed until the worker affirmatively declares).
     execute_tenant_code: str = "synthetic"
+    # §9 #46: the install profile the onramp applied (lean/inference/full/...).
+    # Fleet bookkeeping for the console — NOT a routing key (scheduling stays
+    # capability-based). Omitted when unrecorded (pre-flavor installs).
+    flavor: str | None = None
+    # §9 #46/W-S determinism provenance: the serving Ollama's version (probed
+    # once at daemon start when [inference] backend="ollama"). The runtime
+    # version affects inference outputs, so consensus debugging wants it
+    # visible fleet-wide. Omitted when not serving / probe failed.
+    ollama_version: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-serializable shape.
@@ -165,6 +174,10 @@ class Capabilities:
             d.pop("auto_acquire", None)  # compact wire; absent == disabled
         if not self.self_paused:
             d.pop("self_paused", None)  # compact wire; absent == not self-paused
+        if self.flavor is None:
+            d.pop("flavor", None)  # absent == pre-flavor install
+        if self.ollama_version is None:
+            d.pop("ollama_version", None)  # absent == not serving / probe failed
         return d
 
 
@@ -275,6 +288,12 @@ def collect(
     # (model-gated) experiments only to provisioned-mode workers — a synthetic
     # worker echoes, which would pollute consensus. Caller-supplied from config.
     execute_tenant_code: str = "synthetic",
+    # §9 #46: the onramp-applied install profile (caller-supplied from config;
+    # bookkeeping, not routing).
+    flavor: str | None = None,
+    # §9 #46/W-S determinism provenance: serving Ollama version (caller-supplied
+    # from the daemon's start-time probe; None when not serving).
+    ollama_version: str | None = None,
     # Back-compat alias kept for callers that still pass `declared=...`.
     declared: DeclaredCaps | None = None,
 ) -> Capabilities:
@@ -299,4 +318,6 @@ def collect(
         auto_acquire=auto_acquire,
         self_paused=self_paused,
         execute_tenant_code=execute_tenant_code,
+        flavor=flavor,
+        ollama_version=ollama_version,
     )

@@ -144,6 +144,98 @@ class TestLoopTicks:
 
         assert repo.get().trust_tier == 2  # refreshed from the heartbeat response
 
+    def test_heartbeat_caches_latest_release(self, repo: WorkerSelfRepository) -> None:
+        # §9 #46: the response's release announcement is cached locally for the
+        # status/dashboard surfaces (informational; never acted on).
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "worker_id": "wkr-loop-001",
+                    "trust_tier": 0,
+                    "latest_release": {
+                        "version": "0.2.0",
+                        "headline": "Worker flavors + official Ollama",
+                        "release_url": "https://github.com/auspexai/worker/releases/tag/v0.2.0",
+                    },
+                },
+            )
+
+        with CoordinatorClient(
+            base_url="http://test-coord.invalid",
+            signer=_make_signer(),
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            HeartbeatLoop(
+                coordinator=client,
+                repo=repo,
+                worker_id="wkr-loop-001",
+                capability_collector=_make_fake_capabilities,
+                interval_seconds=0.0,
+            ).run(max_ticks=1)
+
+        worker = repo.get()
+        assert worker is not None
+        assert worker.latest_release_version == "0.2.0"
+        assert worker.latest_release_notes == "Worker flavors + official Ollama"
+        assert worker.latest_release_url is not None
+        assert worker.latest_release_at is not None
+
+    def test_heartbeat_without_announcement_leaves_cache_untouched(
+        self, repo: WorkerSelfRepository
+    ) -> None:
+        repo.record_latest_release(
+            version="0.2.0", notes="earlier", url=None, at=datetime(2026, 6, 1, tzinfo=UTC)
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"worker_id": "wkr-loop-001", "trust_tier": 0})
+
+        with CoordinatorClient(
+            base_url="http://test-coord.invalid",
+            signer=_make_signer(),
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            HeartbeatLoop(
+                coordinator=client,
+                repo=repo,
+                worker_id="wkr-loop-001",
+                capability_collector=_make_fake_capabilities,
+                interval_seconds=0.0,
+            ).run(max_ticks=1)
+
+        assert repo.get().latest_release_version == "0.2.0"  # untouched
+
+    def test_malformed_announcement_never_fails_the_heartbeat(
+        self, repo: WorkerSelfRepository
+    ) -> None:
+        # The announcement is display data — a bad block must not break ticks.
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "worker_id": "wkr-loop-001",
+                    "trust_tier": 0,
+                    "latest_release": {"headline": "no version key"},
+                },
+            )
+
+        with CoordinatorClient(
+            base_url="http://test-coord.invalid",
+            signer=_make_signer(),
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            stats = HeartbeatLoop(
+                coordinator=client,
+                repo=repo,
+                worker_id="wkr-loop-001",
+                capability_collector=_make_fake_capabilities,
+                interval_seconds=0.0,
+            ).run(max_ticks=1)
+
+        assert stats.ticks_succeeded == 1
+        assert repo.get().latest_release_version is None
+
 
 class TestLoopStopEvent:
     def test_stop_event_aborts_loop(self, repo: WorkerSelfRepository) -> None:
