@@ -71,9 +71,15 @@ flavor_system() {
     esac
 }
 
-# worker.toml settings applied for this flavor (token = setter shorthand)
+# worker.toml settings applied for this flavor (token = setter shorthand).
+# EVERY flavor states its serving posture explicitly so switching DOWN
+# (e.g. inference → lean) actively disables serving rather than silently
+# inheriting the prior choice — flavors are declarative, not additive,
+# for config. (System installs stay additive: we never uninstall Ollama;
+# the volunteer's machine may use it for other things.)
 flavor_config() {
     case "$1" in
+        lean)           echo "inference-backend=none" ;;
         inference|full) echo "inference-backend=ollama" ;;
     esac
 }
@@ -158,9 +164,14 @@ apply_flavor() {
         for token in $cfg_tokens; do
             case "$token" in
                 inference-backend=*)
-                    "${INSTALL_PREFIX}/bin/auspexai-worker" inference set-backend "${token#inference-backend=}" >/dev/null \
+                    local backend="${token#inference-backend=}"
+                    "${INSTALL_PREFIX}/bin/auspexai-worker" inference set-backend "$backend" >/dev/null \
                         || warn "could not set [inference] backend"
-                    info "Enabled [inference] backend = ${token#inference-backend=}"
+                    if [ "$backend" = "none" ]; then
+                        info "Inference serving disabled ([inference] backend = none)"
+                    else
+                        info "Enabled [inference] backend = ${backend}"
+                    fi
                     ;;
             esac
         done
@@ -170,6 +181,19 @@ apply_flavor() {
     else
         warn "installed worker predates flavor support (< v0.2.0); flavor not recorded"
     fi
+
+    # Down-switch note: system installs are additive (we never uninstall a
+    # third-party tool the volunteer's machine may use) — say so when this
+    # flavor doesn't use an Ollama that's still present.
+    case " $(flavor_system "$flavor") " in
+        *" ollama "*) ;;
+        *)
+            if command -v ollama >/dev/null 2>&1; then
+                info "Note: Ollama remains installed (this flavor just doesn't use it)."
+                info "      Remove it manually if unwanted: https://github.com/ollama/ollama/blob/main/docs/linux.md#uninstall"
+            fi
+            ;;
+    esac
 }
 
 # Resolution: explicit --flavor > recorded in worker.toml (version-independent
