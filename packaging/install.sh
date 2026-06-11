@@ -105,7 +105,18 @@ list_flavors() {
 # this third-party install — the menu text says so plainly.
 install_ollama() {
     if command -v ollama >/dev/null 2>&1; then
-        info "Ollama already installed ($(ollama --version 2>/dev/null || echo 'version unknown')) — skipping"
+        info "Ollama already installed ($(ollama --version 2>/dev/null || echo 'version unknown')) — skipping install"
+        # Installed ≠ serving: a pre-existing Ollama can have a broken/stale
+        # service (seen live: a leftover systemd override with a bad
+        # OLLAMA_MODELS crash-looped `ollama serve` while the binary looked
+        # fine). Verify it actually answers before declaring this flavor good.
+        if curl -fsS -m 3 http://127.0.0.1:11434/api/version >/dev/null 2>&1; then
+            info "Ollama serving: $(curl -fsS -m 3 http://127.0.0.1:11434/api/version 2>/dev/null)"
+        else
+            warn "Ollama is installed but NOT serving on 127.0.0.1:11434 —"
+            warn "inference stays unavailable until it runs. Check the service:"
+            warn "    systemctl status ollama   (and any /etc/systemd/system/ollama.service.d/ overrides)"
+        fi
         return 0
     fi
     info "Installing Ollama (official installer from ollama.com; can be a large download) …"
