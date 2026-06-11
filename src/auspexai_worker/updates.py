@@ -49,7 +49,11 @@ def is_newer_version(latest: str, current: str) -> bool:
     return bool(current_rest) and not latest_rest
 
 
-def upgrade_command(flavor: str | None) -> str:
+def upgrade_command(flavor: str | None) -> str:  # flavor kept for call-site compat
     """The onramp command the volunteer runs to upgrade — printed, NEVER
-    executed by the worker (updates are always the volunteer's election)."""
-    return f"curl -sSL {ONRAMP_URL} | bash -s -- --flavor {flavor or 'lean'}"
+    executed by the worker (updates are always the volunteer's election).
+
+    Deliberately NO --flavor flag: the installer's interactive menu defaults
+    to the recorded flavor (Enter keeps it), making the update the natural
+    moment to switch. An explicit flag here would bypass that choice."""
+    return f"curl -sSL {ONRAMP_URL} | bash"

@@ -50,10 +50,13 @@ class TestIsNewerVersion:
 
 
 class TestUpgradeCommand:
-    def test_flavor_threads_through(self) -> None:
+    def test_no_flavor_flag(self) -> None:
+        # The installer menu defaults to the recorded flavor; an explicit
+        # flag in the copied command would bypass the volunteer's chance
+        # to switch at update time.
         cmd = upgrade_command("inference")
         assert "getworker.auspexai.network" in cmd
-        assert "--flavor inference" in cmd
+        assert "--flavor" not in cmd
 
-    def test_none_defaults_to_lean(self) -> None:
-        assert "--flavor lean" in upgrade_command(None)
+    def test_none_flavor_same_command(self) -> None:
+        assert upgrade_command(None) == upgrade_command("inference")

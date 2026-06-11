@@ -101,7 +101,8 @@ class TestStatusUpdateBlock:
         assert r.exit_code == 0, r.output
         assert "update available: v99.0.0" in r.output
         assert "Worker flavors + official Ollama" in r.output
-        assert "--flavor inference" in r.output  # the printed (never run) command
+        assert "curl -sSL" in r.output  # the printed (never run) command
+        assert "--flavor" not in r.output  # installer menu owns the choice now
         assert "never automatic" in r.output
         assert "flavor:      inference" in r.output
 
