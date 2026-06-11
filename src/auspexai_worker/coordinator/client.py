@@ -477,6 +477,7 @@ class CoordinatorClient:
         exit_code: int,
         payload: dict[str, Any],
         worker_signature: str,
+        assignment_id: str | None = None,
     ) -> ResultSubmissionResponse:
         """POST .../result. Worker-credentialed.
 
@@ -497,6 +498,11 @@ class CoordinatorClient:
             "payload": payload,
             "worker_signature": worker_signature,
         }
+        # §9 #46 D6 fix: unit_ids are tenant-chosen and can collide across
+        # experiments — the exact assignment_id removes the coordinator-side
+        # resolution ambiguity. Optional: pre-v0.1.24 coordinators ignore it.
+        if assignment_id is not None:
+            body["assignment_id"] = assignment_id
         response = self._signed_request(
             method="POST",
             path=f"/api/v0/workers/{worker_id}/assignments/{unit_id}/result",
@@ -548,6 +554,7 @@ class CoordinatorClient:
         unit_id: str,
         kind: str,
         reason: str,
+        assignment_id: str | None = None,
     ) -> RefuseResponse:
         """POST .../refuse. Worker-credentialed.
 
@@ -567,10 +574,14 @@ class CoordinatorClient:
             raise CoordinatorError(
                 "refuse_assignment requires a signer; CoordinatorClient was constructed without one"
             )
+        body: dict[str, Any] = {"kind": kind, "reason": reason}
+        if assignment_id is not None:
+            # §9 #46 D6 fix: exact-match disambiguation (see submit_result).
+            body["assignment_id"] = assignment_id
         response = self._signed_request(
             method="POST",
             path=f"/api/v0/workers/{worker_id}/assignments/{unit_id}/refuse",
-            json_body={"kind": kind, "reason": reason},
+            json_body=body,
         )
         if response.status_code == 200:
             return _parse_refuse(response.json())

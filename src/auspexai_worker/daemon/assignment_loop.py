@@ -368,6 +368,9 @@ class AssignmentPoller:
                 unit_id=response.work_unit.unit_id,
                 kind=kind,
                 reason=reason,
+                # §9 #46 D6 fix: exact assignment disambiguation (unit_ids are
+                # tenant-chosen and can collide across experiments).
+                assignment_id=response.assignment_id,
             )
             self._stats.refuse_calls_succeeded += 1
         except (AssignmentNotFoundError, AssignmentAlreadyResolvedError) as exc:
@@ -413,6 +416,7 @@ class AssignmentPoller:
                 unit_id=unit_id,
                 kind=decision.kind.value,
                 reason=decision.reason or "",
+                assignment_id=response.assignment_id,  # §9 #46 D6 disambiguation
             )
             self._stats.refuse_calls_succeeded += 1
         except (AssignmentNotFoundError, AssignmentAlreadyResolvedError) as exc:

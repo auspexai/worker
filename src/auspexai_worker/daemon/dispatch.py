@@ -530,7 +530,7 @@ class RunnerDispatcher:
                 # volunteer's contribution and should be preserved until
                 # explicitly cleared.
                 self._pending.mark_attempt(
-                    unit_id=pending.unit_id,
+                    assignment_id=pending.assignment_id,
                     failure_kind="terminal",
                     failure_reason=(
                         f"exceeded max_pending_attempts={self._max_pending_attempts}; "
@@ -554,7 +554,7 @@ class RunnerDispatcher:
                 # Shouldn't happen — pending_submissions.payload_json comes
                 # from json.dumps. Treat as terminal corruption.
                 self._pending.mark_attempt(
-                    unit_id=pending.unit_id,
+                    assignment_id=pending.assignment_id,
                     failure_kind="terminal",
                     failure_reason=f"payload_json corrupted: {exc}",
                     attempted_at=datetime.now(UTC),
@@ -583,7 +583,7 @@ class RunnerDispatcher:
         self,
         *,
         unit_id: str,
-        assignment_id: str | None,
+        assignment_id: str,
         completed_at: str,
         exit_code: int,
         payload: dict,
@@ -611,6 +611,9 @@ class RunnerDispatcher:
                 exit_code=exit_code,
                 payload=payload,
                 worker_signature=worker_signature,
+                # §9 #46 D6 fix: exact assignment disambiguation — unit_ids
+                # are tenant-chosen and can collide across experiments.
+                assignment_id=assignment_id,
             )
         except ResultAlreadySubmittedError as exc:
             # The coord already has this result. Use the existing_result_id
@@ -625,7 +628,7 @@ class RunnerDispatcher:
                     unit_id,
                 )
                 self._pending.mark_attempt(
-                    unit_id=unit_id,
+                    assignment_id=assignment_id,
                     failure_kind="terminal",
                     failure_reason=(
                         "409 result_already_submitted but coord did not return "
@@ -653,7 +656,7 @@ class RunnerDispatcher:
                 coord_replication_target=None,
                 payload_json=payload_json,
             )
-            self._pending.remove(unit_id)
+            self._pending.remove(assignment_id)
             return DispatchOutcome(
                 kind=DispatchOutcomeKind.SUBMITTED,
                 reason=f"reconciled-via-409 (existing_result_id={exc.existing_result_id})",
@@ -674,7 +677,7 @@ class RunnerDispatcher:
                 type(exc).__name__,
             )
             self._pending.mark_attempt(
-                unit_id=unit_id,
+                assignment_id=assignment_id,
                 failure_kind="terminal",
                 failure_reason=f"{type(exc).__name__}: {exc}",
                 attempted_at=datetime.now(UTC),
@@ -693,7 +696,7 @@ class RunnerDispatcher:
                 exc,
             )
             self._pending.mark_attempt(
-                unit_id=unit_id,
+                assignment_id=assignment_id,
                 failure_kind="transient",
                 failure_reason=str(exc),
                 attempted_at=datetime.now(UTC),
@@ -715,7 +718,7 @@ class RunnerDispatcher:
             coord_replication_target=submission.replication_target,
             payload_json=payload_json,
         )
-        self._pending.remove(unit_id)
+        self._pending.remove(assignment_id)
 
         logger.info(
             "submitted result for unit %s (result_id=%s, unit_status=%s, completions=%d/%d)",

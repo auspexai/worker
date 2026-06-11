@@ -104,6 +104,10 @@ class WorkerConfig:
     # signal that this worker hosts inference tenants).
     inference_backend: str = "none"
     inference_ollama_url: str = "http://127.0.0.1:11434"
+    # §9 #46 serving policy: Ollama keep_alive sent on every brokered chat.
+    # None = Ollama default (~5m). "0" = unload-always (Sentinel's posture for
+    # reload/wedging stability); "30m"/"24h" = pin warm (memory for latency).
+    inference_keep_alive: str | None = None
     # NB: per-tenant §5.14 consent (allow/deny lists) is owned by the DB-backed
     # TenantListRepository + the `auspexai-worker tenant` CLI, enforced at the
     # poller's accept-time gate — NOT duplicated here as config.
@@ -283,6 +287,8 @@ class WorkerConfig:
                 merged["inference_backend"] = inference_block["backend"]
             if "ollama_url" in inference_block:
                 merged["inference_ollama_url"] = inference_block["ollama_url"]
+            if "keep_alive" in inference_block:
+                merged["inference_keep_alive"] = inference_block["keep_alive"]
             dashboard_block = data.get("dashboard") or {}
             if "enabled" in dashboard_block:
                 merged["dashboard_enabled"] = dashboard_block["enabled"]
@@ -372,6 +378,11 @@ class WorkerConfig:
             inference_ollama_url=str(
                 merged.get("inference_ollama_url", "http://127.0.0.1:11434")
             ).rstrip("/"),
+            inference_keep_alive=(
+                None
+                if merged.get("inference_keep_alive") is None
+                else str(merged["inference_keep_alive"])
+            ),
             dashboard_enabled=bool(merged.get("dashboard_enabled", True)),
             dashboard_host=str(merged.get("dashboard_host", "127.0.0.1")),
             dashboard_port=int(merged.get("dashboard_port", 7799)),

@@ -596,7 +596,7 @@ class PendingSubmissionRepository:
         self,
         *,
         unit_id: str,
-        assignment_id: str | None,
+        assignment_id: str,
         completed_at: str,
         exit_code: int,
         payload_json: str,
@@ -605,10 +605,10 @@ class PendingSubmissionRepository:
     ) -> None:
         """Add a Result to the write-before-submit queue.
 
-        Raises an exception if a pending row already exists for this unit_id
-        (the UNIQUE constraint should never be hit in normal operation since
-        the M6d scheduler creates at most one (unit_id, worker_id) assignment
-        per worker — this guards against logic bugs).
+        Keyed by assignment_id (§9 #46 D6 fix, migration 0008): unit_ids are
+        tenant-chosen and collide across experiments; the assignment_id is
+        coordinator-unique. Raises on a duplicate assignment_id (one result
+        per assignment — guards against logic bugs).
         """
         with self._db.transaction() as conn:
             conn.execute(
@@ -628,9 +628,18 @@ class PendingSubmissionRepository:
             )
 
     def get_by_unit(self, unit_id: str) -> PendingSubmission | None:
+        """Display/diagnostic lookup ONLY (unit_ids can collide across
+        experiments — never use for integrity decisions; see get_by_assignment)."""
         row = self._db.connection.execute(
             f"SELECT {_PENDING_COLUMNS} FROM pending_submissions WHERE unit_id = ?",
             (unit_id,),
+        ).fetchone()
+        return _row_to_pending(row) if row is not None else None
+
+    def get_by_assignment(self, assignment_id: str) -> PendingSubmission | None:
+        row = self._db.connection.execute(
+            f"SELECT {_PENDING_COLUMNS} FROM pending_submissions WHERE assignment_id = ?",
+            (assignment_id,),
         ).fetchone()
         return _row_to_pending(row) if row is not None else None
 
@@ -659,12 +668,13 @@ class PendingSubmissionRepository:
     def mark_attempt(
         self,
         *,
-        unit_id: str,
+        assignment_id: str,
         failure_kind: str,
         failure_reason: str,
         attempted_at: datetime,
     ) -> None:
-        """Record an attempt that left the row pending — transient or terminal."""
+        """Record an attempt that left the row pending — transient or terminal.
+        Keyed by assignment_id (§9 #46 — unit_ids collide across experiments)."""
         if failure_kind not in ("transient", "terminal"):
             raise ValueError(
                 f"failure_kind must be 'transient' or 'terminal', got {failure_kind!r}"
@@ -676,17 +686,18 @@ class PendingSubmissionRepository:
                 "attempt_count = attempt_count + 1, "
                 "failure_kind = ?, "
                 "failure_reason = ? "
-                "WHERE unit_id = ?",
-                (attempted_at.isoformat(), failure_kind, failure_reason, unit_id),
+                "WHERE assignment_id = ?",
+                (attempted_at.isoformat(), failure_kind, failure_reason, assignment_id),
             )
 
-    def remove(self, unit_id: str) -> None:
-        """Delete a pending row. Used after the row has been drained to
-        submitted_results (success or 409 idempotent path)."""
+    def remove(self, assignment_id: str) -> None:
+        """Delete a pending row by its coordinator-unique assignment_id. Used
+        after the row has been drained to submitted_results (success or 409
+        idempotent path)."""
         with self._db.transaction() as conn:
             conn.execute(
-                "DELETE FROM pending_submissions WHERE unit_id = ?",
-                (unit_id,),
+                "DELETE FROM pending_submissions WHERE assignment_id = ?",
+                (assignment_id,),
             )
 
 

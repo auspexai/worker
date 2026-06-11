@@ -871,7 +871,9 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
         if config.inference_backend == "ollama":
             from .inference import ModelServer, OllamaBackend, open_unit_session
 
-            _inference_backend = OllamaBackend(config.inference_ollama_url)
+            _inference_backend = OllamaBackend(
+                config.inference_ollama_url, keep_alive=config.inference_keep_alive
+            )
             model_server = ModelServer(ModelStore(config.models_store_path), _inference_backend)
             # §9 #46 determinism provenance: probe the serving Ollama's version
             # ONCE at daemon start (no per-tick HTTP); declared in heartbeats.

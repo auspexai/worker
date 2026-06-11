@@ -63,7 +63,11 @@ class TestPendingSubmissionRepository:
         assert row.attempt_count == 0
         assert row.failure_kind is None
 
-    def test_queue_duplicate_unit_id_raises(self, db: Database) -> None:
+    def test_queue_duplicate_assignment_id_raises(self, db: Database) -> None:
+        # §9 #46 (migration 0008): uniqueness moved unit_id → assignment_id.
+        # Same unit_id under a DIFFERENT assignment is allowed (tenant-chosen
+        # unit names collide across experiments); the same assignment twice
+        # is the logic-bug guard.
         repo = PendingSubmissionRepository(db)
         repo.queue(
             unit_id="u-1",
@@ -74,11 +78,20 @@ class TestPendingSubmissionRepository:
             worker_signature="sig",
             worker_pubkey="a" * 64,
         )
+        repo.queue(  # colliding unit name, different experiment's assignment: OK
+            unit_id="u-1",
+            assignment_id="asg-2",
+            completed_at="2026-05-22T11:00:00",
+            exit_code=0,
+            payload_json="{}",
+            worker_signature="sig",
+            worker_pubkey="a" * 64,
+        )
         with pytest.raises(Exception):  # noqa: B017 — sqlite IntegrityError or wrapped
             repo.queue(
-                unit_id="u-1",
-                assignment_id="asg-2",
-                completed_at="2026-05-22T11:00:00",
+                unit_id="u-other",
+                assignment_id="asg-1",
+                completed_at="2026-05-22T12:00:00",
                 exit_code=0,
                 payload_json="{}",
                 worker_signature="sig",
@@ -98,7 +111,7 @@ class TestPendingSubmissionRepository:
                 worker_pubkey="a" * 64,
             )
         repo.mark_attempt(
-            unit_id="u-1",
+            assignment_id="asg-1",
             failure_kind="terminal",
             failure_reason="some 4xx",
             attempted_at=datetime.now(UTC),
@@ -120,7 +133,7 @@ class TestPendingSubmissionRepository:
         )
         for _ in range(3):
             repo.mark_attempt(
-                unit_id="u-1",
+                assignment_id="asg-1",
                 failure_kind="transient",
                 failure_reason="net error",
                 attempted_at=datetime.now(UTC),
@@ -134,7 +147,7 @@ class TestPendingSubmissionRepository:
         repo = PendingSubmissionRepository(db)
         repo.queue(
             unit_id="u-1",
-            assignment_id=None,
+            assignment_id="asg-auto-1",
             completed_at="2026-05-22T10:00:00",
             exit_code=0,
             payload_json="{}",
@@ -143,7 +156,7 @@ class TestPendingSubmissionRepository:
         )
         with pytest.raises(ValueError, match="must be 'transient' or 'terminal'"):
             repo.mark_attempt(
-                unit_id="u-1",
+                assignment_id="asg-1",
                 failure_kind="bogus",
                 failure_reason="x",
                 attempted_at=datetime.now(UTC),
@@ -153,22 +166,23 @@ class TestPendingSubmissionRepository:
         repo = PendingSubmissionRepository(db)
         repo.queue(
             unit_id="u-1",
-            assignment_id=None,
+            assignment_id="asg-auto-2",
             completed_at="2026-05-22T10:00:00",
             exit_code=0,
             payload_json="{}",
             worker_signature="sig",
             worker_pubkey="a" * 64,
         )
-        repo.remove("u-1")
+        repo.remove("asg-auto-2")
         assert repo.get_by_unit("u-1") is None
+        assert repo.get_by_assignment("asg-auto-2") is None
 
     def test_list_retryable_oldest_first(self, db: Database) -> None:
         repo = PendingSubmissionRepository(db)
         for i in range(5):
             repo.queue(
                 unit_id=f"u-{i}",
-                assignment_id=None,
+                assignment_id=f"asg-{i}",
                 completed_at="2026-05-22T10:00:00",
                 exit_code=0,
                 payload_json="{}",
@@ -501,7 +515,7 @@ class TestRetryPending:
         # Bump attempt_count to the cap.
         for _ in range(3):
             pending_repo.mark_attempt(
-                unit_id="u-cap",
+                assignment_id="asg-cap",
                 failure_kind="transient",
                 failure_reason="net err",
                 attempted_at=datetime.now(UTC),

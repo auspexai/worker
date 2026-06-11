@@ -199,3 +199,15 @@ class TestFlavorAndInferenceSetters:
         set_inference_backend(cfg_file, "none")
         assert WorkerConfig.load(config_path=cfg_file, env={}).inference_backend == "none"
         assert cfg_file.read_text(encoding="utf-8").count("backend =") == 1
+
+
+class TestInferenceKeepAlive:
+    def test_default_none(self, tmp_path):
+        cfg = WorkerConfig.load(config_path=tmp_path / "missing.toml", env={})
+        assert cfg.inference_keep_alive is None
+
+    def test_parsed_from_toml(self, tmp_path):
+        cfg_file = tmp_path / "worker.toml"
+        cfg_file.write_text('[inference]\nkeep_alive = "0"\n', encoding="utf-8")
+        cfg = WorkerConfig.load(config_path=cfg_file, env={})
+        assert cfg.inference_keep_alive == "0"

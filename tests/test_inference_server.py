@@ -192,3 +192,32 @@ def test_ollama_version_probe_tolerates_failure():
 
     # §9 #46: provenance probe must never raise — None when unreachable.
     assert OllamaBackend(transport=httpx.MockTransport(handler)).version() is None
+
+
+def test_ollama_chat_sends_keep_alive_when_configured():
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        seen["body"] = _json.loads(request.read())
+        return httpx.Response(200, json={"message": {"role": "assistant", "content": "x"}})
+
+    backend = OllamaBackend(transport=httpx.MockTransport(handler), keep_alive="0")
+    backend.chat("h", [{"role": "user", "content": "x"}], {})
+    assert seen["body"]["keep_alive"] == "0"  # Sentinel unload-always posture
+
+
+def test_ollama_chat_omits_keep_alive_by_default():
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        seen["body"] = _json.loads(request.read())
+        return httpx.Response(200, json={"message": {"role": "assistant", "content": "x"}})
+
+    OllamaBackend(transport=httpx.MockTransport(handler)).chat(
+        "h", [{"role": "user", "content": "x"}], {}
+    )
+    assert "keep_alive" not in seen["body"]  # Ollama default applies

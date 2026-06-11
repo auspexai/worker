@@ -68,11 +68,19 @@ class OllamaBackend:
         ollama_bin: str = "ollama",
         cli_runner=subprocess.run,
         transport: httpx.BaseTransport | None = None,
+        keep_alive: str | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self._ollama_bin = ollama_bin
         self._cli_runner = cli_runner
         self._transport = transport
+        # §9 #46 serving policy: how long Ollama keeps the model loaded after
+        # a request. None = Ollama's default (~5m). "0" = Sentinel's
+        # unload-always posture (their fix for model release/reload wedging —
+        # sentinel run_batch.py/worker.py send keep_alive:0); a long value
+        # ("30m"/"24h") trades memory for warm latency (D6 measured ~7s
+        # reload per idle gap on a Jetson 1B-f16).
+        self._keep_alive = keep_alive
 
     # ---- HTTP plumbing ----------------------------------------------------
 
@@ -156,6 +164,12 @@ class OllamaBackend:
         (the broker shapes the wire reply)."""
         return self._post(
             "/api/chat",
-            {"model": handle, "messages": messages, "stream": False, "options": options},
+            {
+                "model": handle,
+                "messages": messages,
+                "stream": False,
+                "options": options,
+                **({"keep_alive": self._keep_alive} if self._keep_alive is not None else {}),
+            },
             timeout=CHAT_TIMEOUT_SECONDS,
         )
