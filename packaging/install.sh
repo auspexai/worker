@@ -113,17 +113,13 @@ install_ollama() {
         if curl -fsS -m 3 http://127.0.0.1:11434/api/version >/dev/null 2>&1; then
             info "Ollama serving: $(curl -fsS -m 3 http://127.0.0.1:11434/api/version 2>/dev/null)"
         else
-            warn "Ollama is installed but NOT serving on 127.0.0.1:11434 —"
-            warn "inference stays unavailable until it runs. Check the service:"
-            warn "    systemctl status ollama   (and any /etc/systemd/system/ollama.service.d/ overrides)"
+            flavor_issue "Ollama is installed but NOT serving on 127.0.0.1:11434 — inference stays unavailable until it runs. Check: systemctl status ollama (and any /etc/systemd/system/ollama.service.d/ overrides)"
         fi
         return 0
     fi
     info "Installing Ollama (official installer from ollama.com; can be a large download) …"
     if ! curl -fsSL https://ollama.com/install.sh | sh; then
-        warn "Ollama install failed — the worker will still install, but inference"
-        warn "serving stays unavailable until Ollama is present. Re-run this"
-        warn "installer (same --flavor) to retry."
+        flavor_issue "Ollama install failed — inference serving stays unavailable until Ollama is present. Re-run this installer (same flavor) to retry."
         return 0
     fi
     # Surface the installed version (determinism provenance; the daemon
@@ -137,7 +133,19 @@ install_ollama() {
         tries=$((tries + 1))
         sleep 2
     done
-    warn "Ollama installed but not reachable on 127.0.0.1:11434 yet — it may still be starting."
+    flavor_issue "Ollama installed but not reachable on 127.0.0.1:11434 yet — it may still be starting. Verify later: curl 127.0.0.1:11434/api/version"
+}
+
+# Issues hit while applying the flavor (pip/system/config steps). Each is
+# warned inline when it happens, but inline warns scroll away in a long
+# install — the footer re-prints them as one loud summary so the volunteer
+# can't end up with a silently half-applied flavor (seen live: a broken
+# pre-existing Ollama service hid behind a clean-looking install).
+FLAVOR_ISSUES=""
+
+flavor_issue() {
+    warn "$1"
+    FLAVOR_ISSUES="${FLAVOR_ISSUES}  - $1\n"
 }
 
 # Apply the chosen flavor AFTER the package install, BEFORE bootstrap/start
@@ -154,9 +162,9 @@ apply_flavor() {
             info "Installing flavor pip packages: ${pip_pkgs} …"
             # shellcheck disable=SC2086 — word-splitting the package list is intended
             sudo "${INSTALL_PREFIX}/bin/pip" install -q $pip_pkgs \
-                || warn "could not install ${pip_pkgs}; some flavor features may be unavailable"
+                || flavor_issue "could not install pip packages (${pip_pkgs}); some flavor features may be unavailable"
         else
-            warn "pip not found in ${INSTALL_PREFIX}; install ${pip_pkgs} manually"
+            flavor_issue "pip not found in ${INSTALL_PREFIX}; install ${pip_pkgs} manually"
         fi
     fi
 
@@ -177,7 +185,7 @@ apply_flavor() {
                 inference-backend=*)
                     local backend="${token#inference-backend=}"
                     "${INSTALL_PREFIX}/bin/auspexai-worker" inference set-backend "$backend" >/dev/null \
-                        || warn "could not set [inference] backend"
+                        || flavor_issue "could not set [inference] backend = ${backend} in worker.toml"
                     if [ "$backend" = "none" ]; then
                         info "Inference serving disabled ([inference] backend = none)"
                     else
@@ -188,7 +196,7 @@ apply_flavor() {
         done
         # Always record the flavor (lean included) so upgrades preserve it.
         "${INSTALL_PREFIX}/bin/auspexai-worker" flavor set "$flavor" >/dev/null \
-            || warn "could not record the flavor in worker.toml"
+            || flavor_issue "could not record the flavor in worker.toml (upgrades won't remember it)"
     else
         warn "installed worker predates flavor support (< v0.2.0); flavor not recorded"
     fi
@@ -207,51 +215,76 @@ apply_flavor() {
     esac
 }
 
-# Resolution: explicit --flavor > recorded in worker.toml (version-independent
-# grep — works even when the OLD binary predates \`flavor show\`) > interactive
-# menu > lean.
+# Resolution: explicit --flavor > interactive menu (the volunteer's PRIOR
+# choice, recorded in worker.toml, is the default — Enter keeps it; an
+# update is also the natural moment to switch) > recorded silently when
+# there's no tty > lean. The recorded-flavor grep is version-independent —
+# works even when the OLD binary predates \`flavor show\`.
 resolve_flavor() {
     local requested="$1"
     if [ -n "$requested" ]; then
         echo "$requested"
         return
     fi
+    local recorded=""
     local toml="$HOME/.config/auspexai-worker/worker.toml"
     if [ -f "$toml" ]; then
-        local recorded
         recorded=$(grep -E '^[[:space:]]*flavor[[:space:]]*=' "$toml" 2>/dev/null \
             | head -1 | sed 's/.*=[[:space:]]*"\{0,1\}//;s/"\{0,1\}[[:space:]]*$//') || true
-        if [ -n "$recorded" ] && flavor_valid "$recorded"; then
-            info "Keeping flavor: ${recorded} (recorded in worker.toml; pass --flavor to change)" >&2
-            echo "$recorded"
-            return
+        if [ -n "$recorded" ] && ! flavor_valid "$recorded"; then
+            recorded=""
         fi
     fi
-    if [ -r /dev/tty ]; then
-        {
-            echo ""
-            echo "Choose an install flavor:"
-            local i=1
-            for f in $FLAVOR_NAMES; do
-                printf '  %d) %-10s %s\n' "$i" "$f" "$(flavor_desc "$f")"
-                i=$((i + 1))
-            done
-            printf 'Flavor [1]: '
-        } >&2
-        local reply
-        read -r reply </dev/tty
-        local n=1
-        for f in $FLAVOR_NAMES; do
-            if [ "$reply" = "$n" ] || [ "$reply" = "$f" ]; then
-                echo "$f"
-                return
-            fi
-            n=$((n + 1))
-        done
-        echo "lean"
+    # [ -r /dev/tty ] passes on permission bits even with NO controlling
+    # terminal (ENXIO at open) — actually try opening it, or the read below
+    # would abort the whole install under set -e.
+    if ! (exec </dev/tty) 2>/dev/null; then
+        # Non-interactive (no tty): keep the prior choice; first install
+        # defaults to lean.
+        if [ -n "$recorded" ]; then
+            info "Keeping flavor: ${recorded} (recorded in worker.toml; pass --flavor to change)" >&2
+            echo "$recorded"
+        else
+            echo "lean"
+        fi
         return
     fi
-    echo "lean"
+    # Interactive: always offer the menu. Default = the prior choice when
+    # one is recorded (Enter keeps it), else lean.
+    local default_flavor="${recorded:-lean}"
+    {
+        echo ""
+        if [ -n "$recorded" ]; then
+            echo "Install flavor (Enter keeps your current choice):"
+        else
+            echo "Choose an install flavor:"
+        fi
+        local i=1
+        for f in $FLAVOR_NAMES; do
+            if [ "$f" = "$default_flavor" ] && [ -n "$recorded" ]; then
+                printf '  %d) %-10s %s  (current)\n' "$i" "$f" "$(flavor_desc "$f")"
+            else
+                printf '  %d) %-10s %s\n' "$i" "$f" "$(flavor_desc "$f")"
+            fi
+            i=$((i + 1))
+        done
+        printf 'Flavor [%s]: ' "$default_flavor"
+    } >&2
+    local reply
+    read -r reply </dev/tty || reply=""
+    if [ -z "$reply" ]; then
+        echo "$default_flavor"
+        return
+    fi
+    local n=1
+    for f in $FLAVOR_NAMES; do
+        if [ "$reply" = "$n" ] || [ "$reply" = "$f" ]; then
+            echo "$f"
+            return
+        fi
+        n=$((n + 1))
+    done
+    echo "$default_flavor"
 }
 
 # ── Detect Python ────────────────────────────────────────────────────
@@ -768,7 +801,19 @@ Your worker also has a local web dashboard (while the daemon is running):
   http://127.0.0.1:7799          # status, activity, receipts, models, settings
                                  # local-only; never exposed to the network
 
+Changing flavor later: re-run this installer — the menu defaults to your
+current choice (Enter keeps it) — or pass --flavor <name> explicitly.
+See --list-flavors for what each provides.
+
 EOF
+
+    if [ -n "$FLAVOR_ISSUES" ]; then
+        echo ""
+        warn "FLAVOR SETUP ISSUES — the worker installed, but flavor '${flavor}' is incomplete:"
+        # shellcheck disable=SC2059 — FLAVOR_ISSUES embeds \n separators by design
+        printf "$FLAVOR_ISSUES" >&2
+        warn "Re-running this installer (same flavor) retries these steps."
+    fi
 }
 
 main "$@"
