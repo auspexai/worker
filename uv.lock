@@ -35,8 +35,8 @@ wheels = [
 
 [[package]]
 name = "auspexai-tenant"
-version = "0.5.2"
-source = { git = "https://github.com/auspexai/tenant-sdk.git?rev=v0.5.2#b4b79135cc4cdf277d66e98c47528b664750d3a2" }
+version = "0.5.6"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cbor2" },
     { name = "click" },
@@ -44,6 +44,10 @@ dependencies = [
     { name = "email-validator" },
     { name = "httpx" },
     { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f9/f9/13d590abf84a6a29eb905348501fb76ddff69d9b8884d98b2dd70015aa84/auspexai_tenant-0.5.6.tar.gz", hash = "sha256:a62481a19e309f8fa8bcccd562318abefff0f7a05c18229d7abea686e3a4dd2b", size = 128266, upload-time = "2026-06-12T17:18:56.819Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/89/13/f5f00753e9e00002d58fc9eaf05bc47d84b595108cc2a91f4c73e8229012/auspexai_tenant-0.5.6-py3-none-any.whl", hash = "sha256:2a22f8b59aab4e8ef5a3a3ec9976c166dc51791cdb3e2a5390c1cf413c99f560", size = 100188, upload-time = "2026-06-12T17:18:55.337Z" },
 ]
 
 [[package]]
@@ -77,7 +81,7 @@ secret-service = [
 
 [package.metadata]
 requires-dist = [
-    { name = "auspexai-tenant", marker = "extra == 'dev'", git = "https://github.com/auspexai/tenant-sdk.git?rev=v0.5.2" },
+    { name = "auspexai-tenant", marker = "extra == 'dev'", specifier = "==0.5.6" },
     { name = "click", specifier = ">=8.1" },
     { name = "cryptography", specifier = ">=42" },
     { name = "fastapi", specifier = ">=0.115" },
