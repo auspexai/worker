@@ -35,6 +35,13 @@ dev = [
     "pytest-cov>=4.1",
     "respx>=0.21",
     "ruff==0.15.15",
+    # §9 #47 harness-seam test: the REAL SDK ExecutorHarness driven through the
+    # worker dispatch path (the 2026-06-08 audit's critical-finding seam —
+    # fixture executors validate our BELIEFS about the SDK contract; this dep
+    # lets one test validate the contract itself). Pinned to the released tag;
+    # bump deliberately when the SDK releases. Dev-only: the worker RUNTIME
+    # never depends on tenant-sdk.
+    "auspexai-tenant @ git+https://github.com/auspexai/tenant-sdk.git@v0.5.0",
     # Test env pinned to current fastapi/starlette. starlette 1.x's TestClient
     # emits a DeprecationWarning that filterwarnings=error would escalate to a
     # collection error — handled by a targeted ignore in [tool.pytest.ini_options]
@@ -70,6 +77,11 @@ build-backend = "hatchling.build"
 # from a tag (e.g. v0.1.8) → clean version; builds between tags get a .devN
 # suffix. __init__ already reads it from installed metadata. See
 # version_provenance.md (V-M1).
+[tool.hatch.metadata]
+# Needed only for the DEV-extra git reference to tenant-sdk (the §9 #47
+# harness-seam test); the runtime dependency set has no direct references.
+allow-direct-references = true
+
 [tool.hatch.version]
 source = "vcs"
 
