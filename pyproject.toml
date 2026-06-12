@@ -41,7 +41,7 @@ dev = [
     # lets one test validate the contract itself). Pinned to the released tag;
     # bump deliberately when the SDK releases. Dev-only: the worker RUNTIME
     # never depends on tenant-sdk.
-    "auspexai-tenant @ git+https://github.com/auspexai/tenant-sdk.git@v0.5.0",
+    "auspexai-tenant @ git+https://github.com/auspexai/tenant-sdk.git@v0.5.2",
     # Test env pinned to current fastapi/starlette. starlette 1.x's TestClient
     # emits a DeprecationWarning that filterwarnings=error would escalate to a
     # collection error — handled by a targeted ignore in [tool.pytest.ini_options]

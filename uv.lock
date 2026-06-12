@@ -35,8 +35,8 @@ wheels = [
 
 [[package]]
 name = "auspexai-tenant"
-version = "0.5.0"
-source = { git = "https://github.com/auspexai/tenant-sdk.git?rev=v0.5.0#d538d11ec46d91bb41f261906d038f74a05e9651" }
+version = "0.5.2"
+source = { git = "https://github.com/auspexai/tenant-sdk.git?rev=v0.5.2#b4b79135cc4cdf277d66e98c47528b664750d3a2" }
 dependencies = [
     { name = "cbor2" },
     { name = "click" },
@@ -77,7 +77,7 @@ secret-service = [
 
 [package.metadata]
 requires-dist = [
-    { name = "auspexai-tenant", marker = "extra == 'dev'", git = "https://github.com/auspexai/tenant-sdk.git?rev=v0.5.0" },
+    { name = "auspexai-tenant", marker = "extra == 'dev'", git = "https://github.com/auspexai/tenant-sdk.git?rev=v0.5.2" },
     { name = "click", specifier = ">=8.1" },
     { name = "cryptography", specifier = ">=42" },
     { name = "fastapi", specifier = ">=0.115" },
