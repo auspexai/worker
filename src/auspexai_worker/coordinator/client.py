@@ -472,19 +472,24 @@ class CoordinatorClient:
             f"get_prestage: unexpected status {response.status_code}: {response.text[:500]}"
         )
 
-    # ---- /packages/{digest} (signed) — #40a executor auto-fetch ---------
+    # ---- /packages/by-manifest/{manifest_sha256} (signed) — #40a auto-fetch
 
     def fetch_package(self, *, digest: str) -> bytes:
-        """GET /api/v0/packages/{digest}. Worker-credentialed (the worker's
-        standard RFC 9421 request signature).
+        """GET /api/v0/packages/by-manifest/{manifest_sha256}. Worker-
+        credentialed (the worker's standard RFC 9421 request signature).
 
-        Returns the executor package archive (tar.gz bytes) for a manifest
-        digest — the worker leg of #40a coordinator-served provisioning. The
-        caller (`provisioning.install_fetched_package`) extracts and verifies
-        it before anything is installed; this method only moves bytes.
+        `digest` is the MANIFEST hash from the dispatch wire — the only key
+        the worker holds pre-fetch (the package-digest pin lives inside the
+        manifest, which arrives WITH the package). The coordinator resolves
+        the stored manifest's `executor.package_sha256` and serves that blob.
+        Fetching by bare package digest was the first live #40a failure mode:
+        the worker only ever knows the manifest hash at dispatch. Trust is
+        unchanged — the caller (`provisioning.install_fetched_package`)
+        re-verifies BOTH the manifest hash and the package digest after
+        extraction; this method only moves bytes.
 
         Raises:
-            PackageNotFoundError: 404 — no package for this digest.
+            PackageNotFoundError: 404 — no manifest/pin/blob for this hash.
             UnauthorizedError: 401/403 on signature/credential failure.
             CoordinatorError: transport errors / unexpected statuses.
         """
@@ -494,7 +499,7 @@ class CoordinatorClient:
             )
         response = self._signed_request(
             method="GET",
-            path=f"/api/v0/packages/{digest.lower()}",
+            path=f"/api/v0/packages/by-manifest/{digest.lower()}",
             json_body=None,
         )
         if response.status_code == 200:

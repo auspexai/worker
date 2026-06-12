@@ -1,7 +1,7 @@
 """#40a executor-package auto-fetch (worker leg).
 
 A dispatched unit whose package digest is NOT in the local package store is
-fetched from the coordinator (GET /api/v0/packages/{digest}, worker-signed),
+fetched from the coordinator (GET /api/v0/packages/by-manifest/{manifest_sha256}, worker-signed),
 extracted traversal-safe, verified (manifest hash against the assignment pin +
 `compute_package_digest` against the manifest's executor.package_sha256), and
 installed content-addressed — then dispatch proceeds exactly as if pre-staged.
@@ -332,7 +332,7 @@ def test_fetch_package_200_returns_bytes_signed() -> None:
 
     assert result == blob
     assert seen["method"] == "GET"
-    assert seen["path"] == f"/api/v0/packages/{'a' * 64}"
+    assert seen["path"] == f"/api/v0/packages/by-manifest/{'a' * 64}"
     assert seen["signed"] is True
 
 
@@ -372,7 +372,7 @@ def test_happy_path_end_to_end_through_signed_client(tmp_path: Path) -> None:
     blob = _package_archive(manifest)
 
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == f"/api/v0/packages/{sha}"
+        assert request.url.path == f"/api/v0/packages/by-manifest/{sha}"
         return httpx.Response(200, content=blob)
 
     with _make_client(handler) as client:
@@ -442,7 +442,7 @@ def test_dispatch_auto_fetched_unit_runs_and_submits(tmp_path: Path) -> None:
     captured: dict = {}
 
     def handler(req: httpx.Request) -> httpx.Response:
-        if req.method == "GET" and req.url.path == f"/api/v0/packages/{sha}":
+        if req.method == "GET" and req.url.path == f"/api/v0/packages/by-manifest/{sha}":
             return httpx.Response(200, content=blob)
         captured["body"] = json.loads(req.content)
         return httpx.Response(
