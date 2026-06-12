@@ -85,6 +85,14 @@ class WorkerConfig:
     # Default False keeps the refuse-don't-echo posture; this is an explicit
     # opt-in to spend bandwidth+disk acquiring models on demand.
     auto_acquire: bool = False
+    # [provisioning] auto_fetch (#40a executor-package auto-fetch) — when True
+    # (the default) a dispatched unit whose package digest is NOT in the local
+    # package store is fetched from the coordinator, verified (manifest hash +
+    # executor.package_sha256 over the extracted tree, traversal-safe), and
+    # installed content-addressed before running. Strictly verified, hence
+    # default ON; operator staging still works and short-circuits the fetch.
+    # `false` restores staged-only resolution.
+    auto_fetch: bool = True
     # [models] store_dir (None -> data_dir/models): the worker-local BYOM model
     # store, laid out by model id (`<store>/<model_id>/`). The volunteer fills
     # it (the platform never distributes weights, §5.8); `--models` resolves
@@ -197,6 +205,7 @@ class WorkerConfig:
             "runner_timeout_seconds": None,
             "execute_tenant_code": "synthetic",
             "provisioning_dir": None,
+            "auto_fetch": True,
             "models_store_dir": None,
             "thermal_warn_c": 70.0,
             "thermal_crit_c": 82.0,
@@ -271,6 +280,9 @@ class WorkerConfig:
                 merged["provisioning_dir"] = executor_block["provisioning_dir"]
             if "auto_acquire" in executor_block:
                 merged["auto_acquire"] = executor_block["auto_acquire"]
+            provisioning_block = data.get("provisioning") or {}
+            if "auto_fetch" in provisioning_block:
+                merged["auto_fetch"] = provisioning_block["auto_fetch"]
             models_block = data.get("models") or {}
             if "store_dir" in models_block:
                 merged["models_store_dir"] = models_block["store_dir"]
@@ -327,6 +339,12 @@ class WorkerConfig:
                 "true",
                 "yes",
             )
+        if "AUSPEXAI_WORKER_AUTO_FETCH" in env:
+            merged["auto_fetch"] = env["AUSPEXAI_WORKER_AUTO_FETCH"].lower() in (
+                "1",
+                "true",
+                "yes",
+            )
         if "AUSPEXAI_WORKER_DASHBOARD_ENABLED" in env:
             merged["dashboard_enabled"] = env["AUSPEXAI_WORKER_DASHBOARD_ENABLED"].lower() in (
                 "1",
@@ -361,6 +379,7 @@ class WorkerConfig:
             runner_timeout_seconds=_opt_float(merged.get("runner_timeout_seconds")),
             execute_tenant_code=_validate_policy(merged.get("execute_tenant_code", "synthetic")),
             auto_acquire=bool(merged.get("auto_acquire", False)),
+            auto_fetch=bool(merged.get("auto_fetch", True)),
             provisioning_dir=(
                 None
                 if merged.get("provisioning_dir") is None

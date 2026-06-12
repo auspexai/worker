@@ -59,7 +59,7 @@ from .oauth import (
     ExpiredTokenError,
     run_device_flow,
 )
-from .provisioning import ExecutePolicy, ProvisioningResolver
+from .provisioning import AutoFetchResolver, ExecutePolicy, ProvisioningResolver
 from .sandbox import probe_bubblewrap
 from .state import (
     AcceptedSensitiveRepository,
@@ -70,6 +70,19 @@ from .state import (
     TenantListRepository,
 )
 from .workspace import WorkspaceManager, workspace_runs_dir
+
+
+class CoordinatorPackageFetcher:
+    """`provisioning.PackageFetcher` over the worker's signed CoordinatorClient
+    (#40a executor-package auto-fetch). Pure adapter: failures (network, 404)
+    propagate and `install_fetched_package` classifies them as
+    package_unavailable refusals."""
+
+    def __init__(self, client: CoordinatorClient) -> None:
+        self._client = client
+
+    def fetch(self, manifest_sha256: str) -> bytes:
+        return self._client.fetch_package(digest=manifest_sha256)
 
 
 @click.group(help="AuspexAI volunteer worker.")
@@ -901,7 +914,18 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
             # execute_policy/auto_acquire are the daemon-start values; live_executor
             # re-reads them per unit so a policy change applies without a restart.
             execute_policy=ExecutePolicy(config.execute_tenant_code),
-            executor_resolver=ProvisioningResolver(config.provisioning_path),
+            # #40a executor-package auto-fetch: with `[provisioning] auto_fetch`
+            # (default ON) a unit whose package digest isn't in the local store
+            # is fetched from the coordinator, verified (manifest hash +
+            # executor package digest, traversal-safe extraction), and
+            # installed content-addressed before running; pre-staged packages
+            # short-circuit. `auto_fetch = false` restores staged-only
+            # resolution (the pre-#40a behavior).
+            executor_resolver=(
+                AutoFetchResolver(config.provisioning_path, CoordinatorPackageFetcher(client))
+                if config.auto_fetch
+                else ProvisioningResolver(config.provisioning_path)
+            ),
             model_store_dir=config.models_store_path,
             thermal_monitor=thermal_monitor,
             # M3 lazy auto-acquire: pull a missing locally-required model on

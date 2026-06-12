@@ -36,11 +36,18 @@ drop-in for Phase 2.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
+import logging
+import shutil
+import tarfile
+import tempfile
 from dataclasses import dataclass
 from enum import StrEnum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
+
+logger = logging.getLogger(__name__)
 
 
 class ExecutePolicy(StrEnum):
@@ -61,6 +68,15 @@ class ProvisioningIntegrityError(ProvisioningError):
     This is a hard failure, not a 'not provisioned' miss: a package IS staged for
     this hash but its `manifest.json` content doesn't match the pinned experiment.
     Refuse loudly rather than run mismatched code."""
+
+
+class PackageFetchError(ProvisioningError):
+    """An executor package could not be FETCHED (#40a auto-fetch): network
+    failure, coordinator 404, or an archive that doesn't even decode. This is
+    an *availability* failure, not an integrity one — `decide_execution` maps
+    it to the `package_unavailable` refusal reason so the coordinator can
+    treat it as transient. Tampered/unsafe content raises
+    `ProvisioningIntegrityError` instead."""
 
 
 def hash_manifest(manifest: dict[str, Any]) -> str:
@@ -177,6 +193,185 @@ class ProvisioningResolver:
             package_dir=pkg,
             manifest=manifest,
         )
+
+
+class PackageFetcher(Protocol):
+    """Pulls an executor package archive (tar.gz bytes) from the coordinator
+    by `manifest_sha256` (#40a). The concrete implementation wraps the
+    worker's signed `CoordinatorClient.fetch_package`; keeping it a protocol
+    lets the install/verify logic be unit-tested with a fake. Raises on any
+    failure (network, 404)."""
+
+    def fetch(self, manifest_sha256: str) -> bytes: ...
+
+
+def _extract_package_archive(blob: bytes, dest: Path) -> None:
+    """Extract a fetched package tar.gz into `dest`, path-traversal-safe.
+
+    Every member is validated BEFORE extraction: absolute paths, `..`
+    components, symlinks/hardlinks, and special files (devices, FIFOs) are
+    rejected outright — a hostile archive must not be able to write outside
+    `dest` or plant a link for a later write to follow. `extractall` then runs
+    with the stdlib `data` filter as defense-in-depth (falling back to plain
+    extraction on older 3.11 patch releases without filter support, where the
+    explicit validation above is the enforcement).
+    """
+    try:
+        archive = tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz")
+    except (tarfile.TarError, OSError, EOFError) as exc:
+        raise PackageFetchError(f"fetched package archive is not a readable tar.gz: {exc}") from exc
+    with archive:
+        members = archive.getmembers()
+        for member in members:
+            name = PurePosixPath(member.name)
+            if name.is_absolute() or ".." in name.parts:
+                raise ProvisioningIntegrityError(
+                    f"fetched package archive member {member.name!r} escapes the "
+                    "extraction dir (absolute or '..' path); refusing the archive"
+                )
+            if member.issym() or member.islnk():
+                raise ProvisioningIntegrityError(
+                    f"fetched package archive member {member.name!r} is a "
+                    "symlink/hardlink; links are not allowed in executor packages"
+                )
+            if not (member.isfile() or member.isdir()):
+                raise ProvisioningIntegrityError(
+                    f"fetched package archive member {member.name!r} is not a "
+                    "regular file or directory; refusing the archive"
+                )
+        try:
+            archive.extractall(dest, members=members, filter="data")
+        except TypeError:  # pragma: no cover — Python < 3.11.4 (no filter= support)
+            archive.extractall(dest, members=members)
+
+
+def install_fetched_package(
+    *, provisioning_dir: Path, manifest_sha256: str, fetcher: PackageFetcher
+) -> Path:
+    """#40a executor-package auto-fetch: pull `manifest_sha256`'s package
+    archive from the coordinator, verify it end-to-end, and install it into
+    the local package store (content-addressed by manifest hash; immutable —
+    an already-present digest is never re-fetched or overwritten).
+
+    Verification before anything is installed (the load-bearing checks):
+
+      1. The archive extracts safely (no absolute paths / `..` / links).
+      2. `hash_manifest(manifest.json)` == `manifest_sha256` — the fetched
+         manifest IS the one the assignment pins.
+      3. `compute_package_digest(extracted tree)` == the manifest's
+         `executor.package_sha256` — the fetched FILES are exactly the code
+         the tenant signed. A fetched package *without* that pin is
+         unverifiable and refused: unlike operator staging there is no
+         local trust root standing behind network-fetched code.
+
+    Extraction + verification happen in a staging dir inside the store; the
+    final install is a single same-filesystem rename, so an interrupted fetch
+    never reads as installed. Raises `PackageFetchError` (→ the
+    `package_unavailable` refusal) on fetch failure and
+    `ProvisioningIntegrityError` (→ `auto_fetch_digest_mismatch` / unsafe
+    archive) on verification failure. Returns the installed package dir.
+    """
+    manifest_sha256 = manifest_sha256.lower()
+    dest = provisioning_dir / manifest_sha256
+    if (dest / "manifest.json").is_file():
+        return dest  # already present (pre-staged or previously fetched)
+
+    # Loud by design: a fetch means this worker is about to pull third-party
+    # code over the network for the first time. Permanent content-addressed
+    # caching means every fetch of a digest IS its first.
+    logger.warning(
+        "auto-fetching executor package %s from the coordinator "
+        "(not in the local package store; first use on this worker)",
+        manifest_sha256,
+    )
+    try:
+        blob = fetcher.fetch(manifest_sha256)
+    except ProvisioningError:
+        raise
+    except Exception as exc:
+        raise PackageFetchError(
+            f"could not fetch executor package {manifest_sha256} from the coordinator: {exc}"
+        ) from exc
+
+    provisioning_dir.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".fetch-{manifest_sha256[:12]}-", dir=provisioning_dir))
+    try:
+        _extract_package_archive(blob, staging)
+        manifest_path = staging / "manifest.json"
+        if not manifest_path.is_file():
+            raise ProvisioningIntegrityError(
+                f"fetched package {manifest_sha256} contains no top-level "
+                "manifest.json; cannot verify it (refusing)"
+            )
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ProvisioningIntegrityError(
+                f"fetched package {manifest_sha256} manifest.json is unreadable/invalid: {exc}"
+            ) from exc
+        computed = hash_manifest(manifest)
+        if computed != manifest_sha256:
+            raise ProvisioningIntegrityError(
+                f"fetched manifest hash {computed} != assigned manifest_sha256 "
+                f"{manifest_sha256} (auto_fetch_digest_mismatch)"
+            )
+        package_sha256 = (manifest.get("executor") or {}).get("package_sha256")
+        if package_sha256 is None:
+            raise ProvisioningIntegrityError(
+                f"fetched package {manifest_sha256} carries no executor.package_sha256 "
+                "pin; network-fetched code cannot be verified without it "
+                "(auto_fetch_digest_mismatch)"
+            )
+        computed_pkg = compute_package_digest(staging)
+        if computed_pkg != str(package_sha256).lower():
+            raise ProvisioningIntegrityError(
+                f"fetched executor package digest {computed_pkg} != manifest "
+                f"executor.package_sha256 {str(package_sha256).lower()} for "
+                f"{manifest_sha256} (auto_fetch_digest_mismatch)"
+            )
+        try:
+            staging.rename(dest)
+        except OSError:
+            if (dest / "manifest.json").is_file():
+                # Lost a race to a concurrent install of the same digest —
+                # content-addressed, so the bytes are identical; keep theirs.
+                return dest
+            raise
+        logger.info(
+            "installed auto-fetched executor package %s into the package store (%s)",
+            manifest_sha256,
+            dest,
+        )
+        return dest
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+class AutoFetchResolver:
+    """`ProvisioningResolver` with a coordinator auto-fetch fallback (#40a) —
+    the Phase-2 coordinator-fetch resolver the `ExecutorResolver` docstring
+    promised. A pre-staged package short-circuits (no network call); a missing
+    digest is fetched via `install_fetched_package` (verified: manifest hash +
+    executor package digest) and then resolved through the SAME local path as
+    staged packages — once installed, fetched and staged packages are
+    indistinguishable, including the resolver's own re-verification."""
+
+    def __init__(self, provisioning_dir: Path, fetcher: PackageFetcher) -> None:
+        self._dir = provisioning_dir
+        self._local = ProvisioningResolver(provisioning_dir)
+        self._fetcher = fetcher
+
+    def resolve(self, manifest_sha256: str) -> ResolvedExecutor | None:
+        manifest_sha256 = manifest_sha256.lower()
+        resolved = self._local.resolve(manifest_sha256)
+        if resolved is not None:
+            return resolved  # pre-staged short-circuit: no fetch
+        install_fetched_package(
+            provisioning_dir=self._dir,
+            manifest_sha256=manifest_sha256,
+            fetcher=self._fetcher,
+        )
+        return self._local.resolve(manifest_sha256)
 
 
 def resolve_model_dir(
@@ -321,6 +516,10 @@ def decide_execution(
         )
     try:
         resolved = resolver.resolve(manifest_sha256)
+    except PackageFetchError as exc:
+        # #40a: the package couldn't be FETCHED (network/404) — availability,
+        # not integrity. Tagged so the coordinator can classify it transient.
+        return ExecutionDecision(ExecutionMode.REFUSE, f"{exc} (package_unavailable)")
     except ProvisioningIntegrityError as exc:
         return ExecutionDecision(ExecutionMode.REFUSE, str(exc))
     if resolved is None:

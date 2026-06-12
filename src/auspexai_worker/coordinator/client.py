@@ -94,6 +94,13 @@ class AssignmentNotFoundError(CoordinatorError):
     """404 assignment_not_found — no assignment exists for this (unit, worker)."""
 
 
+class PackageNotFoundError(CoordinatorError):
+    """404 from GET /packages/{digest} — the coordinator has no executor
+    package archive for this manifest digest (#40a auto-fetch). The worker
+    refuses the unit as package_unavailable rather than running unverified
+    code."""
+
+
 class AssignmentAlreadyResolvedError(CoordinatorError):
     """409 assignment_already_resolved — already has a result, or already refused."""
 
@@ -463,6 +470,41 @@ class CoordinatorClient:
             raise WorkerNotFoundError(_error_message(response))
         raise CoordinatorError(
             f"get_prestage: unexpected status {response.status_code}: {response.text[:500]}"
+        )
+
+    # ---- /packages/{digest} (signed) — #40a executor auto-fetch ---------
+
+    def fetch_package(self, *, digest: str) -> bytes:
+        """GET /api/v0/packages/{digest}. Worker-credentialed (the worker's
+        standard RFC 9421 request signature).
+
+        Returns the executor package archive (tar.gz bytes) for a manifest
+        digest — the worker leg of #40a coordinator-served provisioning. The
+        caller (`provisioning.install_fetched_package`) extracts and verifies
+        it before anything is installed; this method only moves bytes.
+
+        Raises:
+            PackageNotFoundError: 404 — no package for this digest.
+            UnauthorizedError: 401/403 on signature/credential failure.
+            CoordinatorError: transport errors / unexpected statuses.
+        """
+        if self._signer is None:
+            raise CoordinatorError(
+                "fetch_package requires a signer; CoordinatorClient was constructed without one"
+            )
+        response = self._signed_request(
+            method="GET",
+            path=f"/api/v0/packages/{digest.lower()}",
+            json_body=None,
+        )
+        if response.status_code == 200:
+            return response.content
+        if response.status_code == 404:
+            raise PackageNotFoundError(_error_message(response))
+        if response.status_code in (401, 403):
+            raise UnauthorizedError(_error_message(response))
+        raise CoordinatorError(
+            f"fetch_package: unexpected status {response.status_code}: {response.text[:500]}"
         )
 
     # ---- /workers/{id}/assignments/{unit_id}/result (signed) ----------
