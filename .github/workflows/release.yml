@@ -185,3 +185,35 @@ jobs:
             The signature chain anchors at the AuspexAI Maintainer's GitHub
             OIDC identity. Trust roster: [AUTHORIZED_SIGNERS.md](https://github.com/auspexai/.github/blob/main/security/AUTHORIZED_SIGNERS.md).
             Receipt verification (separate signing chain): per [Principles & Scope §5.16](https://github.com/auspexai).
+
+  pypi:
+    name: Publish to PyPI (trusted publishing)
+    needs: release
+    if: vars.PYPI_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: pypi
+    permissions:
+      id-token: write   # OIDC trusted publishing — no stored credentials
+
+    steps:
+      - name: Checkout source at tag
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Rebuild wheel + sdist for PyPI
+        run: |
+          uv python install 3.12
+          uv build
+          ls -la dist/
+
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
