@@ -476,6 +476,22 @@ def _tenant_allowed(
     return None
 
 
+def _serving_version_pin_reason(manifest: dict, serving_version: str | None) -> str | None:
+    """M1 (v0_2 inference_determinism): a refusal reason if the manifest pins a
+    serving version this worker's stack is outside of, else None. Compares on
+    the version tail (`ollama/0.17.7` ~ `0.17.7`). Fail-closed: a pinned unit on
+    a worker that can't report its serving version is refused (it can't prove
+    the pin). Non-pinned units always pass."""
+    pin = (manifest.get("inference_determinism") or {}).get("serving_version_pin")
+    if not pin:
+        return None
+    if not serving_version:
+        return f"serving_version_mismatch: manifest pins {pin!r} but this worker reports no serving version"
+    if pin.strip().rsplit("/", 1)[-1] != serving_version.strip().rsplit("/", 1)[-1]:
+        return f"serving_version_mismatch: serving {serving_version!r} is outside the manifest pin {pin!r}"
+    return None
+
+
 def decide_execution(
     *,
     policy: ExecutePolicy,
@@ -487,6 +503,7 @@ def decide_execution(
     deny_list: tuple[str, ...] = (),
     auto_acquire: bool = False,
     acquirer: ModelAcquirer | None = None,
+    serving_version: str | None = None,
 ) -> ExecutionDecision:
     """The consent + resolution gate. Composes the code-execution policy with the
     §5.14 tenant allow/deny lists. Refuse-don't-echo: a `provisioned` worker that
@@ -528,6 +545,14 @@ def decide_execution(
             f"no provisioned executor for manifest {manifest_sha256} "
             "(execute_tenant_code=provisioned; refusing rather than echoing)",
         )
+
+    # M1 (v0_2): refuse a unit whose manifest pins a serving version outside this
+    # worker's stack — a version-skewed worker would diverge from quorum. The
+    # `serving_version_mismatch` reason is coordinator-retryable → re-offered to
+    # a version-matching worker.
+    pin_reason = _serving_version_pin_reason(resolved.manifest, serving_version)
+    if pin_reason is not None:
+        return ExecutionDecision(ExecutionMode.REFUSE, pin_reason)
 
     # Resolve --models from the worker-local BYOM store (§5.8). A missing
     # locally-required model is a refuse, not an echo.

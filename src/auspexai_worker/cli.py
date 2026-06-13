@@ -938,6 +938,9 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
             ),
             live_executor=_live_executor,
             open_inference_session=open_inference_session,
+            # M1 (v0_2): this worker's serving version, for the manifest's
+            # serving_version_pin gate. None when not serving (probe failed).
+            serving_version=(f"ollama/{_ollama_version}" if _ollama_version else None),
         )
 
         def _collect_capabilities():
@@ -952,6 +955,10 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
                 # W-S: declare what's serve-ready (loaded in the backend) so the
                 # scheduler can route inference experiments to warm workers.
                 served_models=(model_server.served_ids() if model_server is not None else None),
+                # v0_2 #13a: the served-weights digests, for #13b enforcement.
+                served_model_digests=(
+                    model_server.served_digests() if model_server is not None else None
+                ),
                 # W-H: report current thermal state so the coordinator can route
                 # work away from a degraded/overheating worker.
                 thermal=(thermal_monitor.snapshot().to_dict() if thermal_monitor.enabled else None),

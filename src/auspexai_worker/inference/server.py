@@ -97,6 +97,12 @@ class ModelServer:
         with self._lock:
             return sorted(self._served)
 
+    def served_digests(self) -> dict[str, str]:
+        """{model_id: served-GGUF sha256} for the loaded models — the heartbeat
+        `served_model_digests` value (v0_2 #13a; feeds #13b enforcement)."""
+        with self._lock:
+            return {mid: s.gguf_sha256 for mid, s in self._served.items()}
+
     def get_served(self, model_id: str) -> ServedModel | None:
         with self._lock:
             return self._served.get(model_id)

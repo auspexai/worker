@@ -109,6 +109,12 @@ class Capabilities:
     # this. Omitted from the wire when empty (incl. `[inference] backend =
     # "none"` workers — absent == not an inference host).
     served_models: list[str] = field(default_factory=list)
+    # v0_2 #13a: {model_id: served-GGUF sha256} for the LOADED models — the
+    # coordinator-asserted served-weights digest. When a manifest pins
+    # `expected_gguf_sha256`, the coordinator REJECTS a result whose served
+    # digest differs (§9 #13b: the declared model provably ran). Omitted from
+    # the wire when empty (absent == no served weights to attest).
+    served_model_digests: dict[str, str] = field(default_factory=dict)
     # Current thermal/health snapshot (W-H), or None where no sensor exists.
     # Lets the coordinator route work away from a degraded/overheating worker
     # (forward-compatible; opaque until consumed).
@@ -166,6 +172,8 @@ class Capabilities:
             d.pop("models", None)  # compact wire when the store is empty
         if not self.served_models:
             d.pop("served_models", None)  # absent == not an inference host
+        if not self.served_model_digests:
+            d.pop("served_model_digests", None)  # absent == no served weights to attest
         if self.thermal is None:
             d.pop("thermal", None)  # omit where no sensor / health disabled
         if self.worker_version is None:
@@ -275,6 +283,9 @@ def collect(
     # W-S: model ids loaded in the inference backend (caller-supplied from the
     # daemon's ModelServer; empty/None on non-inference hosts).
     served_models: list[str] | None = None,
+    # v0_2 #13a: {model_id: served-GGUF sha256} (caller-supplied from the
+    # ModelServer). Feeds the coordinator's served-weights enforcement (#13b).
+    served_model_digests: dict[str, str] | None = None,
     # Current thermal snapshot (W-H), caller-supplied (the daemon owns the
     # stateful monitor so hysteresis is shared with the dispatch gate).
     thermal: dict[str, Any] | None = None,
@@ -313,6 +324,7 @@ def collect(
         declared_caps=resolved_caps,
         models=models or [],
         served_models=served_models or [],
+        served_model_digests=served_model_digests or {},
         thermal=thermal,
         worker_version=worker_version,
         auto_acquire=auto_acquire,

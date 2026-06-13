@@ -480,3 +480,78 @@ def test_package_digest_excludes_manifest_sig(tmp_path):
     (pkg / "manifest.json").write_text("{}")
     (pkg / "manifest.json.sig").write_text('{"sig": "..."}')
     assert compute_package_digest(pkg) == before
+
+
+# ---- M1 (v0_2): serving_version_pin gate -----------------------------------
+
+
+def _pinning(pin):
+    return ResolvedExecutor(
+        "a" * 64,
+        ["python", "x.py"],
+        Path("/p"),
+        {"inference_determinism": {"serving_version_pin": pin}},
+    )
+
+
+def test_serving_version_mismatch_refuses():
+    d = decide_execution(
+        policy=ExecutePolicy.PROVISIONED,
+        tenant_id="known",
+        manifest_sha256="a" * 64,
+        resolver=_StubResolver(_pinning("ollama/0.17.7")),
+        allow_list=("known",),
+        serving_version="ollama/0.18.2",
+    )
+    assert d.mode is ExecutionMode.REFUSE
+    assert "serving_version_mismatch" in d.reason  # coordinator-retryable marker
+
+
+def test_serving_version_match_runs_real():
+    d = decide_execution(
+        policy=ExecutePolicy.PROVISIONED,
+        tenant_id="known",
+        manifest_sha256="a" * 64,
+        resolver=_StubResolver(_pinning("ollama/0.17.7")),
+        allow_list=("known",),
+        serving_version="ollama/0.17.7",
+    )
+    assert d.mode is ExecutionMode.REAL
+
+
+def test_serving_version_match_on_version_tail():
+    # the worker may report a bare version; match on the tail
+    d = decide_execution(
+        policy=ExecutePolicy.PROVISIONED,
+        tenant_id="known",
+        manifest_sha256="a" * 64,
+        resolver=_StubResolver(_pinning("ollama/0.17.7")),
+        allow_list=("known",),
+        serving_version="0.17.7",
+    )
+    assert d.mode is ExecutionMode.REAL
+
+
+def test_pin_with_no_serving_version_refuses_fail_closed():
+    d = decide_execution(
+        policy=ExecutePolicy.PROVISIONED,
+        tenant_id="known",
+        manifest_sha256="a" * 64,
+        resolver=_StubResolver(_pinning("ollama/0.17.7")),
+        allow_list=("known",),
+        serving_version=None,
+    )
+    assert d.mode is ExecutionMode.REFUSE
+
+
+def test_no_pin_unaffected_by_serving_version():
+    resolved = ResolvedExecutor("a" * 64, ["python", "x.py"], Path("/p"), {})  # no pin
+    d = decide_execution(
+        policy=ExecutePolicy.PROVISIONED,
+        tenant_id="known",
+        manifest_sha256="a" * 64,
+        resolver=_StubResolver(resolved),
+        allow_list=("known",),
+        serving_version=None,
+    )
+    assert d.mode is ExecutionMode.REAL  # unpinned units always pass

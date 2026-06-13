@@ -141,6 +141,10 @@ class RunnerDispatcher:
         # whenever `[inference] backend = "none"`) means no broker socket and
         # no serving: the entire W-S surface stays dormant.
         open_inference_session: Callable[[str, object], object] | None = None,
+        # M1 (v0_2): this worker's serving version (e.g. "ollama/0.17.7"), so a
+        # unit pinning a different serving_version_pin is refused. None ⇒ the
+        # pin gate fails closed (a pinned unit is refused).
+        serving_version: str | None = None,
     ) -> None:
         self._coordinator = coordinator
         self._worker_id = worker_id
@@ -160,6 +164,7 @@ class RunnerDispatcher:
         self._tenant_allow_list = tenant_allow_list
         self._tenant_deny_list = tenant_deny_list
         self._thermal_monitor = thermal_monitor
+        self._serving_version = serving_version
         self._thermal_poll_interval_seconds = thermal_poll_interval_seconds
         self._auto_acquire = auto_acquire
         self._live_executor = live_executor
@@ -232,6 +237,7 @@ class RunnerDispatcher:
             deny_list=self._tenant_deny_list,
             auto_acquire=auto_acquire,
             acquirer=self._model_acquirer,
+            serving_version=self._serving_version,
         )
         if decision.mode is ExecutionMode.REFUSE:
             logger.info("declining unit %s: %s", unit.unit_id, decision.reason)
