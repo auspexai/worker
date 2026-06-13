@@ -144,8 +144,9 @@ _LIVE_SCRIPT = """  <script>
       if (statusEl) statusEl.textContent = st === 'working' ? 'working' : (st === 'problem' ? 'attention' : 'idle');
       var narr = document.getElementById('heart-narration');
       if (narr) {
-        var parts = [], u = d.completed_units || 0, e = d.distinct_experiments || 0;
-        if (u > 0) parts.push('contributed ' + u + ' unit' + (u === 1 ? '' : 's') + (e ? ' across ' + e + ' experiment' + (e === 1 ? '' : 's') : ''));
+        // Activity/state only — the unit/experiment counts are the metrics row
+        // below, so the line speaks to what's HAPPENING, not the totals.
+        var parts = [];
         if (st === 'problem' && d.state_label) {
           // a hold (paused/quarantined/overheating) — say so, don't claim "idle";
           // the loud detail + reason is in the banner above.
@@ -160,7 +161,7 @@ _LIVE_SCRIPT = """  <script>
       if (vit) {
         var v = [];
         v.push('<span class="vital"><i class="vdot ' + (d.worker_id ? 'ok' : 'down') + '"></i>' + (d.last_heartbeat_at ? 'heartbeat ' + rel(d.last_heartbeat_at) : 'not enrolled') + '</span>');
-        if (d.flavor) v.push('<span class="vital muted">' + String(d.flavor).replace(/[<>&]/g, '') + ' flavor</span>');
+        // flavor is a static fact (Identity owns it) — the vitals are live health only.
         if (d.thermal_enabled && d.thermal_state) {
           var tcls = d.thermal_state === 'critical' ? 'bad' : (d.thermal_state === 'warm' ? 'warn' : '');
           v.push('<span class="vital ' + tcls + '">' + (d.thermal_temp_c != null ? d.thermal_temp_c + '\\u00B0C' : String(d.thermal_state).replace(/[<>&]/g, '')) + '</span>');
