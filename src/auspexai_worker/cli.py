@@ -931,11 +931,13 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
             # M3 lazy auto-acquire: pull a missing locally-required model on
             # assignment (opt-in; only meaningful under `provisioned`).
             auto_acquire=config.auto_acquire,
-            model_acquirer=(
-                StoreModelAcquirer(ModelStore(config.models_store_path))
-                if config.auto_acquire
-                else None
-            ),
+            # Build the acquirer UNCONDITIONALLY: it only wraps the model store
+            # (cheap, no side effects), and decide_execution already gates on the
+            # LIVE `auto_acquire` flag. Constructing it only when auto_acquire was
+            # true AT STARTUP made `executor set --auto-acquire` a no-op for
+            # acquisition until a perfectly-timed restart — #44 surfaced this
+            # (caps reported auto_acquire=true but acquirer was None → refuse).
+            model_acquirer=StoreModelAcquirer(ModelStore(config.models_store_path)),
             live_executor=_live_executor,
             open_inference_session=open_inference_session,
             # M1 (v0_2): this worker's serving version, for the manifest's
