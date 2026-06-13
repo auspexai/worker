@@ -87,13 +87,11 @@ class TestOverview:
         assert 'id="live-ind"' in r.text  # header indicator
         assert "/api/stats" in r.text  # the poll target is wired into the script
         for marker in (
-            'data-live="last_heartbeat_at"',
+            # heartbeat / thermal / completed_units / distinct_experiments moved
+            # into the activity heart (rendered via renderHeart, not data-live).
             'data-live="receipts_count"',
             'data-live="pending_submissions"',
             'data-live="audit_count"',
-            'data-live="completed_units"',
-            'data-live="distinct_experiments"',
-            'data-live="thermal"',
             'data-live="state_banner"',  # the state is the live banner now
         ):
             assert marker in r.text, marker
@@ -200,21 +198,23 @@ class TestReceipts:
 
 
 class TestConfig:
-    def test_overview_status_section_groups_live_signals(
+    def test_overview_capabilities_section_groups_static_signals(
         self, client: TestClient, db: Database
     ) -> None:
-        """The consolidated Status section gathers the live signals (heartbeat,
-        thermal, executor mode, models) in one place + the executor badge."""
+        """The activity heart owns the live signals (heartbeat, thermal, units);
+        the Capabilities section keeps the static config (executor, models,
+        accelerator). The heart leads, then Capabilities → Contribution → Identity."""
         _enroll(db)
         r = client.get("/")
         assert r.status_code == 200
-        assert "<h2>Status</h2>" in r.text
+        assert "<h2>Capabilities</h2>" in r.text
         assert "executor mode" in r.text
         assert "synthetic only" in r.text  # the executor badge (default synthetic)
         assert "models in store" in r.text
-        # Status comes before Contribution + Identity (status-first ordering).
-        assert r.text.index("<h2>Status</h2>") < r.text.index("<h2>Contribution</h2>")
-        assert r.text.index("<h2>Contribution</h2>") < r.text.index("<h2>Identity</h2>")
+        # The heart leads; then static sections in order.
+        assert r.text.index('id="wkr-heart"') < r.text.index("<h2>Capabilities</h2>")
+        assert r.text.index("<h2>Capabilities</h2>") < r.text.index("<h2>Contribution ledger</h2>")
+        assert r.text.index("<h2>Contribution ledger</h2>") < r.text.index("<h2>Identity</h2>")
 
     def test_models_page_renders_store_and_accelerator(self, client: TestClient) -> None:
         r = client.get("/models")

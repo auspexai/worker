@@ -359,10 +359,10 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
         )
         # W-S: the inference-backend reachability row (only when configured).
         inference_row = _inference_html(config)
-        status_html = f"""    <h2>Status</h2>
+        # Heartbeat + thermal (the live "right now" signals) now live in the
+        # activity heart's vitals; this section keeps the static capabilities.
+        status_html = f"""    <h2>Capabilities</h2>
     <dl class="kv">
-      <dt>last heartbeat</dt><dd><span data-live="last_heartbeat_at">{html.escape(_fmt_relative(worker.last_heartbeat_at))}</span></dd>
-      <dt>thermal</dt><dd data-live="thermal">{_thermal_html(config)}</dd>
       <dt>accelerator</dt><dd>{html.escape(acc.label)}</dd>
       <dt>executor mode</dt><dd>{executor_cell}</dd>
       <dt>models in store</dt><dd>{model_count} (<a href="/models">manage</a>)</dd>{inference_row}
@@ -371,10 +371,10 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
         # ── Contribution: what this worker has done (Progress + Activity merged —
         # they answered the same question in two boxes).
         progress = results_repo.progress_summary()
-        contribution_html = f"""    <h2>Contribution</h2>
+        # Units completed + distinct experiments are the heart's headline metrics;
+        # this is the fuller ledger behind them.
+        contribution_html = f"""    <h2>Contribution ledger</h2>
     <dl class="kv">
-      <dt>work units completed</dt><dd><span data-live="completed_units">{progress["completed_units"]}</span></dd>
-      <dt>distinct experiments</dt><dd><span data-live="distinct_experiments">{progress["distinct_experiments"]}</span></dd>
       <dt>receipts earned</dt><dd><span data-live="receipts_count">{stats["receipts_count"]}</span></dd>
       <dt>pending submissions</dt><dd><span data-live="pending_submissions">{stats["pending_submissions"]}</span></dd>
       <dt>audit-log rows</dt><dd><span data-live="audit_count">{stats["audit_count"]}</span></dd>
