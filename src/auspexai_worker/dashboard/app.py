@@ -243,11 +243,10 @@ def _update_notice(worker, config: WorkerConfig) -> tuple[str, str]:
     return "notice", inner
 
 
-def _inference_value(config: WorkerConfig) -> str | None:
-    """W-S: the value cell for the 'inference backend' capability card, or None
-    when `[inference] backend = "none"` (not an inference host — no card, mirroring
-    the heartbeat wire). When ollama, probes the backend so the volunteer sees
-    whether it's actually reachable."""
+def _inference_status(config: WorkerConfig) -> dict[str, Any] | None:
+    """W-S: live reachability of the inference backend, or None when
+    `[inference] backend = "none"` (not an inference host). The heart renders it
+    as a vital (dot), like the coordinator-connection vital."""
     backend = getattr(config, "inference_backend", "none")
     if backend == "none":
         return None
@@ -262,16 +261,13 @@ def _inference_value(config: WorkerConfig) -> str | None:
                 version = be.version()
         except Exception:
             healthy = False
-        badge = (
-            '<span class="badge ok">reachable</span>'
-            if healthy
-            else '<span class="badge error">unreachable — start Ollama</span>'
-        )
-        # §9 #46 determinism provenance: show the serving runtime's version.
-        ver = f" <code>v{html.escape(version)}</code>" if version else ""
-        url = html.escape(config.inference_ollama_url)
-        return f"ollama @ <code>{url}</code>{ver} {badge}"
-    return html.escape(str(backend))
+        return {
+            "backend": "ollama",
+            "reachable": bool(healthy),
+            "version": version,  # §9 #46 determinism provenance
+            "url": config.inference_ollama_url,
+        }
+    return {"backend": str(backend), "reachable": True, "version": None, "url": None}
 
 
 def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = None) -> FastAPI:
@@ -367,14 +363,13 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
         # Heartbeat + thermal (the live "right now" signals) now live in the
         # activity heart's vitals; this section keeps the static capabilities, as
         # cards (researcher-dashboard aesthetic).
+        # Coordinator-connection + inference reachability are LIVE health → heart
+        # vitals (dots), not cards; this section is the static capabilities.
         cap_rows = [
             ("accelerator", html.escape(acc.label), False),
             ("executor mode", executor_cell, False),
             ("models in store", f'{model_count} (<a href="/models">manage</a>)', False),
         ]
-        inf = _inference_value(config)  # only when this is an inference host
-        if inf is not None:
-            cap_rows.append(("inference backend", inf, False))
         status_html = "    <h2>Capabilities</h2>\n" + render_cards(cap_rows)
 
         # ── Units completed + distinct experiments are the heart's headline
@@ -434,7 +429,8 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
                 + f' <span class="muted">({_fmt_relative(worker.enrolled_at)})</span>',
                 False,
             ),
-            ("coordinator", f"<code>{html.escape(config.coordinator_url)}</code>", False),
+            # coordinator reachability is the heart's coordinator vital now; the
+            # URL rides that vital's tooltip.
         ]
         identity_html = "    <h2>Identity</h2>\n" + render_cards(identity_rows)
 
@@ -885,6 +881,7 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
                 "thermal_temp_c": thermal_temp_c,
                 "thermal_state": thermal_state,
                 "coordinator_url": config.coordinator_url,
+                "inference": _inference_status(config),  # live backend reachability (or null)
                 # §9 #46: update-available notice (server-built, escaped) + flavor.
                 "update_available": bool(notice_html),
                 "update_notice_class": notice_class,

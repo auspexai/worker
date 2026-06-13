@@ -72,9 +72,10 @@ class TestOverview:
         _enroll(db)
         r = client.get("/")
         assert r.status_code == 200
-        assert "wkr-test" in r.text
+        assert "wkr-test" in r.text  # worker_id rides the heart header now
         assert "T0 anonymous" in r.text
-        assert "coord.auspexai.network" in r.text or "Coordinator" in r.text
+        # the coordinator is the heart's connection vital now — URL via /api/stats
+        assert "coord.auspexai.network" in client.get("/api/stats").json()["coordinator_url"]
 
     def test_enrolled_overview_is_live(self, client: TestClient, db: Database) -> None:
         """M6 #3: the overview carries the baseline-poll updater — a "● live"
@@ -451,24 +452,25 @@ class TestI4Overview:
         assert d["state_banner_html"] == "" and d["state_banner_class"] == ""
         assert d["activity_headline"] == "Idle"
 
-    def test_inference_row_absent_when_backend_none(self, client: TestClient, db: Database) -> None:
+    def test_inference_absent_when_backend_none(self, client: TestClient, db: Database) -> None:
+        """Not an inference host → the heart's inference vital is null (no card)."""
         _enroll(db)
-        r = client.get("/")
-        assert "inference backend" not in r.text  # default backend = none
+        assert client.get("/api/stats").json()["inference"] is None
 
-    def test_inference_row_present_when_ollama(
+    def test_inference_vital_present_when_ollama(
         self, db: Database, config: WorkerConfig, tmp_path: Path
     ) -> None:
+        """An inference host carries live backend reachability in /api/stats, which
+        the heart renders as a vital (dot) — not a Capabilities card."""
         import dataclasses
 
         cfg = dataclasses.replace(config, inference_backend="ollama")
         c = TestClient(build_app(db=db, config=cfg, config_path=tmp_path / "worker.toml"))
         _enroll(db)
-        r = c.get("/")
-        assert "inference backend" in r.text
-        assert "ollama @" in r.text
-        # No Ollama running in the test → the honest "unreachable" probe result.
-        assert "unreachable" in r.text
+        inf = c.get("/api/stats").json()["inference"]
+        assert inf["backend"] == "ollama"
+        # No Ollama running in the test → the honest unreachable probe result.
+        assert inf["reachable"] is False
 
 
 class TestUpdateNotice:

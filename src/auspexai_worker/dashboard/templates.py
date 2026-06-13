@@ -168,11 +168,26 @@ _LIVE_SCRIPT = """  <script>
       var vit = document.getElementById('heart-vitals');
       if (vit) {
         var v = [];
-        v.push('<span class="vital"><i class="vdot ' + (d.worker_id ? 'ok' : 'down') + '"></i>' + (d.last_heartbeat_at ? 'heartbeat ' + rel(d.last_heartbeat_at) : 'not enrolled') + '</span>');
-        // flavor is a static fact (Identity owns it) — the vitals are live health only.
+        // coordinator connection = heartbeat freshness (the worker→coordinator link);
+        // the URL rides the tooltip. flavor is a static fact (Identity owns it).
+        var hbMs = d.last_heartbeat_at ? (Date.now() - new Date(d.last_heartbeat_at).getTime()) : null;
+        var coordOk = hbMs != null && hbMs < 180000;
+        var coordTxt = !d.worker_id ? 'coordinator \\u00B7 not enrolled'
+          : (hbMs == null ? 'coordinator \\u00B7 no contact'
+          : (coordOk ? 'coordinator \\u00B7 connected ' + rel(d.last_heartbeat_at)
+          : 'coordinator \\u00B7 no contact ' + rel(d.last_heartbeat_at)));
+        var coordUrl = String(d.coordinator_url || '').replace(/[<>&"]/g, '');
+        v.push('<span class="vital' + (coordOk ? '' : ' bad') + '" title="' + coordUrl + '"><i class="vdot ' + (coordOk ? 'ok' : 'down') + '"></i>' + coordTxt + '</span>');
         if (d.thermal_enabled && d.thermal_state) {
           var tcls = d.thermal_state === 'critical' ? 'bad' : (d.thermal_state === 'warm' ? 'warn' : '');
           v.push('<span class="vital ' + tcls + '">' + (d.thermal_temp_c != null ? d.thermal_temp_c + '\\u00B0C' : String(d.thermal_state).replace(/[<>&]/g, '')) + '</span>');
+        }
+        if (d.inference) {
+          var inf = d.inference;
+          var infName = String(inf.backend || 'inference').replace(/[<>&]/g, '');
+          var infVer = inf.version ? ' v' + String(inf.version).replace(/[<>&]/g, '') : '';
+          var infTxt = infName + infVer + (inf.reachable ? '' : ' \\u2014 unreachable');
+          v.push('<span class="vital' + (inf.reachable ? '' : ' bad') + '"><i class="vdot ' + (inf.reachable ? 'ok' : 'down') + '"></i>' + infTxt + '</span>');
         }
         vit.innerHTML = v.join('');
       }
