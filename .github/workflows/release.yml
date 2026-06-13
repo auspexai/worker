@@ -144,11 +144,17 @@ jobs:
             echo "::endgroup::"
           done
 
-      - name: Create GitHub Release
+      # Create the release as a DRAFT with every asset attached. Drafts emit
+      # no `release.published` webhook (the coordinator ignores draft/created),
+      # so the fleet-update banner cannot fire before the .deb/.whl exist — the
+      # banner-before-assets race that errored installers with "no .deb/.whl".
+      # The final step flips draft→published atomically once assets are present.
+      - name: Create GitHub Release (draft, assets attached)
         uses: softprops/action-gh-release@v3
         with:
           name: ${{ env.version }}
           tag_name: ${{ github.ref_name }}
+          draft: true
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
@@ -185,6 +191,16 @@ jobs:
             The signature chain anchors at the AuspexAI Maintainer's GitHub
             OIDC identity. Trust roster: [AUTHORIZED_SIGNERS.md](https://github.com/auspexai/.github/blob/main/security/AUTHORIZED_SIGNERS.md).
             Receipt verification (separate signing chain): per [Principles & Scope §5.16](https://github.com/auspexai).
+
+      # Atomically flip draft→published. THIS is the event the coordinator
+      # webhook acts on (action=published) → the fleet banner fires now, with
+      # every asset already attached. --latest so the installer's "latest"
+      # lookup resolves to this release.
+      - name: Publish the release (assets now attached)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release edit "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --draft=false --latest
 
   pypi:
     name: Publish to PyPI (trusted publishing)
