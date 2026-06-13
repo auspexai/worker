@@ -111,8 +111,26 @@ class TestOverview:
             "worker_state",
             "state_label",
             "state_tone",
+            # the activity-heart line (plain headline/detail, unwrapped from the banner)
+            "activity_headline",
+            "activity_detail",
         ):
             assert key in d, key
+
+    def test_overview_renders_activity_heart(self, client: TestClient, db: Database) -> None:
+        """The volunteer's heart monitor — its skeleton (filled by the immediate
+        live tick) is on the overview, and the poll script renders into it."""
+        _enroll(db)
+        r = client.get("/")
+        assert r.status_code == 200
+        for marker in (
+            'id="wkr-heart"',
+            'id="heart-strip"',
+            'id="heart-dot"',
+            'id="heart-narration"',
+            "renderHeart",  # the poll fills the heart
+        ):
+            assert marker in r.text, marker
 
     def test_overview_status_badge_and_fault_tone(self, client: TestClient, db: Database) -> None:
         """§2.1 #11: the overview shows a single worker-state badge, and a

@@ -468,9 +468,30 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
                 "</form>\n"
             )
 
+        # The volunteer's heart monitor — "is my machine helping?" at a glance
+        # (surface_liveness_and_activity_view_design.md). Skeleton rendered here;
+        # the live poll fills the pulse + dot + narration on its immediate first
+        # tick (no blank flash), then keeps it beating.
+        heart_html = f"""    <section class="heart" id="wkr-heart">
+      <header>
+        <span class="pulse-dot" id="heart-dot"></span>
+        <h2 class="heart-h">Activity</h2>
+        <span class="heart-status" id="heart-status">—</span>
+      </header>
+      <div class="strip" id="heart-strip"><span class="strip-empty">listening…</span></div>
+      <p class="narration" id="heart-narration">—</p>
+      <div class="heart-vitals" id="heart-vitals"></div>
+      <div class="heart-metrics">
+        <div class="hm"><span class="n" id="heart-units">{progress["completed_units"]}</span><span class="l">units contributed</span></div>
+        <div class="hm"><span class="n" id="heart-exps">{progress["distinct_experiments"]}</span><span class="l">experiments</span></div>
+      </div>
+    </section>
+"""
+
         body = (
             state_banner
             + pause_control
+            + heart_html
             + status_html
             + "\n"
             + contribution_html
@@ -782,6 +803,7 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
         # status badge flips within a tick on an operator hold / self-pause / etc.
         state_key = state_label = state_tone = None
         banner_class = banner_html = None
+        activity_headline = activity_detail = None
         notice_class = notice_html = ""
         if worker is not None:
             notice_class, notice_html = _update_notice(worker, config)
@@ -806,6 +828,14 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
                 last_submitted_at=last_submitted_at,
                 now=now,
             )
+            # Plain (headline, detail) for the activity heart — the same signal
+            # the banner shows, unwrapped so the heart can render its own line.
+            activity_headline, activity_detail = _work_activity(
+                config,
+                runs_dir=workspace_runs_dir(config.state_dir),
+                last_submitted_at=last_submitted_at,
+                now=now,
+            )
         return JSONResponse(
             {
                 "worker_id": worker.worker_id if worker else None,
@@ -825,6 +855,8 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
                 "audit_count": stats["audit_count"],
                 "completed_units": progress["completed_units"],
                 "distinct_experiments": progress["distinct_experiments"],
+                "activity_headline": activity_headline,
+                "activity_detail": activity_detail,
                 "thermal_enabled": thermal_enabled,
                 "thermal_temp_c": thermal_temp_c,
                 "thermal_state": thermal_state,

@@ -45,6 +45,36 @@ code { font-family: ui-monospace, monospace; background: #1a1e2a; padding: 0.1em
 .notice .copy-cmd { background: #1f2937; border: 1px solid #3b82f6; color: inherit; border-radius: 4px; padding: 0.15em 0.6em; margin-left: 0.4em; font: inherit; font-size: 0.85em; cursor: pointer; }
 .notice .copy-cmd:hover { background: #2a2e3a; }
 .live-ind { font-size: 0.6em; font-weight: 500; color: #86efac; margin-left: 0.5em; vertical-align: middle; }
+/* activity heart (overview) — shared identity: cyan=working, blue=idle, red=problem */
+.heart { border: 1px solid #1f6b78; border-radius: 12px; background: linear-gradient(180deg,#101727 0%,#0c1322 100%); padding: 1rem 1.1rem; margin: 1em 0; display: flex; flex-direction: column; gap: 0.6rem; }
+.heart header { display: flex; align-items: center; gap: 0.55rem; margin: 0; }
+.heart .heart-h { margin: 0; font-size: 0.95rem; border: none; padding: 0; }
+.heart .heart-status { margin-left: auto; font-size: 0.72rem; color: #8b93a7; text-transform: lowercase; }
+.pulse-dot { width: 10px; height: 10px; border-radius: 50%; background: #2a3450; flex: none; }
+.pulse-dot.working { background: #67e8f9; animation: heartbeat 1.1s ease-out infinite; }
+.pulse-dot.idle { background: #4a7dff; }
+.pulse-dot.problem { background: #fca5a5; }
+@keyframes heartbeat { 0% { box-shadow: 0 0 0 0 rgba(103,232,249,0.55); } 70% { box-shadow: 0 0 0 8px rgba(103,232,249,0); } 100% { box-shadow: 0 0 0 0 rgba(103,232,249,0); } }
+.heart .strip { display: flex; align-items: flex-end; gap: 2px; height: 64px; padding: 4px; background: #080d18; border: 1px solid #161d2c; border-radius: 8px; overflow: hidden; }
+.heart .bar { flex: 0 0 3px; min-width: 3px; background: #233049; border-radius: 2px; align-self: flex-end; }
+.heart .bar.beat { background: #67e8f9; }
+.heart .strip-empty { margin: auto; color: #5b6478; font-size: 0.8rem; }
+.heart .narration { margin: 0; font-size: 0.86rem; color: #b8bfd0; }
+.heart .narration.good { color: #67e8f9; }
+.heart .narration.reassure { color: #4a7dff; }
+.heart .narration.bad { color: #fca5a5; }
+.heart .heart-vitals { display: flex; flex-wrap: wrap; gap: 0.9rem; font-size: 0.76rem; color: #9aa3b8; }
+.heart .vital { display: inline-flex; align-items: center; gap: 0.35rem; }
+.heart .vital.muted { color: #6b7488; }
+.heart .vital.warn { color: #fbbf24; }
+.heart .vital.bad { color: #fca5a5; }
+.heart .vdot { width: 7px; height: 7px; border-radius: 50%; background: #2a3450; display: inline-block; }
+.heart .vdot.ok { background: #6ee7b7; }
+.heart .vdot.down { background: #fca5a5; }
+.heart .heart-metrics { display: flex; gap: 1.3rem; }
+.heart .hm { display: flex; flex-direction: column; gap: 0.1rem; }
+.heart .hm .n { font-size: 1.05rem; font-weight: 600; color: #e6ebf5; }
+.heart .hm .l { font-size: 0.66rem; color: #7c849a; text-transform: uppercase; letter-spacing: 0.04em; }
 """
 
 # Baseline-poll live updater (M6 #3, worker side). Completes the same principle
@@ -72,10 +102,71 @@ _LIVE_SCRIPT = """  <script>
       ind.title = ok ? 'live \\u2014 this page auto-updates (poll); no refresh needed'
                      : 'stale \\u2014 auto-refresh is failing right now';
     }
+    // ── Activity heart (overview only). Pulse = this worker's completed units
+    // over time, accumulated client-side from the same poll. Same color identity
+    // as the researcher/operator hearts: cyan=working, blue=idle, red=problem.
+    var heartHist = [];
+    function heartState(d) {
+      if (!d.worker_id) return 'idle';
+      if (d.state_tone === 'warn' || d.state_tone === 'error') return 'problem';
+      if (d.thermal_enabled && d.thermal_state === 'critical') return 'problem';
+      var h = String(d.activity_headline || '').toLowerCase();
+      if (h.indexOf('running') >= 0 || h.indexOf('receiving') >= 0) return 'working';
+      return 'idle';
+    }
+    function renderHeart(d) {
+      var strip = document.getElementById('heart-strip');
+      if (!strip) return; // not the overview page
+      heartHist.push({ t: Date.now(), c: d.completed_units || 0 });
+      if (heartHist.length > 80) heartHist.shift();
+      var beats = [], maxD = 1;
+      for (var i = 1; i < heartHist.length; i++) {
+        var dlt = Math.max(0, heartHist[i].c - heartHist[i - 1].c);
+        beats.push(dlt);
+        if (dlt > maxD) maxD = dlt;
+      }
+      if (beats.length === 0) {
+        strip.innerHTML = '<span class="strip-empty">listening\\u2026</span>';
+      } else {
+        var bars = '';
+        for (var j = 0; j < beats.length; j++) {
+          var hgt = beats[j] > 0 ? (16 + Math.round((beats[j] / maxD) * 44)) : 2;
+          bars += '<span class="bar' + (beats[j] > 0 ? ' beat' : '') + '" style="height:' + hgt + 'px"></span>';
+        }
+        strip.innerHTML = bars;
+      }
+      var st = heartState(d);
+      var dot = document.getElementById('heart-dot');
+      if (dot) dot.className = 'pulse-dot ' + st;
+      var statusEl = document.getElementById('heart-status');
+      if (statusEl) statusEl.textContent = st === 'working' ? 'working' : (st === 'problem' ? 'attention' : 'idle');
+      var narr = document.getElementById('heart-narration');
+      if (narr) {
+        var parts = [], u = d.completed_units || 0, e = d.distinct_experiments || 0;
+        if (u > 0) parts.push('contributed ' + u + ' unit' + (u === 1 ? '' : 's') + (e ? ' across ' + e + ' experiment' + (e === 1 ? '' : 's') : ''));
+        if (d.activity_headline) parts.push(String(d.activity_detail ? (d.activity_headline + ' \\u2014 ' + d.activity_detail) : d.activity_headline).toLowerCase());
+        narr.textContent = parts.join(' \\u00B7 ') || 'waiting for work\\u2026';
+        narr.className = 'narration ' + (st === 'working' ? 'good' : (st === 'problem' ? 'bad' : 'reassure'));
+      }
+      var vit = document.getElementById('heart-vitals');
+      if (vit) {
+        var v = [];
+        v.push('<span class="vital"><i class="vdot ' + (d.worker_id ? 'ok' : 'down') + '"></i>' + (d.last_heartbeat_at ? 'heartbeat ' + rel(d.last_heartbeat_at) : 'not enrolled') + '</span>');
+        if (d.flavor) v.push('<span class="vital muted">' + String(d.flavor).replace(/[<>&]/g, '') + ' flavor</span>');
+        if (d.thermal_enabled && d.thermal_state) {
+          var tcls = d.thermal_state === 'critical' ? 'bad' : (d.thermal_state === 'warm' ? 'warn' : '');
+          v.push('<span class="vital ' + tcls + '">' + (d.thermal_temp_c != null ? d.thermal_temp_c + '\\u00B0C' : String(d.thermal_state).replace(/[<>&]/g, '')) + '</span>');
+        }
+        vit.innerHTML = v.join('');
+      }
+      var hu = document.getElementById('heart-units'); if (hu) hu.textContent = d.completed_units || 0;
+      var he = document.getElementById('heart-exps'); if (he) he.textContent = d.distinct_experiments || 0;
+    }
     function tick() {
       fetch('/api/stats', { cache: 'no-store' })
         .then(function (r) { if (!r.ok) throw new Error('http ' + r.status); return r.json(); })
         .then(function (d) {
+          renderHeart(d);
           document.querySelectorAll('[data-live]').forEach(function (el) {
             var k = el.getAttribute('data-live');
             if (k === 'thermal') {
@@ -116,6 +207,7 @@ _LIVE_SCRIPT = """  <script>
         })
         .catch(function () { setLive(false); });
     }
+    tick();
     setInterval(tick, 10000);
   })();
   </script>
