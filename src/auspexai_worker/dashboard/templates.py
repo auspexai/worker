@@ -45,6 +45,8 @@ code { font-family: ui-monospace, monospace; background: #1a1e2a; padding: 0.1em
 .notice .copy-cmd { background: #1f2937; border: 1px solid #3b82f6; color: inherit; border-radius: 4px; padding: 0.15em 0.6em; margin-left: 0.4em; font: inherit; font-size: 0.85em; cursor: pointer; }
 .notice .copy-cmd:hover { background: #2a2e3a; }
 .live-ind { font-size: 0.6em; font-weight: 500; color: #86efac; margin-left: 0.5em; vertical-align: middle; }
+/* the state banner is a HOLD alert now (option B): empty for active/idle → collapse it */
+[data-live="state_banner"]:empty { display: none; }
 /* activity heart (overview) — shared identity: cyan=working, blue=idle, red=problem */
 .heart { border: 1px solid #1f6b78; border-radius: 12px; background: linear-gradient(180deg,#101727 0%,#0c1322 100%); padding: 1rem 1.1rem; margin: 1em 0; display: flex; flex-direction: column; gap: 0.6rem; }
 .heart header { display: flex; align-items: center; gap: 0.55rem; margin: 0; }
@@ -144,7 +146,13 @@ _LIVE_SCRIPT = """  <script>
       if (narr) {
         var parts = [], u = d.completed_units || 0, e = d.distinct_experiments || 0;
         if (u > 0) parts.push('contributed ' + u + ' unit' + (u === 1 ? '' : 's') + (e ? ' across ' + e + ' experiment' + (e === 1 ? '' : 's') : ''));
-        if (d.activity_headline) parts.push(String(d.activity_detail ? (d.activity_headline + ' \\u2014 ' + d.activity_detail) : d.activity_headline).toLowerCase());
+        if (st === 'problem' && d.state_label) {
+          // a hold (paused/quarantined/overheating) — say so, don't claim "idle";
+          // the loud detail + reason is in the banner above.
+          parts.push(String(d.state_label).toLowerCase());
+        } else if (d.activity_headline) {
+          parts.push(String(d.activity_detail ? (d.activity_headline + ' \\u2014 ' + d.activity_detail) : d.activity_headline).toLowerCase());
+        }
         narr.textContent = parts.join(' \\u00B7 ') || 'waiting for work\\u2026';
         narr.className = 'narration ' + (st === 'working' ? 'good' : (st === 'problem' ? 'bad' : 'reassure'));
       }

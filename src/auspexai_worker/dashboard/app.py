@@ -183,16 +183,17 @@ def _state_banner(
 ) -> tuple[str, str]:
     """Return (css_class, inner_html) for the overview state banner. Shared by
     the server render and /api/stats so the banner updates live + identically.
-    ACTIVE uses the dynamic work-activity headline (accurate, never
-    overclaiming); every hold state uses its own already-accurate label+detail."""
+    Option B: active/idle is the activity heart's job now, so the banner is
+    EMPTY there (the container collapses via CSS); it is reserved for HOLD states
+    (paused / quarantined / self-paused / overheating / offline), where a loud,
+    reason-carrying alert beats the heart's thin red line. Returning ('', '')
+    lets the live poll flip a hold in/out without a reload."""
     if state.state is SelfState.ACTIVE:
-        headline, detail = _work_activity(
-            config, runs_dir=runs_dir, last_submitted_at=last_submitted_at, now=now
-        )
-        cls = "notice ok"
-    else:
-        headline, detail = state.label, state.detail
-        cls = "notice fault" if state.fault else "notice"
+        # active or idle — the heart shows it; no banner.
+        _ = (runs_dir, last_submitted_at, now)  # (kept for signature parity)
+        return "", ""
+    headline, detail = state.label, state.detail
+    cls = "notice fault" if state.fault else "notice"
     inner = f"<strong>{html.escape(headline)}</strong> — {html.escape(detail)}"
     return cls, inner
 

@@ -382,32 +382,30 @@ class TestNoExternalSurface:
 class TestI4Overview:
     """I4 (ui_triage_first_ia_redesign.md §5): state-banner-first + inference."""
 
-    def test_active_idle_worker_banner_does_not_overclaim(
+    def test_active_idle_worker_shows_no_banner_and_honest_activity(
         self, client: TestClient, db: Database
     ) -> None:
-        """An enrolled, heartbeating worker with NO recent work must NOT claim
-        'receiving work' — it leads with an always-on banner (before Identity)
-        that honestly says idle/available."""
+        """Option B: an idle worker shows NO state banner (the heart owns active/
+        idle) — the container stays present-but-empty so the live poll can flip a
+        hold in, and the heart's activity source honestly says 'Idle', never
+        'Receiving work'."""
         from auspexai_worker.state import WorkerSelfRepository
 
         _enroll(db)
         WorkerSelfRepository(db).record_heartbeat(datetime.now(UTC), trust_tier=0)
         r = client.get("/")
-        assert 'data-live="state_banner"' in r.text
-        # Scope the assertions to the banner div (the phrase "receiving work"
-        # legitimately appears elsewhere — the self-pause control's helper text).
         start = r.text.index('data-live="state_banner"')
         banner = r.text[start : r.text.index("</div>", start)]
-        assert "idle" in banner.lower()
-        assert "receiving work" not in banner.lower()  # the overclaim we're fixing
-        # banner leads the page, before Identity
-        assert start < r.text.index("<h2>Identity</h2>")
+        assert "receiving work" not in banner.lower()  # no overclaim
+        # the honest activity lives in the heart's source now
+        d = client.get("/api/stats").json()
+        assert d["activity_headline"] == "Idle"
 
     def test_active_worker_with_recent_work_says_receiving(
         self, client: TestClient, db: Database
     ) -> None:
-        """A worker that submitted a unit recently DOES accurately say it's
-        receiving work."""
+        """A worker that submitted a unit recently accurately reports 'Receiving
+        work' — via the heart's activity source (the banner is hold-only now)."""
         from auspexai_worker.state import SubmittedResultRepository, WorkerSelfRepository
 
         _enroll(db)
@@ -423,19 +421,22 @@ class TestI4Overview:
             coord_replication_target=3,
             payload_json="{}",
         )
-        r = client.get("/")
-        assert "Receiving work" in r.text
+        d = client.get("/api/stats").json()
+        assert d["activity_headline"] == "Receiving work"
 
-    def test_api_stats_carries_dynamic_banner(self, client: TestClient, db: Database) -> None:
-        """The poll source carries the banner html+class so it updates live."""
+    def test_api_stats_banner_empty_for_active_activity_in_headline(
+        self, client: TestClient, db: Database
+    ) -> None:
+        """The banner is a HOLD alert (option B): EMPTY for an active/idle worker
+        (the container collapses); the live activity is carried in
+        activity_headline, which the heart renders."""
         from auspexai_worker.state import WorkerSelfRepository
 
         _enroll(db)
         WorkerSelfRepository(db).record_heartbeat(datetime.now(UTC), trust_tier=0)
         d = client.get("/api/stats").json()
-        assert "state_banner_html" in d and "state_banner_class" in d
-        assert "Idle" in d["state_banner_html"]
-        assert d["state_banner_class"] == "notice ok"
+        assert d["state_banner_html"] == "" and d["state_banner_class"] == ""
+        assert d["activity_headline"] == "Idle"
 
     def test_inference_row_absent_when_backend_none(self, client: TestClient, db: Database) -> None:
         _enroll(db)
