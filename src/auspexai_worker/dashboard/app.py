@@ -37,7 +37,7 @@ from auspexai_worker.state import (
 from auspexai_worker.worker_state import SelfState, derive_self_state
 from auspexai_worker.workspace import workspace_runs_dir
 
-from .templates import render_kv, render_page, render_table
+from .templates import render_cards, render_kv, render_page, render_table
 
 
 def _fmt_relative(when: datetime | None) -> str:
@@ -243,15 +243,14 @@ def _update_notice(worker, config: WorkerConfig) -> tuple[str, str]:
     return "notice", inner
 
 
-def _inference_html(config: WorkerConfig) -> str:
-    """W-S: an extra Health & execution row when the worker is configured to
-    serve models for inference tenants. Returns '' (no row) when
-    `[inference] backend = "none"` — absent means 'not an inference host',
-    mirroring the heartbeat wire. When ollama, probes the backend directly so
-    the volunteer sees whether it's actually reachable."""
+def _inference_value(config: WorkerConfig) -> str | None:
+    """W-S: the value cell for the 'inference backend' capability card, or None
+    when `[inference] backend = "none"` (not an inference host — no card, mirroring
+    the heartbeat wire). When ollama, probes the backend so the volunteer sees
+    whether it's actually reachable."""
     backend = getattr(config, "inference_backend", "none")
     if backend == "none":
-        return ""
+        return None
     if backend == "ollama":
         version: str | None = None
         try:
@@ -271,10 +270,8 @@ def _inference_html(config: WorkerConfig) -> str:
         # §9 #46 determinism provenance: show the serving runtime's version.
         ver = f" <code>v{html.escape(version)}</code>" if version else ""
         url = html.escape(config.inference_ollama_url)
-        return (
-            f"\n      <dt>inference backend</dt><dd>ollama @ <code>{url}</code>{ver} {badge}</dd>"
-        )
-    return f"\n      <dt>inference backend</dt><dd>{html.escape(str(backend))}</dd>"
+        return f"ollama @ <code>{url}</code>{ver} {badge}"
+    return html.escape(str(backend))
 
 
 def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = None) -> FastAPI:
@@ -301,6 +298,15 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
         redoc_url=None,
         openapi_url=None,
     )
+
+    @app.middleware("http")
+    async def _no_store(request: Request, call_next):
+        # The page is server-rendered, so a daemon upgrade only takes effect on a
+        # page reload; no-store guarantees that reload fetches the NEW HTML rather
+        # than a browser-cached copy (the stale-layout gotcha after a roll).
+        response = await call_next(request)
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     self_repo = WorkerSelfRepository(db)
     audit_repo = AssignmentAuditRepository(db)
@@ -358,29 +364,46 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
             f"{_executor_badge(_current_executor_policy(config, config_path))} "
             '<a href="/config" class="dim">change</a>'
         )
-        # W-S: the inference-backend reachability row (only when configured).
-        inference_row = _inference_html(config)
         # Heartbeat + thermal (the live "right now" signals) now live in the
-        # activity heart's vitals; this section keeps the static capabilities.
-        status_html = f"""    <h2>Capabilities</h2>
-    <dl class="kv">
-      <dt>accelerator</dt><dd>{html.escape(acc.label)}</dd>
-      <dt>executor mode</dt><dd>{executor_cell}</dd>
-      <dt>models in store</dt><dd>{model_count} (<a href="/models">manage</a>)</dd>{inference_row}
-    </dl>"""
+        # activity heart's vitals; this section keeps the static capabilities, as
+        # cards (researcher-dashboard aesthetic).
+        cap_rows = [
+            ("accelerator", html.escape(acc.label), False),
+            ("executor mode", executor_cell, False),
+            ("models in store", f'{model_count} (<a href="/models">manage</a>)', False),
+        ]
+        inf = _inference_value(config)  # only when this is an inference host
+        if inf is not None:
+            cap_rows.append(("inference backend", inf, False))
+        status_html = "    <h2>Capabilities</h2>\n" + render_cards(cap_rows)
 
-        # ── Contribution: what this worker has done (Progress + Activity merged —
-        # they answered the same question in two boxes).
+        # ── Units completed + distinct experiments are the heart's headline
+        # metrics; this is the fuller ledger behind them.
         progress = results_repo.progress_summary()
-        # Units completed + distinct experiments are the heart's headline metrics;
-        # this is the fuller ledger behind them.
-        contribution_html = f"""    <h2>Contribution ledger</h2>
-    <dl class="kv">
-      <dt>receipts earned</dt><dd><span data-live="receipts_count">{stats["receipts_count"]}</span></dd>
-      <dt>pending submissions</dt><dd><span data-live="pending_submissions">{stats["pending_submissions"]}</span></dd>
-      <dt>audit-log rows</dt><dd><span data-live="audit_count">{stats["audit_count"]}</span></dd>
-      <dt>tenant allow / deny</dt><dd>{stats["tenant_allow_count"]} / {stats["tenant_deny_count"]}</dd>
-    </dl>"""
+        contribution_html = "    <h2>Contribution ledger</h2>\n" + render_cards(
+            [
+                (
+                    "receipts earned",
+                    f'<span data-live="receipts_count">{stats["receipts_count"]}</span>',
+                    False,
+                ),
+                (
+                    "pending submissions",
+                    f'<span data-live="pending_submissions">{stats["pending_submissions"]}</span>',
+                    False,
+                ),
+                (
+                    "audit-log rows",
+                    f'<span data-live="audit_count">{stats["audit_count"]}</span>',
+                    False,
+                ),
+                (
+                    "tenant allow / deny",
+                    f"{stats['tenant_allow_count']} / {stats['tenant_deny_count']}",
+                    False,
+                ),
+            ]
+        )
 
         upgrade_html = ""
         if (
@@ -395,10 +418,9 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
                 "</div>\n"
             )
 
-        # ── Identity: the static "who is this worker" facts.
+        # ── Identity: the deeper "who is this worker" facts (worker_id + version
+        # now ride the heart header). Cards, like the other sections.
         identity_rows: list[tuple[str, str, bool]] = [
-            ("worker_id", html.escape(worker.worker_id), True),
-            ("worker version", f"<code>{html.escape(__version__)}</code>", False),
             *(
                 [("flavor", f"<code>{html.escape(config.flavor)}</code>", False)]
                 if config.flavor
@@ -414,7 +436,7 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
             ),
             ("coordinator", f"<code>{html.escape(config.coordinator_url)}</code>", False),
         ]
-        identity_html = "    <h2>Identity</h2>\n" + render_kv(identity_rows)
+        identity_html = "    <h2>Identity</h2>\n" + render_cards(identity_rows)
 
         # §2.1 #11 (volunteer surface) + I4 (ui_triage_first_ia_redesign.md §5):
         # the state banner leads the page so "is anything wrong with my box?" is
@@ -479,6 +501,7 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
         <h2 class="heart-h">Activity</h2>
         <span class="heart-status" id="heart-status">—</span>
       </header>
+      <div class="heart-id">{html.escape(worker.worker_id)} · v{html.escape(__version__)}</div>
       <div class="strip" id="heart-strip"><span class="strip-empty">listening…</span></div>
       <p class="narration" id="heart-narration">—</p>
       <div class="heart-vitals" id="heart-vitals"></div>

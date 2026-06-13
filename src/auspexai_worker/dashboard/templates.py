@@ -28,6 +28,14 @@ th { color: #9ca3af; font-weight: 500; }
 .kv dt { color: #9ca3af; }
 .kv dd { margin: 0; }
 .kv dd.mono { word-break: break-all; }
+/* card grid — matches the researcher dashboard's .grid/.field metric cards */
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.6em; margin: 0.5em 0 1.3em; }
+.field { border: 1px solid #1e2638; border-radius: 6px; padding: 0.55em 0.75em; background: #0e1424; display: flex; flex-direction: column; gap: 0.2em; min-width: 0; }
+.field .k { color: #7c849a; font-size: 0.7em; text-transform: uppercase; letter-spacing: 0.04em; }
+.field .v { color: #e6ebf5; }
+.field .v.mono { font-family: ui-monospace, monospace; font-size: 0.85em; word-break: break-all; }
+/* compact identity line in the heart header (worker_id · version) */
+.heart .heart-id { font-size: 0.72em; color: #7c849a; font-family: ui-monospace, monospace; margin: -0.2em 0 0.1em; }
 .badge { display: inline-block; padding: 0.1em 0.55em; border-radius: 3px; font-size: 0.8em; font-weight: 500; }
 .badge.tier-0 { background: #2a2e3a; color: #9ca3af; }
 .badge.tier-1, .badge.tier-2, .badge.tier-3, .badge.tier-4 { background: #312e81; color: #c4b5fd; }
@@ -284,6 +292,21 @@ def render_kv(rows: list[tuple[str, str, bool]]) -> str:
         parts.append(f"      <dt>{label}</dt>")
         parts.append(f'      <dd class="{cls}">{value}</dd>')
     parts.append("    </dl>")
+    return "\n".join(parts)
+
+
+def render_cards(rows: list[tuple[str, str, bool]]) -> str:
+    """Render a (label, value, is_mono) list as a responsive grid of cards —
+    the same .grid/.field aesthetic as the researcher dashboard's experiment
+    page. Value html is inserted verbatim (caller escapes)."""
+    parts = ['    <div class="grid">']
+    for label, value, mono in rows:
+        v_cls = "v mono" if mono else "v"
+        parts.append(
+            f'      <div class="field"><span class="k">{label}</span>'
+            f'<span class="{v_cls}">{value}</span></div>'
+        )
+    parts.append("    </div>")
     return "\n".join(parts)
 
 

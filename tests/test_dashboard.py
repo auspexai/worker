@@ -130,6 +130,19 @@ class TestOverview:
         ):
             assert marker in r.text, marker
 
+    def test_overview_card_layout_heart_id_and_no_store(
+        self, client: TestClient, db: Database
+    ) -> None:
+        """The sections render as cards (.grid/.field, researcher-dashboard style);
+        worker_id + version ride the heart header; the page is no-store so a reload
+        after a daemon roll fetches fresh HTML."""
+        _enroll(db)
+        r = client.get("/")
+        assert 'class="grid"' in r.text and 'class="field"' in r.text
+        assert 'class="heart-id"' in r.text  # worker_id · version in the heart
+        assert "<dt>worker_id</dt>" not in r.text  # moved OUT of the Identity dl
+        assert r.headers.get("cache-control") == "no-store"
+
     def test_overview_status_badge_and_fault_tone(self, client: TestClient, db: Database) -> None:
         """§2.1 #11: the overview shows a single worker-state badge, and a
         quarantine (the one fault signal) renders the fault-toned notice while a
