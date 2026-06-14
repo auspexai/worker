@@ -3,10 +3,13 @@
 Two modes:
 - `passthrough` — direct exec of `auspexai-worker-runner`. No isolation.
   Used by tests + dev hosts without bubblewrap installed. CI uses this.
-- `bubblewrap` — wrap the runner in `bwrap` with §5.17 bind-mounts. Phase 1
-  default policy is permissive (--dev-bind / / shares the host filesystem;
-  no network namespace; no capability filtering). Phase 2 will tighten
-  by changing the `policy` enum value, not the daemon code.
+- `bubblewrap` — wrap the runner in `bwrap` with §5.17 bind-mounts. PERMISSIVE
+  (default) shares the host filesystem (--dev-bind / /). STRICT (§41(a))
+  replaces that with narrow read-only system binds + the worker venv + a
+  tmpfs, and adds full namespace isolation (net/pid/ipc/uts) — so a
+  malicious/buggy executor can't reach the keystore, $HOME, prior receipts, or
+  cross-tenant data. Selected by the `policy` enum from `[sandbox] policy`,
+  not daemon code. seccomp + cgroup caps are the next hardening increments.
 
 Environment variables passed through to the runner regardless of mode:
   AUSPEXAI_UNIT_ID
@@ -27,11 +30,16 @@ from pathlib import Path
 
 
 class SandboxPolicy(Enum):
-    """Phase 1 ships PERMISSIVE; Phase 2 will add STRICT (no-net, narrow
-    binds, resource caps enforced) without changing this enum's interface."""
+    """PERMISSIVE shares the host fs (`--dev-bind / /`) — fine only under the
+    Phase-1 trust model (vetted tenants, signed packages, operator-owned hosts).
+    STRICT (§41(a)) replaces that with narrow read-only binds + full namespace
+    isolation, so a malicious/buggy executor can't reach the identity keystore,
+    `$HOME`, prior receipts, other tenants' staged packages, or the model store —
+    only a cooperating kernel. seccomp + cgroup caps are the next hardening
+    layers (§41(a) follow-on increments)."""
 
     PERMISSIVE = "permissive"
-    # STRICT = "strict"  # Phase 2
+    STRICT = "strict"
 
 
 class SandboxNotAvailableError(Exception):
@@ -162,46 +170,35 @@ def build_argv(config: SandboxConfig) -> list[str]:
             "install `bubblewrap` or set `[sandbox] use_bubblewrap = false` "
             "(NOT recommended for production)"
         )
+    resolved_runner = resolve_runner_bin(config.runner_bin)
     argv = [
         config.bwrap_path,
         # Die when the parent (worker daemon) exits — don't leak runner
         # subprocesses on daemon crash.
         "--die-with-parent",
-        # New process session — signals to the daemon don't propagate to
-        # the runner unintentionally, and our explicit SIGTERM-via-PID-file
-        # path stays the only abort channel.
+        # New process session — signals to the daemon don't propagate to the
+        # runner unintentionally; our explicit SIGTERM-via-PID-file path stays
+        # the only abort channel.
         "--new-session",
-        # Permissive Phase 1 host-fs view: --dev-bind / / shares everything
-        # read-write, but is still a separate mount namespace so binds and
-        # tmpfs work. Phase 2 will replace this with narrow --ro-bind /usr
-        # /etc /lib... and a tmpfs for /tmp. Same call site; config flag
-        # controls.
-        "--dev-bind",
-        "/",
-        "/",
-        # /proc must be mounted in the new pid namespace (when STRICT
-        # adds --unshare-pid). Phase 1 permissive doesn't unshare pid, so
-        # this is a no-op safety net.
-        "--proc",
-        "/proc",
-        # /dev — needed for /dev/null, /dev/random, GPU device files
-        # (when present). Phase 2 will narrow to specific device files.
-        "--dev",
-        "/dev",
-        # Ensure the workspace dir is visible to the runner (already
-        # accessible via --dev-bind but make it explicit so STRICT keeps
-        # working when --dev-bind is dropped).
-        "--bind",
-        config.workspace_path,
-        config.workspace_path,
     ]
+    if config.policy is SandboxPolicy.STRICT:
+        argv += _strict_fs_argv(config, resolved_runner)
+        # §41(a): full namespace isolation — no network, private pid/ipc/uts.
+        # With --unshare-pid the executor is pid 1 in a private namespace and
+        # cannot see or signal host processes.
+        argv += ["--unshare-net", "--unshare-pid", "--unshare-ipc", "--unshare-uts"]
+    else:
+        argv += _permissive_fs_argv(config)
+        # §5.17: real tenant code gets NO network (the inference broker socket is
+        # a filesystem object, so it survives --unshare-net). The synthetic echo
+        # keeps host net — a pure no-op for the existing path.
+        if config.executor_command is not None:
+            argv.append("--unshare-net")
+    # Real-executor resource binds — the tenant package + the served-model store
+    # + the per-unit broker socket. Under PERMISSIVE these are redundant
+    # (--dev-bind / / already exposes them) but explicit; under STRICT they are
+    # the ONLY paths the executor can reach besides the system dirs + workspace.
     if config.executor_command is not None:
-        # §5.17: the inference subprocess gets NO network. Real tenant code
-        # runs in a network namespace with no interface. (Synthetic-only
-        # dispatch keeps host net so it stays a pure no-op change for the
-        # existing echo path.) Phase 2 STRICT replaces --dev-bind / / with
-        # narrow --ro-bind of the package + models dirs explicitly bound here.
-        argv.append("--unshare-net")
         if config.executor_package_dir:
             argv += ["--ro-bind", config.executor_package_dir, config.executor_package_dir]
         if config.models_dir:
@@ -212,8 +209,73 @@ def build_argv(config: SandboxConfig) -> list[str]:
     # Absolute path so bwrap's execvp finds the runner (the sandbox PATH won't
     # include the venv bin dir). Passthrough mode (above) leaves resolution to
     # the daemon's own PATH, unchanged.
-    argv += [*env_args, "--", resolve_runner_bin(config.runner_bin)]
+    argv += [*env_args, "--", resolved_runner]
     return argv
+
+
+def _permissive_fs_argv(config: SandboxConfig) -> list[str]:
+    """Phase-1 PERMISSIVE filesystem view: the whole host fs, read-write. A
+    separate mount namespace (so binds/tmpfs work) but no real containment —
+    acceptable only under the Phase-1 trust model."""
+    return [
+        "--dev-bind",
+        "/",
+        "/",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        "--bind",
+        config.workspace_path,
+        config.workspace_path,
+    ]
+
+
+def _strict_fs_argv(config: SandboxConfig, resolved_runner: str) -> list[str]:
+    """§41(a) STRICT filesystem view: NO `--dev-bind / /`. Narrow read-only
+    system dirs + the worker venv (so the runner and its python resolve), a
+    private tmpfs `/tmp` (with HOME pointed at it so library caches land on the
+    ephemeral mount), a fresh `/proc` + minimal `/dev`, and the per-unit
+    workspace as the SOLE host-writable path. The identity keystore, `$HOME`,
+    prior receipts, and other tenants' staged packages live OUTSIDE these binds,
+    so the executor cannot read them."""
+    # <venv>/bin/<runner> -> <venv>; binds the python + auspexai_worker + deps.
+    venv_root = str(Path(resolved_runner).resolve().parents[1])
+    return [
+        "--ro-bind",
+        "/usr",
+        "/usr",
+        "--ro-bind-try",
+        "/bin",
+        "/bin",
+        "--ro-bind-try",
+        "/sbin",
+        "/sbin",
+        "--ro-bind-try",
+        "/lib",
+        "/lib",
+        "--ro-bind-try",
+        "/lib64",
+        "/lib64",
+        "--ro-bind-try",
+        "/etc",
+        "/etc",
+        "--ro-bind",
+        venv_root,
+        venv_root,
+        "--tmpfs",
+        "/tmp",
+        "--setenv",
+        "HOME",
+        "/tmp",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        "--bind",
+        config.workspace_path,
+        config.workspace_path,
+    ]
 
 
 def _env_argv(config: SandboxConfig) -> list[str]:

@@ -52,7 +52,12 @@ from auspexai_worker.provisioning import (
     ExecutorResolver,
     decide_execution,
 )
-from auspexai_worker.sandbox import SandboxConfig, SandboxNotAvailableError, build_argv
+from auspexai_worker.sandbox import (
+    SandboxConfig,
+    SandboxNotAvailableError,
+    SandboxPolicy,
+    build_argv,
+)
 from auspexai_worker.signing import sign_result
 from auspexai_worker.state import (
     PendingSubmissionRepository,
@@ -104,6 +109,7 @@ class RunnerDispatcher:
         submitted_repo: SubmittedResultRepository,
         pending_repo: PendingSubmissionRepository,
         use_bubblewrap: bool,
+        sandbox_policy: SandboxPolicy = SandboxPolicy.PERMISSIVE,
         runner_bin: str = "auspexai-worker-runner",
         runner_timeout_seconds: float | None = None,
         on_runner_spawned=None,  # Callable[[int], None] — receives PID
@@ -154,6 +160,7 @@ class RunnerDispatcher:
         self._submitted = submitted_repo
         self._pending = pending_repo
         self._use_bubblewrap = use_bubblewrap
+        self._sandbox_policy = sandbox_policy
         self._runner_bin = runner_bin
         self._runner_timeout_seconds = runner_timeout_seconds
         self._on_runner_spawned = on_runner_spawned
@@ -282,6 +289,7 @@ class RunnerDispatcher:
 
         sandbox_config = SandboxConfig(
             use_bubblewrap=self._use_bubblewrap,
+            policy=self._sandbox_policy,
             runner_bin=self._runner_bin,
             workspace_path=str(workspace.workspace_dir),
             output_path=str(workspace.output_path),

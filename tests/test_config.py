@@ -26,6 +26,25 @@ class TestConfigDefaults:
         assert cfg.declared_gpus.is_empty() is True
 
 
+class TestSandboxPolicy:
+    def test_defaults_permissive(self, tmp_path: Path) -> None:
+        cfg = WorkerConfig.load(config_path=tmp_path / "missing.toml", env={})
+        assert cfg.sandbox_policy == "permissive"
+        assert cfg.sandbox_use_bubblewrap is True
+
+    def test_strict_from_sandbox_block(self, tmp_path: Path) -> None:
+        cfg_file = tmp_path / "worker.toml"
+        _write(cfg_file, "[sandbox]\npolicy = 'strict'\n")
+        cfg = WorkerConfig.load(config_path=cfg_file, env={})
+        assert cfg.sandbox_policy == "strict"
+
+    def test_invalid_policy_rejected(self, tmp_path: Path) -> None:
+        cfg_file = tmp_path / "worker.toml"
+        _write(cfg_file, "[sandbox]\npolicy = 'wide-open'\n")
+        with pytest.raises(ValueError, match="policy must be one of"):
+            WorkerConfig.load(config_path=cfg_file, env={})
+
+
 class TestExecutorAutoAcquire:
     def test_defaults_off(self, tmp_path: Path) -> None:
         cfg = WorkerConfig.load(config_path=tmp_path / "missing.toml", env={})

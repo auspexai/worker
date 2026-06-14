@@ -68,6 +68,11 @@ class WorkerConfig:
     # [sandbox] — Phase 1 ships PERMISSIVE; tests + dev hosts without bwrap
     # set use_bubblewrap=false. Production MUST use bwrap.
     sandbox_use_bubblewrap: bool = True
+    # §41(a): [sandbox] policy = permissive | strict. STRICT replaces the host-fs
+    # --dev-bind / / with narrow read-only binds + namespace isolation, so real
+    # tenant code can't reach the keystore / $HOME / cross-tenant data. Default
+    # permissive (the Phase-1 trust model); flip to strict per-worker.
+    sandbox_policy: str = "permissive"
     # Maximum wall-clock seconds a runner subprocess can take. None = no
     # timeout (Phase 1 synthetic-tenant work is bounded by trivial logic).
     runner_timeout_seconds: float | None = None
@@ -202,6 +207,7 @@ class WorkerConfig:
             "declared_gpu_amd": None,
             "declared_gpu_amd_model": None,
             "sandbox_use_bubblewrap": True,
+            "sandbox_policy": "permissive",
             "runner_timeout_seconds": None,
             "execute_tenant_code": "synthetic",
             "provisioning_dir": None,
@@ -269,6 +275,8 @@ class WorkerConfig:
             sandbox_block = data.get("sandbox") or {}
             if "use_bubblewrap" in sandbox_block:
                 merged["sandbox_use_bubblewrap"] = sandbox_block["use_bubblewrap"]
+            if "policy" in sandbox_block:
+                merged["sandbox_policy"] = sandbox_block["policy"]
             if "runner_timeout_seconds" in sandbox_block:
                 merged["runner_timeout_seconds"] = sandbox_block["runner_timeout_seconds"]
             executor_block = data.get("executor") or {}
@@ -376,6 +384,7 @@ class WorkerConfig:
                 amd_model=_opt_str(merged.get("declared_gpu_amd_model")),
             ),
             sandbox_use_bubblewrap=bool(merged.get("sandbox_use_bubblewrap", True)),
+            sandbox_policy=_validate_sandbox_policy(merged.get("sandbox_policy", "permissive")),
             runner_timeout_seconds=_opt_float(merged.get("runner_timeout_seconds")),
             execute_tenant_code=_validate_policy(merged.get("execute_tenant_code", "synthetic")),
             auto_acquire=bool(merged.get("auto_acquire", False)),
@@ -419,6 +428,16 @@ def _validate_policy(raw: object) -> str:
     val = str(raw)
     if val not in _EXECUTE_POLICIES:
         raise ValueError(f"execute_tenant_code must be one of {_EXECUTE_POLICIES}, got {val!r}")
+    return val
+
+
+_SANDBOX_POLICIES = ("permissive", "strict")
+
+
+def _validate_sandbox_policy(raw: object) -> str:
+    val = str(raw)
+    if val not in _SANDBOX_POLICIES:
+        raise ValueError(f"[sandbox] policy must be one of {_SANDBOX_POLICIES}, got {val!r}")
     return val
 
 

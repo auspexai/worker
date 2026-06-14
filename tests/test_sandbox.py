@@ -10,11 +10,12 @@ import pytest
 from auspexai_worker.sandbox import (
     SandboxConfig,
     SandboxNotAvailableError,
+    SandboxPolicy,
     build_argv,
     check_bubblewrap_available,
     probe_bubblewrap,
 )
-from auspexai_worker.sandbox.wrapper import resolve_runner_bin
+from auspexai_worker.sandbox.wrapper import _strict_fs_argv, resolve_runner_bin
 
 
 def _config(*, use_bubblewrap: bool, bwrap_path: str = "bwrap") -> SandboxConfig:
@@ -58,6 +59,69 @@ class TestBubblewrap:
     def test_missing_bwrap_raises(self) -> None:
         with pytest.raises(SandboxNotAvailableError):
             build_argv(_config(use_bubblewrap=True, bwrap_path="bwrap-that-does-not-exist"))
+
+
+_RUNNER = "/opt/auspexai-worker/bin/auspexai-worker-runner"
+
+
+def _strict_config(**kw) -> SandboxConfig:
+    base = dict(
+        use_bubblewrap=True,
+        policy=SandboxPolicy.STRICT,
+        runner_bin=_RUNNER,
+        workspace_path="/var/lib/auspexai-worker/work/u-1",
+        output_path="/var/lib/auspexai-worker/work/u-1/output.json",
+        unit_id="u-1",
+        manifest_sha256="a" * 64,
+    )
+    base.update(kw)
+    return SandboxConfig(**base)
+
+
+class TestStrictPolicy:
+    def test_strict_fs_argv_drops_host_fs_and_narrows(self) -> None:
+        """§41(a): STRICT replaces --dev-bind / / with narrow read-only system +
+        venv binds, a tmpfs, and the workspace as the only host-writable path."""
+        args = _strict_fs_argv(_strict_config(), _RUNNER)
+        assert "--dev-bind" not in args  # the whole-host hole is gone
+        assert "--ro-bind" in args and "/usr" in args
+        assert "/opt/auspexai-worker" in args  # the worker venv (runner + python)
+        assert "--tmpfs" in args
+        i = args.index("--setenv")
+        assert args[i : i + 3] == ["--setenv", "HOME", "/tmp"]
+        # the per-unit workspace IS bound (writable output path).
+        assert "--bind" in args
+        assert "/var/lib/auspexai-worker/work/u-1" in args
+
+    def test_strict_build_argv_isolates_namespaces_and_binds_executor(self) -> None:
+        if not check_bubblewrap_available():
+            pytest.skip("bubblewrap not installed on this host")
+        argv = build_argv(
+            _strict_config(
+                executor_command=["python", "exec.py"],
+                executor_package_dir="/srv/pkg",
+                models_dir="/srv/models",
+                inference_socket="/var/lib/auspexai-worker/work/u-1/broker.sock",
+            )
+        )
+        assert "--dev-bind" not in argv  # host-fs hole closed
+        for ns in ("--unshare-net", "--unshare-pid", "--unshare-ipc", "--unshare-uts"):
+            assert ns in argv
+        # executor reaches its package + model store + broker socket — and only
+        # those, plus the system dirs + workspace.
+        assert "/srv/pkg" in argv
+        assert "/srv/models" in argv
+        # No sensitive host path is bound into the sandbox.
+        joined = " ".join(argv)
+        assert "/root" not in joined
+        assert ".config/auspexai-worker" not in joined
+
+    def test_permissive_default_still_shares_host_fs(self) -> None:
+        if not check_bubblewrap_available():
+            pytest.skip("bubblewrap not installed on this host")
+        argv = build_argv(_config(use_bubblewrap=True))  # default = PERMISSIVE
+        assert "--dev-bind" in argv
+        assert "--unshare-pid" not in argv
 
 
 class TestResolveRunnerBin:

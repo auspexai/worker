@@ -60,7 +60,7 @@ from .oauth import (
     run_device_flow,
 )
 from .provisioning import AutoFetchResolver, ExecutePolicy, ProvisioningResolver
-from .sandbox import probe_bubblewrap
+from .sandbox import SandboxPolicy, probe_bubblewrap
 from .state import (
     AcceptedSensitiveRepository,
     AssignmentAuditRepository,
@@ -907,6 +907,7 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
             submitted_repo=submitted_results,
             pending_repo=pending_submissions,
             use_bubblewrap=config.sandbox_use_bubblewrap,
+            sandbox_policy=SandboxPolicy(config.sandbox_policy),
             runner_timeout_seconds=config.runner_timeout_seconds,
             # §9 #37: tenant code-execution consent + provisioned-executor
             # resolution. Tenant allow/deny stays the poller's accept-time
