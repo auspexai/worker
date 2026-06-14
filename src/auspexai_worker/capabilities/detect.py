@@ -136,6 +136,12 @@ class Capabilities:
     # the mode. Absent (an older worker) is read coordinator-side as not-provisioned
     # (conservative — no real work routed until the worker affirmatively declares).
     execute_tenant_code: str = "synthetic"
+    # §41: the sandbox isolation this worker runs tenant code under (permissive |
+    # strict). ALWAYS sent so the coordinator can route tenant code to workers
+    # that meet the tier-derived containment floor and record which containment
+    # produced the evidence (firewall #2). Absent (an older worker) reads
+    # coordinator-side as permissive — fail-safe (excluded from strict-required work).
+    sandbox_policy: str = "permissive"
     # §9 #46: the install profile the onramp applied (lean/inference/full/...).
     # Fleet bookkeeping for the console — NOT a routing key (scheduling stays
     # capability-based). Omitted when unrecorded (pre-flavor installs).
@@ -299,6 +305,9 @@ def collect(
     # (model-gated) experiments only to provisioned-mode workers — a synthetic
     # worker echoes, which would pollute consensus. Caller-supplied from config.
     execute_tenant_code: str = "synthetic",
+    # §41: the sandbox isolation policy (caller-supplied from config.sandbox_policy:
+    # permissive / strict). Lets the coordinator enforce the containment floor.
+    sandbox_policy: str = "permissive",
     # §9 #46: the onramp-applied install profile (caller-supplied from config;
     # bookkeeping, not routing).
     flavor: str | None = None,
@@ -330,6 +339,7 @@ def collect(
         auto_acquire=auto_acquire,
         self_paused=self_paused,
         execute_tenant_code=execute_tenant_code,
+        sandbox_policy=sandbox_policy,
         flavor=flavor,
         ollama_version=ollama_version,
     )

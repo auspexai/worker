@@ -976,6 +976,9 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
                 # value (hot-reload) so a policy change reaches the coordinator on
                 # the next beat — no restart.
                 execute_tenant_code=policy.value,
+                # §41: declare the sandbox isolation policy so the coordinator can
+                # enforce the containment floor + record what produced the evidence.
+                sandbox_policy=config.sandbox_policy,
                 # §9 #46: install-profile bookkeeping + serving-runtime provenance.
                 flavor=config.flavor,
                 ollama_version=_ollama_version,

@@ -171,6 +171,14 @@ class TestCollect:
         payload = collect(sysroot=tmp_path, execute_tenant_code="provisioned").to_dict()
         assert payload["execute_tenant_code"] == "provisioned"
 
+    def test_sandbox_policy_declared_default_permissive(self, tmp_path: Path) -> None:
+        # §41: always present so the coordinator can enforce the containment floor.
+        assert collect(sysroot=tmp_path).to_dict()["sandbox_policy"] == "permissive"
+
+    def test_sandbox_policy_declared_strict(self, tmp_path: Path) -> None:
+        payload = collect(sysroot=tmp_path, sandbox_policy="strict").to_dict()
+        assert payload["sandbox_policy"] == "strict"
+
     def test_declared_alias_back_compat(self, tmp_path: Path) -> None:
         """`declared=` kwarg is the old name; still accepted for back-compat
         so existing callers don't break during the M2-tail rename."""
