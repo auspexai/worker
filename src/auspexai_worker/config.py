@@ -567,3 +567,13 @@ def set_inference_backend(config_path: Path, backend: str) -> str:
     backend = _validate_inference_backend(backend)
     _upsert_toml_section(config_path, "inference", {"backend": f'"{backend}"'})
     return backend
+
+
+def set_sandbox_policy(config_path: Path, policy: str) -> str:
+    """Persist `[sandbox] policy` to worker.toml (permissive|strict) — the
+    volunteer's host-isolation choice for running tenant code (§41). NOT
+    hot-reloaded: the daemon reads it at start, so a change needs a daemon
+    restart (callers print that)."""
+    policy = _validate_sandbox_policy(policy)
+    _upsert_toml_section(config_path, "sandbox", {"policy": f'"{policy}"'})
+    return policy

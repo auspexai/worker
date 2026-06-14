@@ -219,6 +219,26 @@ class TestFlavorAndInferenceSetters:
         assert WorkerConfig.load(config_path=cfg_file, env={}).inference_backend == "none"
         assert cfg_file.read_text(encoding="utf-8").count("backend =") == 1
 
+    def test_set_sandbox_policy_round_trips_and_preserves_other_sections(self, tmp_path):
+        from auspexai_worker.config import set_sandbox_policy
+
+        cfg_file = tmp_path / "worker.toml"
+        cfg_file.write_text("[executor]\nmode = 'provisioned'\n")
+        assert set_sandbox_policy(cfg_file, "strict") == "strict"
+        cfg = WorkerConfig.load(config_path=cfg_file, env={})
+        assert cfg.sandbox_policy == "strict"
+        assert cfg.execute_tenant_code == "provisioned"  # other section untouched
+        # second write replaces in place (no duplicate keys)
+        set_sandbox_policy(cfg_file, "permissive")
+        assert WorkerConfig.load(config_path=cfg_file, env={}).sandbox_policy == "permissive"
+        assert cfg_file.read_text(encoding="utf-8").count("policy =") == 1
+
+    def test_set_sandbox_policy_rejects_invalid(self, tmp_path):
+        from auspexai_worker.config import set_sandbox_policy
+
+        with pytest.raises(ValueError, match="policy must be one of"):
+            set_sandbox_policy(tmp_path / "worker.toml", "wide-open")
+
 
 class TestInferenceKeepAlive:
     def test_default_none(self, tmp_path):

@@ -287,6 +287,46 @@ resolve_flavor() {
     echo "$default_flavor"
 }
 
+# §41: the volunteer's host-isolation choice for running tenant code. Mirrors
+# resolve_flavor — interactive menu (prior choice is the default; Enter keeps
+# it) > recorded silently when there's no tty > permissive. The volunteer is
+# ASKED rather than silently defaulted, because this is the consent moment for
+# running other people's code on their machine. Default permissive for now
+# (strict is opt-in until proven on real inference workloads).
+resolve_sandbox_policy() {
+    local recorded=""
+    local toml="$HOME/.config/auspexai-worker/worker.toml"
+    if [ -f "$toml" ]; then
+        recorded=$(grep -E '^[[:space:]]*policy[[:space:]]*=' "$toml" 2>/dev/null \
+            | head -1 | sed 's/.*=[[:space:]]*"\{0,1\}//;s/"\{0,1\}[[:space:]]*$//') || true
+        case "$recorded" in permissive | strict) ;; *) recorded="" ;; esac
+    fi
+    local default_policy="${recorded:-permissive}"
+    if ! (exec </dev/tty) 2>/dev/null; then
+        [ -n "$recorded" ] && info "Keeping sandbox policy: ${recorded}" >&2
+        echo "$default_policy"
+        return
+    fi
+    {
+        echo ""
+        echo "This worker runs experiment code from researchers. How should it be isolated?"
+        local strict_tag="" perm_tag=""
+        [ "$default_policy" = "strict" ] && strict_tag="  (current)"
+        [ "$default_policy" = "permissive" ] && [ -n "$recorded" ] && perm_tag="  (current)"
+        echo "  1) strict      narrow filesystem, no network, namespace-isolated${strict_tag}"
+        echo "  2) permissive  shares your host filesystem (only for fully-trusted setups)${perm_tag}"
+        printf 'Sandbox policy [%s]: ' "$default_policy"
+    } >&2
+    local reply
+    read -r reply </dev/tty || reply=""
+    case "$reply" in
+        "") echo "$default_policy" ;;
+        1 | strict) echo "strict" ;;
+        2 | permissive) echo "permissive" ;;
+        *) echo "$default_policy" ;;
+    esac
+}
+
 # ── Detect Python ────────────────────────────────────────────────────
 
 find_python() {
@@ -472,6 +512,11 @@ main() {
     local flavor
     flavor=$(resolve_flavor "$requested_flavor")
     info "Flavor: ${flavor}"
+
+    # §41: ask the volunteer how to isolate tenant code (consent moment).
+    local sandbox_policy
+    sandbox_policy=$(resolve_sandbox_policy)
+    info "Sandbox policy: ${sandbox_policy}"
 
     # ── Find Python ──────────────────────────────────────────────────
 
@@ -715,6 +760,15 @@ APPARMOR
 
     if [ -x "${INSTALL_PREFIX}/bin/auspexai-worker" ]; then
         apply_flavor "$flavor"
+    fi
+
+    # §41: record the volunteer's sandbox-policy choice — surgical worker.toml
+    # edit via the worker CLI, like the flavor. Guarded for binaries that
+    # predate `sandbox set-policy` (< v0.2.16).
+    if [ -x "${INSTALL_PREFIX}/bin/auspexai-worker" ] \
+        && "${INSTALL_PREFIX}/bin/auspexai-worker" sandbox set-policy --help >/dev/null 2>&1; then
+        "${INSTALL_PREFIX}/bin/auspexai-worker" sandbox set-policy "$sandbox_policy" >/dev/null \
+            || warn "could not record [sandbox] policy in worker.toml"
     fi
 
     # ── Bootstrap + start ───────────────────────────────────────────

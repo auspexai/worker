@@ -1305,6 +1305,41 @@ def sandbox_probe() -> None:
     click.echo("bubblewrap probe OK")
 
 
+@sandbox.command("show", help="Show the configured sandbox policy.")
+@click.pass_context
+def sandbox_show(ctx: click.Context) -> None:
+    config: WorkerConfig = ctx.obj["config"]
+    click.echo(f"use_bubblewrap: {config.sandbox_use_bubblewrap}")
+    click.echo(f"policy:         {config.sandbox_policy}")
+
+
+@sandbox.command(
+    "set-policy",
+    help="Set [sandbox] policy in worker.toml (permissive|strict). Needs a daemon restart.",
+)
+@click.argument("policy", type=click.Choice(["permissive", "strict"]))
+@click.pass_context
+def sandbox_set_policy(ctx: click.Context, policy: str) -> None:
+    """The volunteer's host-isolation choice for running tenant code (§41).
+    strict = narrow filesystem + namespace isolation; permissive = shares the
+    host fs (only for fully-trusted setups). Written by the onramp prompt; also
+    available here. NOT hot-reloaded — the daemon reads it at start, so restart
+    it (`systemctl --user restart auspexai-worker`)."""
+    from .config import set_sandbox_policy
+
+    target = ctx.obj.get("config_path") or default_worker_toml_path()
+    try:
+        set_sandbox_policy(target, policy)
+    except ValueError as e:
+        click.echo(f"ERROR: {e}", err=True)
+        sys.exit(1)
+    except OSError as e:
+        click.echo(f"ERROR: could not write {target}: {e}", err=True)
+        sys.exit(1)
+    click.echo(f"set [sandbox] policy = {policy}")
+    click.echo("restart the daemon to apply — [sandbox] is read at daemon start, not hot-reloaded.")
+
+
 @cli.group(help="Manage tenant allow/deny lists.")
 def tenant() -> None:
     pass
