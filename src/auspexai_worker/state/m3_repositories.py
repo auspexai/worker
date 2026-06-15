@@ -568,12 +568,18 @@ class PendingSubmission:
     attempt_count: int
     failure_kind: str | None  # 'transient' / 'terminal' / None
     failure_reason: str | None
+    # §9 #13a: the canonical-signing schema version (0 = legacy 5-field) and
+    # the worker-attested served-weights digest ({model_id: gguf_sha256}). Both
+    # are signed, so a retry must re-submit the exact same values.
+    result_schema_version: int = 0
+    served_weights_json: str | None = None
 
 
 _PENDING_COLUMNS = (
     "id, unit_id, assignment_id, completed_at, exit_code, payload_json, "
     "worker_signature, worker_pubkey, queued_at, last_attempt_at, "
-    "attempt_count, failure_kind, failure_reason"
+    "attempt_count, failure_kind, failure_reason, "
+    "result_schema_version, served_weights_json"
 )
 
 
@@ -602,6 +608,8 @@ class PendingSubmissionRepository:
         payload_json: str,
         worker_signature: str,
         worker_pubkey: str,
+        result_schema_version: int = 0,
+        served_weights_json: str | None = None,
     ) -> None:
         """Add a Result to the write-before-submit queue.
 
@@ -609,13 +617,18 @@ class PendingSubmissionRepository:
         tenant-chosen and collide across experiments; the assignment_id is
         coordinator-unique. Raises on a duplicate assignment_id (one result
         per assignment — guards against logic bugs).
+
+        `result_schema_version` + `served_weights_json` (§9 #13a, migration
+        0009) persist the two extra signed fields so a retried submit re-sends
+        the exact bytes the worker signed.
         """
         with self._db.transaction() as conn:
             conn.execute(
                 "INSERT INTO pending_submissions "
                 "(unit_id, assignment_id, completed_at, exit_code, payload_json, "
-                " worker_signature, worker_pubkey) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                " worker_signature, worker_pubkey, "
+                " result_schema_version, served_weights_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     unit_id,
                     assignment_id,
@@ -624,6 +637,8 @@ class PendingSubmissionRepository:
                     payload_json,
                     worker_signature,
                     worker_pubkey,
+                    result_schema_version,
+                    served_weights_json,
                 ),
             )
 
@@ -716,4 +731,6 @@ def _row_to_pending(row) -> PendingSubmission:
         attempt_count=row["attempt_count"],
         failure_kind=row["failure_kind"],
         failure_reason=row["failure_reason"],
+        result_schema_version=row["result_schema_version"],
+        served_weights_json=row["served_weights_json"],
     )

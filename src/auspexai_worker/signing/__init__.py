@@ -21,7 +21,12 @@ package.
 
 from __future__ import annotations
 
-from .result import canonical_result_bytes, sign_result, verify_result_signature
+from .result import (
+    RESULT_SCHEMA_VERSION,
+    canonical_result_bytes,
+    sign_result,
+    verify_result_signature,
+)
 from .signer import (
     SIGNATURE_LABEL,
     SUPPORTED_ALG,
@@ -31,6 +36,7 @@ from .signer import (
 )
 
 __all__ = [
+    "RESULT_SCHEMA_VERSION",
     "SIGNATURE_LABEL",
     "SUPPORTED_ALG",
     "Rfc9421Signer",

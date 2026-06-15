@@ -145,6 +145,12 @@ class UnitInferenceSession:
     def model_id(self) -> str:
         return self._served.model_id
 
+    @property
+    def served_gguf_sha256(self) -> str:
+        """The served file's supply-chain digest — the trusted-daemon view the
+        dispatcher binds into the v1 signed result (§9 #13a `served_weights`)."""
+        return self._served.gguf_sha256
+
     def close(self) -> None:
         """Stop serving and remove the socket file. Idempotent."""
         if self._closing.is_set():

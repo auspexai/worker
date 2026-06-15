@@ -525,13 +525,15 @@ class CoordinatorClient:
         payload: dict[str, Any],
         worker_signature: str,
         assignment_id: str | None = None,
+        result_schema_version: int = 0,
+        served_weights: dict[str, str] | None = None,
     ) -> ResultSubmissionResponse:
         """POST .../result. Worker-credentialed.
 
-        Per coordinator M6d the body's `worker_signature` is stored but
-        not verified at submit time — M7 will re-verify when issuing
-        receipts. The worker still produces a valid signature (see
-        `signing.sign_result`) so M7 verification just works.
+        The coordinator re-verifies `worker_signature` over the canonical body
+        when issuing receipts. For a v1 result (`result_schema_version` >= 1)
+        the served-weights digest is part of the signed body, so it is sent
+        alongside the version for faithful reconstruction + #13b enforcement.
         """
         if self._signer is None:
             raise CoordinatorError(
@@ -550,6 +552,15 @@ class CoordinatorClient:
         # resolution ambiguity. Optional: pre-v0.1.24 coordinators ignore it.
         if assignment_id is not None:
             body["assignment_id"] = assignment_id
+        # §9 #13a: only emit the v1 fields when actually signing v1, so a v0
+        # body stays byte-identical for pre-#13a coordinators. The digest is in
+        # the signed canonical body — the wire copy lets the coordinator
+        # reconstruct + verify without trusting the wire value.
+        if result_schema_version >= 1:
+            body["schema_version"] = int(result_schema_version)
+            body["served_weights"] = {
+                str(k): str(v).lower() for k, v in (served_weights or {}).items()
+            }
         response = self._signed_request(
             method="POST",
             path=f"/api/v0/workers/{worker_id}/assignments/{unit_id}/result",

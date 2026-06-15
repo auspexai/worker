@@ -58,7 +58,7 @@ from auspexai_worker.sandbox import (
     SandboxPolicy,
     build_argv,
 )
-from auspexai_worker.signing import sign_result
+from auspexai_worker.signing import RESULT_SCHEMA_VERSION, sign_result
 from auspexai_worker.state import (
     PendingSubmissionRepository,
     SubmittedResultRepository,
@@ -263,6 +263,11 @@ class RunnerDispatcher:
         # the coordinator re-offers — same posture as provisioning.
         inference_socket: str | None = None
         inference_model: str | None = None
+        # §9 #13a: the worker-attested served-weights digest for THIS unit —
+        # captured from the daemon's own ModelServer/broker view, never the
+        # executor's self-report. {} when no model is served (non-inference
+        # units still sign as v1 with an empty map). Signed into the v1 result.
+        served_weights: dict[str, str] = {}
         if (
             self._open_inference_session is not None
             and decision.mode is ExecutionMode.REAL
@@ -286,6 +291,7 @@ class RunnerDispatcher:
                 )
             inference_socket = str(self._inference_session.socket_path)
             inference_model = model_id
+            served_weights = {model_id: self._inference_session.served_gguf_sha256}
 
         sandbox_config = SandboxConfig(
             use_bubblewrap=self._use_bubblewrap,
@@ -495,9 +501,14 @@ class RunnerDispatcher:
             completed_at=completed_at,
             exit_code=runner_exit_code,
             payload=result_payload,
+            # §9 #13a: sign every result as v1, binding the served-weights
+            # digest the daemon captured for this unit (empty for non-inference).
+            schema_version=RESULT_SCHEMA_VERSION,
+            served_weights=served_weights,
         )
 
         payload_json = json.dumps(result_payload, separators=(",", ":"), sort_keys=True)
+        served_weights_json = json.dumps(served_weights, separators=(",", ":"), sort_keys=True)
 
         # Write-before-submit (M6-tail): persist the signed Result to the
         # pending queue BEFORE the network call. If the submit fails or the
@@ -512,6 +523,8 @@ class RunnerDispatcher:
             payload_json=payload_json,
             worker_signature=worker_signature,
             worker_pubkey=self._worker_pubkey,
+            result_schema_version=RESULT_SCHEMA_VERSION,
+            served_weights_json=served_weights_json,
         )
 
         return self._attempt_submit_pending(
@@ -522,6 +535,8 @@ class RunnerDispatcher:
             payload=result_payload,
             payload_json=payload_json,
             worker_signature=worker_signature,
+            result_schema_version=RESULT_SCHEMA_VERSION,
+            served_weights=served_weights,
         )
 
     def retry_pending(self, *, max_per_tick: int = 5) -> list[DispatchOutcome]:
@@ -580,6 +595,11 @@ class RunnerDispatcher:
                     )
                 )
                 continue
+            # §9 #13a: re-submit the exact signed fields. served_weights_json is
+            # NULL on legacy (v0) rows queued before migration 0009.
+            served_weights = (
+                json.loads(pending.served_weights_json) if pending.served_weights_json else None
+            )
             outcomes.append(
                 self._attempt_submit_pending(
                     unit_id=pending.unit_id,
@@ -589,6 +609,8 @@ class RunnerDispatcher:
                     payload=payload,
                     payload_json=pending.payload_json,
                     worker_signature=pending.worker_signature,
+                    result_schema_version=pending.result_schema_version,
+                    served_weights=served_weights,
                 )
             )
         return outcomes
@@ -603,6 +625,8 @@ class RunnerDispatcher:
         payload: dict,
         payload_json: str,
         worker_signature: str,
+        result_schema_version: int = 0,
+        served_weights: dict[str, str] | None = None,
     ) -> DispatchOutcome:
         """Single submit attempt for an already-queued pending row.
 
@@ -628,6 +652,10 @@ class RunnerDispatcher:
                 # §9 #46 D6 fix: exact assignment disambiguation — unit_ids
                 # are tenant-chosen and can collide across experiments.
                 assignment_id=assignment_id,
+                # §9 #13a: the worker-attested served-weights digest + the
+                # canonical-schema version the coordinator reconstructs against.
+                result_schema_version=result_schema_version,
+                served_weights=served_weights,
             )
         except ResultAlreadySubmittedError as exc:
             # The coord already has this result. Use the existing_result_id

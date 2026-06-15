@@ -115,8 +115,12 @@ class TestRunUnitHappyPath:
         assert outcome.result_response is not None
         assert outcome.result_response.result_id == "res-test-001"
 
-        # Signature in the submitted body verifies against pub.
+        # Signature in the submitted body verifies against pub. §9 #13a: this
+        # is a v1 result (no model served → empty served_weights), so the
+        # verifier reconstructs over the version + served_weights too.
         body = captured["body"]
+        assert body["schema_version"] == 1
+        assert body["served_weights"] == {}
         assert verify_result_signature(
             pubkey_hex=pub,
             unit_id=body["unit_id"],
@@ -125,6 +129,8 @@ class TestRunUnitHappyPath:
             exit_code=body["exit_code"],
             payload=body["payload"],
             signature_b64=body["worker_signature"],
+            schema_version=body["schema_version"],
+            served_weights=body["served_weights"],
         )
         # Synthetic executor echoed our input back.
         assert body["payload"]["echo"] == {"input": 42}

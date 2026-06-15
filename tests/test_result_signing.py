@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import ClassVar
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
@@ -137,3 +138,116 @@ class TestSignAndVerify:
             payload={},
             signature_b64=sig,
         )
+
+
+class TestServedWeightsV1:
+    """§9 #13a: the versioned canonical that binds the served-weights digest."""
+
+    _ARGS: ClassVar[dict] = {  # shared canonical inputs
+        "unit_id": "u-1",
+        "worker_pubkey": "a" * 64,
+        "completed_at": "2026-06-15T00:00:00+00:00",
+        "exit_code": 0,
+        "payload": {"k": "v"},
+    }
+
+    def test_v0_is_byte_identical_to_legacy(self) -> None:
+        # Backward-compat keystone: schema_version 0 (and the default) must
+        # reproduce the original five-field encoding EXACTLY, so results signed
+        # before #13a stay verifiable. No version/served_weights keys leak in.
+        legacy = canonical_result_bytes(**self._ARGS)
+        explicit_v0 = canonical_result_bytes(**self._ARGS, schema_version=0)
+        v0_with_weights_ignored = canonical_result_bytes(
+            **self._ARGS, schema_version=0, served_weights={"m": "abc"}
+        )
+        assert explicit_v0 == legacy
+        assert v0_with_weights_ignored == legacy
+        assert b"schema_version" not in legacy
+        assert b"served_weights" not in legacy
+
+    def test_v1_binds_version_and_digest(self) -> None:
+        encoded = canonical_result_bytes(
+            **self._ARGS, schema_version=1, served_weights={"GEMMA": "ABCDEF"}
+        )
+        decoded = json.loads(encoded)
+        assert decoded["schema_version"] == 1
+        # Digest value normalized to lower hex; model id preserved verbatim.
+        assert decoded["served_weights"] == {"GEMMA": "abcdef"}
+        # Top-level keys still canonical (sorted) for cross-language verify.
+        assert list(decoded) == sorted(decoded)
+
+    def test_v1_served_weights_ordering_canonical(self) -> None:
+        a = canonical_result_bytes(
+            **self._ARGS, schema_version=1, served_weights={"z": "11", "a": "22"}
+        )
+        b = canonical_result_bytes(
+            **self._ARGS, schema_version=1, served_weights={"a": "22", "z": "11"}
+        )
+        assert a == b  # insertion order must not change the signed bytes
+
+    def test_v1_empty_weights_roundtrips(self) -> None:
+        # Non-inference units still sign v1 with an empty map.
+        privkey, pub = _make_key()
+        args = {**self._ARGS, "worker_pubkey": pub}
+        sig = sign_result(privkey=privkey, pubkey_hex=pub, schema_version=1, **_drop_pub(args))
+        assert verify_result_signature(
+            pubkey_hex=pub, signature_b64=sig, schema_version=1, served_weights={}, **args
+        )
+
+    def test_v1_roundtrips_with_digest(self) -> None:
+        privkey, pub = _make_key()
+        args = {**self._ARGS, "worker_pubkey": pub}
+        weights = {"gemma-3-1b-it-q4": "deadbeef"}
+        sig = sign_result(
+            privkey=privkey,
+            pubkey_hex=pub,
+            schema_version=1,
+            served_weights=weights,
+            **_drop_pub(args),
+        )
+        assert verify_result_signature(
+            pubkey_hex=pub,
+            signature_b64=sig,
+            schema_version=1,
+            served_weights=weights,
+            **args,
+        )
+
+    def test_v1_signature_does_not_verify_as_v0(self) -> None:
+        # Downgrade-strip detection: a v1 signature must NOT verify if the
+        # verifier reconstructs the body as v0 (dropping the bound digest).
+        privkey, pub = _make_key()
+        args = {**self._ARGS, "worker_pubkey": pub}
+        sig = sign_result(
+            privkey=privkey,
+            pubkey_hex=pub,
+            schema_version=1,
+            served_weights={"m": "abcd"},
+            **_drop_pub(args),
+        )
+        assert not verify_result_signature(
+            pubkey_hex=pub, signature_b64=sig, schema_version=0, **args
+        )
+
+    def test_v1_rejects_tampered_digest(self) -> None:
+        privkey, pub = _make_key()
+        args = {**self._ARGS, "worker_pubkey": pub}
+        sig = sign_result(
+            privkey=privkey,
+            pubkey_hex=pub,
+            schema_version=1,
+            served_weights={"m": "abcd"},
+            **_drop_pub(args),
+        )
+        assert not verify_result_signature(
+            pubkey_hex=pub,
+            signature_b64=sig,
+            schema_version=1,
+            served_weights={"m": "ffff"},  # swapped digest
+            **args,
+        )
+
+
+def _drop_pub(args: dict) -> dict:
+    """sign_result takes pubkey_hex, not worker_pubkey — strip the dup key."""
+    return {k: v for k, v in args.items() if k != "worker_pubkey"}
