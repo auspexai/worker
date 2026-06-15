@@ -153,8 +153,12 @@ def probe_bubblewrap(bwrap_path: str = "bwrap") -> BubblewrapProbeResult:
     )
 
 
-def build_argv(config: SandboxConfig) -> list[str]:
+def build_argv(config: SandboxConfig, *, seccomp_fd: int | None = None) -> list[str]:
     """Construct the argv used to spawn the runner.
+
+    `seccomp_fd` (§41(a), STRICT only) is an open fd holding the BPF program
+    (see `sandbox.seccomp.open_seccomp_fd`); when given, `--seccomp <fd>` is
+    added and the caller must pass the fd via `Popen(pass_fds=[fd])`.
 
     Raises:
         SandboxNotAvailableError: when `use_bubblewrap=True` but bwrap is
@@ -183,10 +187,25 @@ def build_argv(config: SandboxConfig) -> list[str]:
     ]
     if config.policy is SandboxPolicy.STRICT:
         argv += _strict_fs_argv(config, resolved_runner)
-        # §41(a): full namespace isolation — no network, private pid/ipc/uts.
-        # With --unshare-pid the executor is pid 1 in a private namespace and
-        # cannot see or signal host processes.
-        argv += ["--unshare-net", "--unshare-pid", "--unshare-ipc", "--unshare-uts"]
+        # §41(a): full namespace isolation — no network, private pid/ipc/uts,
+        # and a private cgroup view (the executor can't see the host cgroup
+        # layout). With --unshare-pid the executor is pid 1 in a private
+        # namespace and cannot see or signal host processes.
+        argv += [
+            "--unshare-net",
+            "--unshare-pid",
+            "--unshare-ipc",
+            "--unshare-uts",
+            "--unshare-cgroup-try",
+        ]
+        # Drop every capability (belt-and-suspenders over the unprivileged
+        # user-ns) so the executor holds no privilege even nominally.
+        argv += ["--cap-drop", "ALL"]
+        # The "escape via syscall" gate: a seccomp denylist of the escape /
+        # kernel-attack syscalls. STRICT without it is refused upstream
+        # (dispatch fails closed), so seccomp_fd is normally present here.
+        if seccomp_fd is not None:
+            argv += ["--seccomp", str(seccomp_fd)]
     else:
         argv += _permissive_fs_argv(config)
         # §5.17: real tenant code gets NO network (the inference broker socket is

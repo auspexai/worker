@@ -58,6 +58,7 @@ from auspexai_worker.sandbox import (
     SandboxPolicy,
     build_argv,
 )
+from auspexai_worker.sandbox.seccomp import SeccompUnavailableError, open_seccomp_fd
 from auspexai_worker.signing import RESULT_SCHEMA_VERSION, sign_result
 from auspexai_worker.state import (
     PendingSubmissionRepository,
@@ -308,9 +309,24 @@ class RunnerDispatcher:
             inference_socket=inference_socket,
             inference_model=inference_model,
         )
+        # §41(a): STRICT requires a seccomp filter (the "escape via syscall"
+        # gate). Build it fail-closed — if libseccomp/pyseccomp can't produce
+        # it, refuse the unit rather than run STRICT without the syscall gate.
+        seccomp_fd: int | None = None
+        if sandbox_config.use_bubblewrap and sandbox_config.policy is SandboxPolicy.STRICT:
+            try:
+                seccomp_fd = open_seccomp_fd()
+            except SeccompUnavailableError as exc:
+                logger.error("unit %s: STRICT sandbox seccomp unavailable: %s", unit.unit_id, exc)
+                return DispatchOutcome(
+                    kind=DispatchOutcomeKind.SANDBOX_UNAVAILABLE,
+                    reason=f"STRICT sandbox requires seccomp (libseccomp/pyseccomp): {exc}",
+                )
         try:
-            argv = build_argv(sandbox_config)
+            argv = build_argv(sandbox_config, seccomp_fd=seccomp_fd)
         except SandboxNotAvailableError as exc:
+            if seccomp_fd is not None:
+                os.close(seccomp_fd)
             logger.error("sandbox unavailable for unit %s: %s", unit.unit_id, exc)
             return DispatchOutcome(
                 kind=DispatchOutcomeKind.SANDBOX_UNAVAILABLE,
@@ -379,12 +395,20 @@ class RunnerDispatcher:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 env=env,
+                # §41(a): the seccomp BPF fd must be inherited by bwrap so it can
+                # read the program for --seccomp <fd>; pass_fds keeps it open +
+                # inheritable across exec without changing its number.
+                pass_fds=(seccomp_fd,) if seccomp_fd is not None else (),
             )
         except FileNotFoundError as exc:
             return DispatchOutcome(
                 kind=DispatchOutcomeKind.SANDBOX_UNAVAILABLE,
                 reason=f"runner binary not found: {exc}",
             )
+        finally:
+            # The child holds its own inherited copy; the parent doesn't need it.
+            if seccomp_fd is not None:
+                os.close(seccomp_fd)
 
         workspace.write_pid(proc.pid)
         if self._on_runner_spawned is not None:

@@ -27,6 +27,11 @@ dependencies = [
     "httpx>=0.27",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
+    # §41(a) STRICT sandbox seccomp-bpf. Pure-Python ctypes binding to the host
+    # libseccomp.so (libseccomp2 is a base package on Debian/Ubuntu/RHEL) — no
+    # native build, works x86-64 + aarch64. The denylist is compiled here and
+    # fed to bwrap via --seccomp.
+    "pyseccomp>=0.1.2",
 ]
 
 [project.optional-dependencies]
