@@ -724,6 +724,18 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
                 False,
             ),
             (
+                "sandbox resource caps",
+                (
+                    "off"
+                    if not config.sandbox_resource_limits
+                    else (
+                        f"mem={config.sandbox_memory_max_mb or '∞'}MB · "
+                        f"pids={config.sandbox_pids_max or '∞'} (STRICT only)"
+                    )
+                ),
+                False,
+            ),
+            (
                 "runner timeout",
                 f"{config.runner_timeout_seconds}s",
                 False,

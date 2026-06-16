@@ -26,10 +26,21 @@ ProtectSystem=strict
 NoNewPrivileges=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
-ProtectControlGroups=true
+; §41(a): the daemon puts per-unit cgroup-v2 caps (memory.max/pids.max) around
+; the runner, so the control-group tree must stay WRITABLE (=no) and delegated
+; (Delegate=yes below). ProtectControlGroups=yes would remount it read-only.
+ProtectControlGroups=no
 RestrictRealtime=true
-SystemCallFilter=@system-service
+; @mount is REQUIRED on top of @system-service: the daemon spawns bubblewrap,
+; which needs mount/unshare/pivot_root to build the sandbox (without @mount,
+; bwrap fails with "Failed to make / slave"). The untrusted runner is then
+; re-locked by the bwrap --seccomp denylist applied INSIDE the sandbox, so
+; widening the trusted daemon's filter here does not widen the tenant code's.
+SystemCallFilter=@system-service @mount
 SystemCallErrorNumber=EPERM
+; §41(a): delegate a cgroup-v2 subtree so the daemon can create per-unit child
+; cgroups for the resource caps. Without it they degrade to the rlimit floor.
+Delegate=yes
 ; Worker writes its state DB and (when libsecret is unavailable) the
 ; encrypted-file keystore under XDG_STATE_HOME / XDG_DATA_HOME — both under
 ; %h. ProtectHome=read-only would block those writes, so the standard XDG

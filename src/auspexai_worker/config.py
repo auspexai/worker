@@ -76,6 +76,15 @@ class WorkerConfig:
     # Maximum wall-clock seconds a runner subprocess can take. None = no
     # timeout (Phase 1 synthetic-tenant work is bounded by trivial logic).
     runner_timeout_seconds: float | None = None
+    # §41(a) STRICT resource caps (the "exhaust resources" gate). Defense-in-depth:
+    # a portable rlimit floor (always) + cgroup v2 memory/pids caps (when systemd
+    # Delegate=yes gives a writable subtree). Caps apply ONLY under STRICT; the
+    # generous defaults stop a fork/alloc bomb without tripping a light inference
+    # harness. `[sandbox] resource_limits = false` disables the layer.
+    sandbox_resource_limits: bool = True
+    sandbox_memory_max_mb: int | None = 4096  # cgroup memory.max (RSS); None = uncapped
+    sandbox_pids_max: int | None = 512  # cgroup pids.max (fork-bomb cap); None = uncapped
+    sandbox_cpu_seconds: int | None = None  # rlimit cpu-seconds; None ⇒ wall-clock governs
     # [executor] — §9 #37 tenant code-execution consent + provisioning. The
     # resource owner's say on running third-party code: "synthetic" (default;
     # built-in echo only, NO tenant code), "provisioned" (run hash-verified
@@ -209,6 +218,10 @@ class WorkerConfig:
             "sandbox_use_bubblewrap": True,
             "sandbox_policy": "permissive",
             "runner_timeout_seconds": None,
+            "sandbox_resource_limits": True,
+            "sandbox_memory_max_mb": 4096,
+            "sandbox_pids_max": 512,
+            "sandbox_cpu_seconds": None,
             "execute_tenant_code": "synthetic",
             "provisioning_dir": None,
             "auto_fetch": True,
@@ -279,6 +292,14 @@ class WorkerConfig:
                 merged["sandbox_policy"] = sandbox_block["policy"]
             if "runner_timeout_seconds" in sandbox_block:
                 merged["runner_timeout_seconds"] = sandbox_block["runner_timeout_seconds"]
+            if "resource_limits" in sandbox_block:
+                merged["sandbox_resource_limits"] = sandbox_block["resource_limits"]
+            if "memory_max_mb" in sandbox_block:
+                merged["sandbox_memory_max_mb"] = sandbox_block["memory_max_mb"]
+            if "pids_max" in sandbox_block:
+                merged["sandbox_pids_max"] = sandbox_block["pids_max"]
+            if "cpu_seconds" in sandbox_block:
+                merged["sandbox_cpu_seconds"] = sandbox_block["cpu_seconds"]
             executor_block = data.get("executor") or {}
             # accept `execute_tenant_code` or the shorter alias `mode`
             for key in ("execute_tenant_code", "mode"):
@@ -386,6 +407,10 @@ class WorkerConfig:
             sandbox_use_bubblewrap=bool(merged.get("sandbox_use_bubblewrap", True)),
             sandbox_policy=_validate_sandbox_policy(merged.get("sandbox_policy", "permissive")),
             runner_timeout_seconds=_opt_float(merged.get("runner_timeout_seconds")),
+            sandbox_resource_limits=bool(merged.get("sandbox_resource_limits", True)),
+            sandbox_memory_max_mb=_opt_int(merged.get("sandbox_memory_max_mb")),
+            sandbox_pids_max=_opt_int(merged.get("sandbox_pids_max")),
+            sandbox_cpu_seconds=_opt_int(merged.get("sandbox_cpu_seconds")),
             execute_tenant_code=_validate_policy(merged.get("execute_tenant_code", "synthetic")),
             auto_acquire=bool(merged.get("auto_acquire", False)),
             auto_fetch=bool(merged.get("auto_fetch", True)),

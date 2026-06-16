@@ -53,9 +53,11 @@ from auspexai_worker.provisioning import (
     decide_execution,
 )
 from auspexai_worker.sandbox import (
+    ResourceLimits,
     SandboxConfig,
     SandboxNotAvailableError,
     SandboxPolicy,
+    UnitCgroup,
     build_argv,
 )
 from auspexai_worker.sandbox.seccomp import SeccompUnavailableError, open_seccomp_fd
@@ -152,6 +154,10 @@ class RunnerDispatcher:
         # unit pinning a different serving_version_pin is refused. None ⇒ the
         # pin gate fails closed (a pinned unit is refused).
         serving_version: str | None = None,
+        # §41(a): STRICT resource caps (the "exhaust resources" gate). rlimit
+        # floor (always) + cgroup v2 (when delegated). None / disabled ⇒ no caps
+        # — the default for tests + the PERMISSIVE Phase-1 path.
+        resource_limits: ResourceLimits | None = None,
     ) -> None:
         self._coordinator = coordinator
         self._worker_id = worker_id
@@ -178,10 +184,15 @@ class RunnerDispatcher:
         self._live_executor = live_executor
         self._model_acquirer = model_acquirer
         self._open_inference_session = open_inference_session
+        self._resource_limits = resource_limits
         # The live per-unit broker session. Dispatch is sequential (one unit
         # per tick), so a single slot closed in run_unit's finally covers
         # every return path without re-indenting the whole inner method.
         self._inference_session = None
+        # The live per-unit cgroup (§41(a) STRICT). Same single-slot pattern as
+        # the inference session — created before spawn, destroyed in run_unit's
+        # finally after the runner (and the result handling) is done.
+        self._unit_cgroup: UnitCgroup | None = None
 
     def run_unit(self, response: AssignmentResponse) -> DispatchOutcome:
         """Execute the assigned unit and submit the result. Always cleans
@@ -197,6 +208,12 @@ class RunnerDispatcher:
                     self._inference_session.close()
                 except Exception:
                     logger.exception("failed to close inference session; continuing")
+            if self._unit_cgroup is not None:
+                try:
+                    self._unit_cgroup.destroy()
+                except Exception:
+                    logger.exception("failed to destroy unit cgroup; continuing")
+                self._unit_cgroup = None
                 self._inference_session = None
             workspace.cleanup()
 
@@ -333,6 +350,28 @@ class RunnerDispatcher:
                 reason=str(exc),
             )
 
+        # §41(a): STRICT resource caps (the "exhaust resources" gate). The rlimit
+        # floor wraps the whole argv — `prlimit … -- bwrap … -- runner` — so the
+        # limits inherit to the entire process tree at exec, race-free. The cgroup
+        # is created now and the spawned tree is adopted into it just after Popen
+        # (below), before the runner is fed work. Both degrade cleanly: no prlimit
+        # → no prefix; no delegated cgroup → rlimit floor only. STRICT-only and
+        # opt-in via config, so PERMISSIVE + tests are unaffected.
+        if (
+            self._resource_limits is not None
+            and self._resource_limits.enabled
+            and sandbox_config.use_bubblewrap
+            and sandbox_config.policy is SandboxPolicy.STRICT
+        ):
+            argv = self._resource_limits.prlimit_prefix() + argv
+            try:
+                self._unit_cgroup = self._resource_limits.open_cgroup(unit.unit_id)
+            except Exception:
+                logger.exception(
+                    "unit %s: cgroup setup failed; rlimit floor still applies", unit.unit_id
+                )
+                self._unit_cgroup = None
+
         envelope_bytes = json.dumps(
             {
                 "unit_id": unit.unit_id,
@@ -411,6 +450,12 @@ class RunnerDispatcher:
                 os.close(seccomp_fd)
 
         workspace.write_pid(proc.pid)
+        if self._unit_cgroup is not None:
+            # Adopt the runner tree into the cgroup BEFORE communicate() feeds it
+            # the work envelope, so every fork/allocation the workload makes lands
+            # inside memory.max / pids.max. (bwrap's --unshare-pid setup child is
+            # already spawned, hence adopting descendants too — see UnitCgroup.)
+            self._unit_cgroup.adopt(proc.pid)
         if self._on_runner_spawned is not None:
             try:
                 self._on_runner_spawned(proc.pid)

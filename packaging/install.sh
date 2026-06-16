@@ -38,6 +38,35 @@ need_cmd() {
     command -v "$1" >/dev/null 2>&1 || fail "'$1' is required but not found. Install it and retry."
 }
 
+# §41(a) STRICT sandbox runtime dependencies: bubblewrap (constructs the
+# sandbox) + libseccomp (loaded by pyseccomp via ctypes for the syscall-denylist
+# gate). Under strict, the daemon FAILS CLOSED on a unit if either is missing —
+# so install them here. apt-based hosts get an active install; elsewhere we warn
+# with the package names. Non-fatal: a permissive worker doesn't need either.
+ensure_sandbox_deps() {
+    local policy="$1"
+    local missing=()
+    command -v bwrap >/dev/null 2>&1 || missing+=(bubblewrap)
+    # libseccomp.so.2 ships in libseccomp2 (Debian/Ubuntu); detect via ldconfig.
+    if ! ldconfig -p 2>/dev/null | grep -q 'libseccomp\.so'; then
+        missing+=(libseccomp2)
+    fi
+    if [ ${#missing[@]} -eq 0 ]; then
+        return 0
+    fi
+    if [ "$policy" = "strict" ]; then
+        if command -v apt >/dev/null 2>&1; then
+            info "Installing STRICT sandbox deps: ${missing[*]} …"
+            sudo apt install -y "${missing[@]}" \
+                || warn "could not install ${missing[*]} — STRICT units will be refused until present (install manually)"
+        else
+            warn "STRICT needs: ${missing[*]} (no apt found — install them with your package manager, or the worker will refuse STRICT units)"
+        fi
+    else
+        warn "sandbox deps not installed: ${missing[*]} — needed if you switch [sandbox] policy = strict (install: sudo apt install ${missing[*]})"
+    fi
+}
+
 # ── Flavors (§9 #46) ─────────────────────────────────────────────────
 # Install profiles, defined HERE as data (this script is served live from
 # main via getworker.auspexai.network, so the registry can't be a sibling
@@ -626,6 +655,11 @@ Restart=on-failure
 RestartSec=10
 PrivateTmp=true
 NoNewPrivileges=true
+; §41(a) STRICT resource caps: delegate a cgroup-v2 subtree so the daemon can
+; create per-unit child cgroups (memory.max / pids.max) around the runner. Off →
+; the daemon degrades to the rlimit floor. ProtectControlGroups stays unset (=no)
+; so the delegated subtree is writable.
+Delegate=yes
 
 [Install]
 WantedBy=default.target
@@ -668,6 +702,12 @@ profile auspexai-worker /opt/auspexai-worker/bin/auspexai-worker {
 
   /run/systemd/userdb/ r,
   /run/systemd/userdb/** r,
+
+  /sys/fs/cgroup/ r,
+  /sys/fs/cgroup/** rw,
+
+  /proc/*/stat r,
+  /proc/*/cgroup r,
 
   /etc/auspexai-worker/ r,
   /etc/auspexai-worker/** r,
@@ -738,10 +778,11 @@ APPARMOR
 
     # ── Check runtime deps ───────────────────────────────────────────
 
-    if ! command -v bwrap >/dev/null 2>&1; then
-        warn "bubblewrap (bwrap) is not installed — sandbox isolation won't work"
-        echo "    Install it with: sudo apt install bubblewrap"
-    fi
+    # §41(a) STRICT sandbox runtime deps. bubblewrap builds the sandbox;
+    # libseccomp (loaded by pyseccomp via ctypes) is the syscall-denylist gate.
+    # Both are required for STRICT — install them actively when the volunteer
+    # chose strict (the consent already happened), warn-only otherwise.
+    ensure_sandbox_deps "$sandbox_policy"
 
     # ── Enable linger so user service survives logout ─────────────
 

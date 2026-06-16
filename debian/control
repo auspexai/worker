@@ -21,6 +21,7 @@ Depends:
  ${misc:Depends},
  ${shlibs:Depends},
  bubblewrap (>= 0.6.0),
+ libseccomp2,
  libsystemd0,
  libsecret-1-0,
 Recommends:

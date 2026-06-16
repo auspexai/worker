@@ -12,6 +12,7 @@ config flag `[sandbox] use_bubblewrap = false` selects passthrough.
 
 from __future__ import annotations
 
+from .resources import ResourceLimits, UnitCgroup
 from .wrapper import (
     BubblewrapProbeResult,
     SandboxConfig,
@@ -24,9 +25,11 @@ from .wrapper import (
 
 __all__ = [
     "BubblewrapProbeResult",
+    "ResourceLimits",
     "SandboxConfig",
     "SandboxNotAvailableError",
     "SandboxPolicy",
+    "UnitCgroup",
     "build_argv",
     "check_bubblewrap_available",
     "probe_bubblewrap",

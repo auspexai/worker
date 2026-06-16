@@ -60,7 +60,7 @@ from .oauth import (
     run_device_flow,
 )
 from .provisioning import AutoFetchResolver, ExecutePolicy, ProvisioningResolver
-from .sandbox import SandboxPolicy, probe_bubblewrap
+from .sandbox import ResourceLimits, SandboxPolicy, probe_bubblewrap
 from .state import (
     AcceptedSensitiveRepository,
     AssignmentAuditRepository,
@@ -944,6 +944,19 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
             # M1 (v0_2): this worker's serving version, for the manifest's
             # serving_version_pin gate. None when not serving (probe failed).
             serving_version=(f"ollama/{_ollama_version}" if _ollama_version else None),
+            # §41(a): STRICT resource caps (the "exhaust resources" gate). rlimit
+            # floor + cgroup v2 memory/pids when delegated. STRICT-only; generous
+            # defaults tunable via [sandbox] in worker.toml.
+            resource_limits=ResourceLimits(
+                enabled=config.sandbox_resource_limits,
+                memory_max_bytes=(
+                    config.sandbox_memory_max_mb * 1024 * 1024
+                    if config.sandbox_memory_max_mb is not None
+                    else None
+                ),
+                pids_max=config.sandbox_pids_max,
+                rlimit_cpu_seconds=config.sandbox_cpu_seconds,
+            ),
         )
 
         def _collect_capabilities():

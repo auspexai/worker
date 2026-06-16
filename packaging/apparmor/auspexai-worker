@@ -60,6 +60,16 @@ profile auspexai-worker /opt/auspexai-worker/bin/auspexai-worker {
   /run/systemd/userdb/ r,
   /run/systemd/userdb/** r,
 
+  # §41(a) STRICT resource caps: the daemon manages a delegated cgroup-v2
+  # subtree (per-unit memory.max / pids.max around the runner) and scans
+  # /proc to enumerate the runner's descendants for cgroup adoption. The
+  # untrusted runner can't reach this — it's under bwrap (--unshare-cgroup
+  # + the seccomp denylist), not this profile.
+  /sys/fs/cgroup/ r,
+  /sys/fs/cgroup/** rw,
+  @{PROC}/*/stat r,
+  @{PROC}/*/cgroup r,
+
   # Read-only system config
   /etc/auspexai-worker/ r,
   /etc/auspexai-worker/** r,
