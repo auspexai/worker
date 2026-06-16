@@ -52,6 +52,16 @@ class TestFilter:
         finally:
             os.close(fd)
 
+    def test_open_seccomp_fd_falls_back_without_memfd(self, monkeypatch) -> None:
+        # uv's standalone CPython lacks os.memfd_create (CI hit this); the fd path
+        # must still work via the unlinked-tempfile fallback or STRICT breaks there.
+        monkeypatch.delattr(os, "memfd_create", raising=False)
+        fd = open_seccomp_fd()
+        try:
+            assert os.read(fd, 1 << 20) == seccomp_bpf()
+        finally:
+            os.close(fd)
+
 
 class TestStrictArgv:
     def test_strict_adds_capdrop_and_cgroup_ns(self) -> None:

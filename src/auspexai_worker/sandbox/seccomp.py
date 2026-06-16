@@ -144,12 +144,28 @@ def seccomp_bpf() -> bytes:
         return _cached_bpf
 
 
+def _anonymous_fd() -> int:
+    """An anonymous, writable fd to hold the BPF program. Prefer `memfd_create`
+    (never touches disk), but fall back to an immediately-unlinked tempfile where
+    it's absent: `os.memfd_create` is missing on some CPython builds — notably
+    uv's standalone interpreters (compiled against an old glibc). The worker's own
+    installs use the system Python, which has it, but CI and portable installs may
+    not, and STRICT must not hard-fail there. The unlinked tempfile leaves no
+    lingering on-disk blob, and bwrap reads it through the inherited fd the same."""
+    memfd = getattr(os, "memfd_create", None)
+    if memfd is not None:
+        return memfd("auspexai-seccomp", os.MFD_CLOEXEC)
+    fd, path = tempfile.mkstemp(prefix="auspexai-seccomp-")
+    os.unlink(path)
+    return fd
+
+
 def open_seccomp_fd() -> int:
     """A fresh fd (read position 0) holding the BPF program, for bwrap
     `--seccomp <fd>`. The caller passes it via `Popen(pass_fds=[fd])` and closes
     it after spawn. Raises SeccompUnavailableError if the filter can't be built."""
     bpf = seccomp_bpf()
-    fd = os.memfd_create("auspexai-seccomp", os.MFD_CLOEXEC)
+    fd = _anonymous_fd()
     try:
         os.write(fd, bpf)
         os.lseek(fd, 0, os.SEEK_SET)
