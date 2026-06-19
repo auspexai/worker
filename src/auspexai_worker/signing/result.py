@@ -49,12 +49,14 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
-# §9 #13a: the result-signing canonical schema version. v0 = the legacy
+# §9 #13a / A2 #32: the result-signing canonical schema version. v0 = the legacy
 # five-field body (no version key on the wire). v1 = v0 + `schema_version` +
-# `served_weights`. Workers on this release sign every result as v1 (with an
-# empty `served_weights` for non-inference units); the coordinator reconstructs
-# per the declared version, so v0 (un-rolled fleet) and v1 verify side by side.
-RESULT_SCHEMA_VERSION = 1
+# `served_weights`. v2 = v1 + `ran_under` (the sandbox policy the worker actually
+# ran the unit under — so the coordinator's equal-trust containment guard is
+# worker-ATTESTED + accountable, not heartbeat-self-reported). Workers on this
+# release sign every result as v2; the coordinator reconstructs per the declared
+# version, so v0/v1 (un-rolled fleet) and v2 verify side by side.
+RESULT_SCHEMA_VERSION = 2
 
 
 def canonical_result_bytes(
@@ -66,6 +68,7 @@ def canonical_result_bytes(
     payload: dict[str, Any],
     schema_version: int = 0,
     served_weights: dict[str, str] | None = None,
+    ran_under: str | None = None,
 ) -> bytes:
     """Produce the canonical encoding the worker signs.
 
@@ -76,8 +79,15 @@ def canonical_result_bytes(
     `schema_version` selects the body shape. 0 (default) reproduces the legacy
     five-field encoding byte-for-byte. >= 1 adds the signed `schema_version`
     and `served_weights` fields ({model_id: gguf_sha256}; normalized to lower
-    hex; `{}` when no model was served). `sort_keys` makes ordering canonical
-    regardless of how the dict was built.
+    hex; `{}` when no model was served). >= 2 adds `ran_under` (the sandbox
+    policy, lower-cased) — the A2 #32 containment claim. Versions are cumulative.
+    `sort_keys` makes ordering canonical regardless of how the dict was built.
+
+    WIRE CONTRACT: this is a byte-for-byte mirror of the coordinator's
+    `auspexai_platform.result_signature.canonical_result_bytes`. Any change here
+    MUST match the platform exactly; the known-vector tests on both sides
+    (worker test_result_signing.py + platform test_result_signature_v2.py) guard
+    against drift.
     """
     ts = completed_at.isoformat() if isinstance(completed_at, datetime) else completed_at
     body: dict[str, Any] = {
@@ -90,6 +100,8 @@ def canonical_result_bytes(
     if schema_version >= 1:
         body["schema_version"] = int(schema_version)
         body["served_weights"] = {str(k): str(v).lower() for k, v in (served_weights or {}).items()}
+    if schema_version >= 2:
+        body["ran_under"] = str(ran_under or "").lower()
     return json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
@@ -103,6 +115,7 @@ def sign_result(
     payload: dict[str, Any],
     schema_version: int = 0,
     served_weights: dict[str, str] | None = None,
+    ran_under: str | None = None,
 ) -> str:
     """Sign the result body and return the base64 signature string."""
     sig_input = canonical_result_bytes(
@@ -113,6 +126,7 @@ def sign_result(
         payload=payload,
         schema_version=schema_version,
         served_weights=served_weights,
+        ran_under=ran_under,
     )
     sig = privkey.sign(sig_input)
     return base64.b64encode(sig).decode("ascii")
@@ -129,6 +143,7 @@ def verify_result_signature(
     signature_b64: str,
     schema_version: int = 0,
     served_weights: dict[str, str] | None = None,
+    ran_under: str | None = None,
 ) -> bool:
     """Test-side verifier. NOT used in production worker code — the
     coordinator (M7) is the canonical verifier. Exposed for round-trip
@@ -143,6 +158,7 @@ def verify_result_signature(
         payload=payload,
         schema_version=schema_version,
         served_weights=served_weights,
+        ran_under=ran_under,
     )
     try:
         pubkey.verify(base64.b64decode(signature_b64), sig_input)

@@ -248,6 +248,83 @@ class TestServedWeightsV1:
         )
 
 
+class TestRanUnderV2:
+    """A2 #32: v2 binds the worker-signed `ran_under` (sandbox policy). The
+    known-vector MUST equal the platform's test_result_signature_v2.py vector —
+    a byte-for-byte cross-codebase wire contract; if either side changes, both
+    known-vector tests fail."""
+
+    # MUST stay identical to platform tests/test_result_signature_v2.py vector.
+    _V2_KNOWN_VECTOR: ClassVar[bytes] = (
+        b'{"completed_at":"2026-06-19T00:00:00+00:00","exit_code":0,'
+        b'"payload":{"k":"v"},"ran_under":"strict","schema_version":2,'
+        b'"served_weights":{"m":"aabb"},"unit_id":"u","worker_pubkey":"ab"}'
+    )
+
+    def test_v2_known_vector_matches_platform(self) -> None:
+        out = canonical_result_bytes(
+            unit_id="u",
+            worker_pubkey="ab",
+            completed_at="2026-06-19T00:00:00+00:00",
+            exit_code=0,
+            payload={"k": "v"},
+            schema_version=2,
+            served_weights={"m": "AABB"},
+            ran_under="STRICT",  # lower-cased in the canonical body
+        )
+        assert out == self._V2_KNOWN_VECTOR
+
+    def test_v0_v1_unchanged_by_ran_under(self) -> None:
+        args = {
+            "unit_id": "u",
+            "worker_pubkey": "ab",
+            "completed_at": "2026-06-19T00:00:00+00:00",
+            "exit_code": 0,
+            "payload": {"k": "v"},
+        }
+        assert canonical_result_bytes(**args, schema_version=0, ran_under="strict") == (
+            canonical_result_bytes(**args, schema_version=0)
+        )
+        assert canonical_result_bytes(
+            **args, schema_version=1, served_weights={"m": "aabb"}, ran_under="strict"
+        ) == canonical_result_bytes(**args, schema_version=1, served_weights={"m": "aabb"})
+
+    def test_v2_roundtrips_and_rejects_tampered_ran_under(self) -> None:
+        privkey, pub = _make_key()
+        args = {
+            "unit_id": "u-1",
+            "worker_pubkey": pub,
+            "completed_at": "2026-06-15T00:00:00+00:00",
+            "exit_code": 0,
+            "payload": {"k": "v"},
+        }
+        sig = sign_result(
+            privkey=privkey,
+            pubkey_hex=pub,
+            schema_version=2,
+            served_weights={},
+            ran_under="strict",
+            **_drop_pub(args),
+        )
+        assert verify_result_signature(
+            pubkey_hex=pub,
+            signature_b64=sig,
+            schema_version=2,
+            served_weights={},
+            ran_under="strict",
+            **args,
+        )
+        # Signed strict; a worker cannot have it verify as a permissive claim.
+        assert not verify_result_signature(
+            pubkey_hex=pub,
+            signature_b64=sig,
+            schema_version=2,
+            served_weights={},
+            ran_under="permissive",
+            **args,
+        )
+
+
 def _drop_pub(args: dict) -> dict:
     """sign_result takes pubkey_hex, not worker_pubkey — strip the dup key."""
     return {k: v for k, v in args.items() if k != "worker_pubkey"}

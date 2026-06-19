@@ -573,13 +573,16 @@ class PendingSubmission:
     # are signed, so a retry must re-submit the exact same values.
     result_schema_version: int = 0
     served_weights_json: str | None = None
+    # A2 #32: the worker-signed sandbox policy (v2). Signed, so a retry must
+    # re-submit the exact value or the coordinator's signature check fails.
+    ran_under: str | None = None
 
 
 _PENDING_COLUMNS = (
     "id, unit_id, assignment_id, completed_at, exit_code, payload_json, "
     "worker_signature, worker_pubkey, queued_at, last_attempt_at, "
     "attempt_count, failure_kind, failure_reason, "
-    "result_schema_version, served_weights_json"
+    "result_schema_version, served_weights_json, ran_under"
 )
 
 
@@ -610,6 +613,7 @@ class PendingSubmissionRepository:
         worker_pubkey: str,
         result_schema_version: int = 0,
         served_weights_json: str | None = None,
+        ran_under: str | None = None,
     ) -> None:
         """Add a Result to the write-before-submit queue.
 
@@ -627,8 +631,8 @@ class PendingSubmissionRepository:
                 "INSERT INTO pending_submissions "
                 "(unit_id, assignment_id, completed_at, exit_code, payload_json, "
                 " worker_signature, worker_pubkey, "
-                " result_schema_version, served_weights_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " result_schema_version, served_weights_json, ran_under) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     unit_id,
                     assignment_id,
@@ -639,6 +643,7 @@ class PendingSubmissionRepository:
                     worker_pubkey,
                     result_schema_version,
                     served_weights_json,
+                    ran_under,
                 ),
             )
 
@@ -733,4 +738,5 @@ def _row_to_pending(row) -> PendingSubmission:
         failure_reason=row["failure_reason"],
         result_schema_version=row["result_schema_version"],
         served_weights_json=row["served_weights_json"],
+        ran_under=row["ran_under"],
     )

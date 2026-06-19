@@ -570,10 +570,13 @@ class RunnerDispatcher:
             completed_at=completed_at,
             exit_code=runner_exit_code,
             payload=result_payload,
-            # §9 #13a: sign every result as v1, binding the served-weights
-            # digest the daemon captured for this unit (empty for non-inference).
+            # §9 #13a / A2 #32: sign every result as v2 — binding the served-weights
+            # digest (empty for non-inference) AND `ran_under`, the sandbox policy
+            # this unit actually ran under. STRICT refuses rather than silently
+            # degrades, so the configured policy is the truthful per-result claim.
             schema_version=RESULT_SCHEMA_VERSION,
             served_weights=served_weights,
+            ran_under=self._sandbox_policy.value,
         )
 
         payload_json = json.dumps(result_payload, separators=(",", ":"), sort_keys=True)
@@ -594,6 +597,7 @@ class RunnerDispatcher:
             worker_pubkey=self._worker_pubkey,
             result_schema_version=RESULT_SCHEMA_VERSION,
             served_weights_json=served_weights_json,
+            ran_under=self._sandbox_policy.value,
         )
 
         return self._attempt_submit_pending(
@@ -606,6 +610,7 @@ class RunnerDispatcher:
             worker_signature=worker_signature,
             result_schema_version=RESULT_SCHEMA_VERSION,
             served_weights=served_weights,
+            ran_under=self._sandbox_policy.value,
         )
 
     def retry_pending(self, *, max_per_tick: int = 5) -> list[DispatchOutcome]:
@@ -680,6 +685,9 @@ class RunnerDispatcher:
                     worker_signature=pending.worker_signature,
                     result_schema_version=pending.result_schema_version,
                     served_weights=served_weights,
+                    # A2 #32: re-submit the exact signed ran_under (NULL on pre-v2
+                    # rows queued before migration 0010).
+                    ran_under=pending.ran_under,
                 )
             )
         return outcomes
@@ -696,6 +704,7 @@ class RunnerDispatcher:
         worker_signature: str,
         result_schema_version: int = 0,
         served_weights: dict[str, str] | None = None,
+        ran_under: str | None = None,
     ) -> DispatchOutcome:
         """Single submit attempt for an already-queued pending row.
 
@@ -725,6 +734,8 @@ class RunnerDispatcher:
                 # canonical-schema version the coordinator reconstructs against.
                 result_schema_version=result_schema_version,
                 served_weights=served_weights,
+                # A2 #32: the worker-signed sandbox policy (v2).
+                ran_under=ran_under,
             )
         except ResultAlreadySubmittedError as exc:
             # The coord already has this result. Use the existing_result_id

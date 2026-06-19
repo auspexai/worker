@@ -527,6 +527,7 @@ class CoordinatorClient:
         assignment_id: str | None = None,
         result_schema_version: int = 0,
         served_weights: dict[str, str] | None = None,
+        ran_under: str | None = None,
     ) -> ResultSubmissionResponse:
         """POST .../result. Worker-credentialed.
 
@@ -561,6 +562,11 @@ class CoordinatorClient:
             body["served_weights"] = {
                 str(k): str(v).lower() for k, v in (served_weights or {}).items()
             }
+        # A2 #32: v2 also carries the signed `ran_under` so the coordinator
+        # reconstructs + verifies the v2 canonical body and gates equal-trust on
+        # the accountable (worker-signed) containment.
+        if result_schema_version >= 2:
+            body["ran_under"] = str(ran_under or "").lower()
         response = self._signed_request(
             method="POST",
             path=f"/api/v0/workers/{worker_id}/assignments/{unit_id}/result",
