@@ -239,6 +239,23 @@ class TestFlavorAndInferenceSetters:
         with pytest.raises(ValueError, match="policy must be one of"):
             set_sandbox_policy(tmp_path / "worker.toml", "wide-open")
 
+    def test_set_auto_acquire_round_trips_and_preserves_execute_policy(self, tmp_path):
+        from auspexai_worker.config import set_auto_acquire
+
+        cfg_file = tmp_path / "worker.toml"
+        # Non-default execution policy → preservation is observable.
+        cfg_file.write_text("[executor]\nexecute_tenant_code = 'provisioned'\n")
+        assert set_auto_acquire(cfg_file, True) is True
+        cfg = WorkerConfig.load(config_path=cfg_file, env={})
+        assert cfg.auto_acquire is True
+        assert cfg.execute_tenant_code == "provisioned"  # policy untouched
+        # second write replaces in place (no duplicate keys), flips the flag only
+        set_auto_acquire(cfg_file, False)
+        cfg2 = WorkerConfig.load(config_path=cfg_file, env={})
+        assert cfg2.auto_acquire is False
+        assert cfg2.execute_tenant_code == "provisioned"
+        assert cfg_file.read_text(encoding="utf-8").count("auto_acquire =") == 1
+
 
 class TestInferenceKeepAlive:
     def test_default_none(self, tmp_path):

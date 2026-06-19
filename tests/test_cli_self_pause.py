@@ -77,3 +77,30 @@ def test_executor_set_writes_toml(tmp_path: Path) -> None:
     assert loaded.coordinator_url == "http://t.invalid"
     # Hot-reload: no restart — the daemon picks it up within a heartbeat.
     assert "no restart needed" in r.output
+
+
+def test_executor_auto_acquire_toggles_only_the_flag(tmp_path: Path) -> None:
+    """The onramp/dashboard auto-acquire toggle: writes ONLY [executor]
+    auto_acquire, leaving execute_tenant_code (and other sections) untouched."""
+    cfg = _cfg(tmp_path)
+    # Establish a non-default execution policy, so preservation is observable.
+    CliRunner().invoke(
+        cli, ["--config", str(cfg), "executor", "set", "provisioned"], env=_env(tmp_path)
+    )
+    r = CliRunner().invoke(
+        cli, ["--config", str(cfg), "executor", "auto-acquire", "on"], env=_env(tmp_path)
+    )
+    assert r.exit_code == 0, r.output
+    loaded = WorkerConfig.load(config_path=cfg)
+    assert loaded.auto_acquire is True
+    assert loaded.execute_tenant_code == "provisioned"  # policy untouched
+    assert loaded.coordinator_url == "http://t.invalid"  # other section preserved
+    assert "no restart needed" in r.output
+    # Toggling off flips only the flag.
+    r2 = CliRunner().invoke(
+        cli, ["--config", str(cfg), "executor", "auto-acquire", "off"], env=_env(tmp_path)
+    )
+    assert r2.exit_code == 0, r2.output
+    loaded2 = WorkerConfig.load(config_path=cfg)
+    assert loaded2.auto_acquire is False
+    assert loaded2.execute_tenant_code == "provisioned"

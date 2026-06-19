@@ -356,6 +356,51 @@ resolve_sandbox_policy() {
     esac
 }
 
+# M3 on-demand model acquisition: the volunteer's choice to let this worker
+# DOWNLOAD the exact model an experiment needs when it doesn't already have it.
+# Only meaningful for inference flavors (a lean worker serves no models) — returns
+# "" for others so the caller skips it. Mirrors resolve_sandbox_policy: prior
+# choice is the default (Enter keeps it); recorded silently with no tty. Default
+# OFF — pulling models the network requests spends the volunteer's bandwidth +
+# disk, so it's an explicit opt-in (same posture as the model-setup prompt).
+resolve_auto_acquire() {
+    local flavor="$1"
+    case "$flavor" in inference | full) ;; *) echo ""; return ;; esac
+    local recorded=""
+    local toml="$HOME/.config/auspexai-worker/worker.toml"
+    if [ -f "$toml" ]; then
+        recorded=$(grep -E '^[[:space:]]*auto_acquire[[:space:]]*=' "$toml" 2>/dev/null \
+            | head -1 | sed 's/.*=[[:space:]]*//;s/[[:space:]]*$//') || true
+        case "$recorded" in true | false) ;; *) recorded="" ;; esac
+    fi
+    local default_aa="${recorded:-false}"
+    if ! (exec </dev/tty) 2>/dev/null; then
+        [ -n "$recorded" ] && info "Keeping auto-acquire: ${recorded}" >&2
+        echo "$default_aa"
+        return
+    fi
+    {
+        echo ""
+        echo "Allow this worker to auto-acquire models? When an experiment needs a model"
+        echo "this worker doesn't have, the worker downloads that exact model on demand"
+        echo "(your bandwidth + disk). Off = serve only models you set up here."
+        local y_tag="" n_tag=""
+        [ "$default_aa" = "true" ] && y_tag="  (current)"
+        [ "$default_aa" = "false" ] && [ -n "$recorded" ] && n_tag="  (current)"
+        echo "  1) no   only serve models already set up on this machine${n_tag}"
+        echo "  2) yes  download requested models on demand${y_tag}"
+        printf 'Auto-acquire models [%s]: ' "$([ "$default_aa" = "true" ] && echo yes || echo no)"
+    } >&2
+    local reply
+    read -r reply </dev/tty || reply=""
+    case "$reply" in
+        "") echo "$default_aa" ;;
+        1 | n | no | N | NO | No) echo "false" ;;
+        2 | y | yes | Y | YES | Yes) echo "true" ;;
+        *) echo "$default_aa" ;;
+    esac
+}
+
 # ── Detect Python ────────────────────────────────────────────────────
 
 find_python() {
@@ -546,6 +591,11 @@ main() {
     local sandbox_policy
     sandbox_policy=$(resolve_sandbox_policy)
     info "Sandbox policy: ${sandbox_policy}"
+
+    # M3: inference flavors can opt into on-demand model downloads (consent moment).
+    local auto_acquire
+    auto_acquire=$(resolve_auto_acquire "$flavor")
+    [ -n "$auto_acquire" ] && info "Auto-acquire models: $([ "$auto_acquire" = "true" ] && echo "yes (on-demand)" || echo "no")"
 
     # ── Find Python ──────────────────────────────────────────────────
 
@@ -810,6 +860,20 @@ APPARMOR
         && "${INSTALL_PREFIX}/bin/auspexai-worker" sandbox set-policy --help >/dev/null 2>&1; then
         "${INSTALL_PREFIX}/bin/auspexai-worker" sandbox set-policy "$sandbox_policy" >/dev/null \
             || warn "could not record [sandbox] policy in worker.toml"
+    fi
+
+    # M3: record the auto-acquire choice (inference flavors only) — surgical
+    # [executor] auto_acquire write via the CLI, touching only the flag, not the
+    # execution policy. Guarded for binaries predating `executor auto-acquire`
+    # (< v0.2.21); on older ones the volunteer can set it from the dashboard.
+    if [ -n "$auto_acquire" ] && [ -x "${INSTALL_PREFIX}/bin/auspexai-worker" ] \
+        && "${INSTALL_PREFIX}/bin/auspexai-worker" executor auto-acquire --help >/dev/null 2>&1; then
+        if "${INSTALL_PREFIX}/bin/auspexai-worker" executor auto-acquire \
+            "$([ "$auto_acquire" = "true" ] && echo on || echo off)" >/dev/null; then
+            info "Auto-acquire models: $([ "$auto_acquire" = "true" ] && echo "on (downloads on demand)" || echo "off (set-up models only)")"
+        else
+            warn "could not record [executor] auto_acquire in worker.toml"
+        fi
     fi
 
     # ── Bootstrap + start ───────────────────────────────────────────

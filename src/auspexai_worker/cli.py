@@ -29,6 +29,7 @@ from .config import (
     WorkerConfig,
     default_worker_toml_path,
     read_executor_policy,
+    set_auto_acquire,
     set_executor_policy,
 )
 from .coordinator import (
@@ -276,6 +277,30 @@ def executor_set(ctx: click.Context, policy: str, auto_acquire: bool | None) -> 
             "note: provisioned runs ONLY operator-staged executors whose hash matches "
             "the coordinator's manifest_sha256 (refuse-don't-echo otherwise)."
         )
+    click.echo("a running daemon picks this up within one heartbeat — no restart needed.")
+
+
+@executor.command(
+    "auto-acquire",
+    help="Allow/deny on-demand model downloads (writes worker.toml; hot-reloaded).",
+)
+@click.argument("setting", type=click.Choice(["on", "off"]))
+@click.pass_context
+def executor_auto_acquire(ctx: click.Context, setting: str) -> None:
+    """The volunteer's consent for pulling models on demand: when ON and the
+    policy is `provisioned`, a unit whose required model this worker lacks
+    triggers an in-line download of that exact model (M3). Writes ONLY
+    `[executor] auto_acquire` — the execution policy is left untouched.
+    Hot-reloaded per heartbeat (no restart). Also set at the onramp (installer)
+    and the localhost dashboard."""
+    target = ctx.obj.get("config_path") or default_worker_toml_path()
+    enabled = setting == "on"
+    try:
+        set_auto_acquire(target, enabled)
+    except OSError as e:
+        click.echo(f"ERROR: could not write {target}: {e}", err=True)
+        sys.exit(1)
+    click.echo(f"set [executor] auto_acquire = {enabled}")
     click.echo("a running daemon picks this up within one heartbeat — no restart needed.")
 
 

@@ -573,6 +573,17 @@ def set_executor_policy(config_path: Path, policy: str, *, auto_acquire: bool | 
     return policy
 
 
+def set_auto_acquire(config_path: Path, enabled: bool) -> bool:
+    """Persist ONLY `[executor] auto_acquire` to worker.toml, preserving
+    `execute_tenant_code` and the rest of the file. The onramp's auto-acquire
+    consent and the dashboard toggle write through here. Hot-reloaded per
+    heartbeat + per dispatch (like `set_executor_policy`) — no restart. Effective
+    only under `execute_tenant_code = "provisioned"` (the daemon folds that rule
+    in via `effective_auto_acquire`)."""
+    _upsert_toml_section(config_path, "executor", {"auto_acquire": "true" if enabled else "false"})
+    return enabled
+
+
 def set_worker_flavor(config_path: Path, name: str) -> str:
     """Persist `[worker] flavor` to worker.toml (§9 #46). Written by the
     onramp's apply_flavor step (and `flavor set`) so upgrades can preserve the
