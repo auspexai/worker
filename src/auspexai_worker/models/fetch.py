@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import threading
 from pathlib import Path
 from typing import Protocol
 
@@ -171,6 +172,25 @@ def _free_bytes_for(path: Path) -> int:
     return shutil.disk_usage(p).free
 
 
+# A pull stages into `<model>.partial` and rmtree's it at the start; the prestage
+# loop and the dispatch-time auto-acquire can both pull the same model at once, so
+# without a guard one's rmtree wipes the other's in-flight HuggingFace download
+# (Errno 2 on the `.incomplete` file, and every retry re-races → the model never
+# lands). One lock per model_id serializes them; the loser re-checks the store and
+# returns the winner's result.
+_PULL_LOCKS: dict[str, threading.Lock] = {}
+_PULL_LOCKS_GUARD = threading.Lock()
+
+
+def _pull_lock_for(model_id: str) -> threading.Lock:
+    with _PULL_LOCKS_GUARD:
+        lock = _PULL_LOCKS.get(model_id)
+        if lock is None:
+            lock = threading.Lock()
+            _PULL_LOCKS[model_id] = lock
+        return lock
+
+
 class StoreModelAcquirer:
     """Concrete `provisioning.ModelAcquirer` (M3 lazy auto-acquire): pull a pinned
     file into the worker store, guarded by a coarse free-disk headroom check.
@@ -219,23 +239,29 @@ def pull_from_coords(
     dest = store.path_for(model_id)
     if store.has(model_id):
         return dest
-    if disk_free_bytes is not None and disk_free_bytes < min_headroom_bytes:
-        raise ModelFetchError(
-            f"insufficient disk headroom to acquire {model_id!r}: "
-            f"{disk_free_bytes / 1e9:.1f} GB free, need >{min_headroom_bytes / 1e9:.1f} GB"
-        )
-    staging = dest.parent / f"{model_id}.partial"
-    if staging.exists():
-        shutil.rmtree(staging)
-    staging.mkdir(parents=True)
-    try:
-        fetcher.fetch_file(hf_repo, hf_filename, staging)
-    except Exception as exc:
-        shutil.rmtree(staging, ignore_errors=True)
-        raise ModelFetchError(
-            f"auto-acquire of {model_id!r} from {hf_repo}/{hf_filename} failed: {exc}"
-        ) from exc
-    if dest.exists():
-        shutil.rmtree(dest)
-    staging.rename(dest)
+    # Serialize concurrent acquires of the SAME model (prestage loop vs. dispatch):
+    # both stage into `<model>.partial`, and one's rmtree-at-start would wipe the
+    # other's in-flight download. The loser re-checks the store and returns.
+    with _pull_lock_for(model_id):
+        if store.has(model_id):  # the winner finished while we waited on the lock
+            return dest
+        if disk_free_bytes is not None and disk_free_bytes < min_headroom_bytes:
+            raise ModelFetchError(
+                f"insufficient disk headroom to acquire {model_id!r}: "
+                f"{disk_free_bytes / 1e9:.1f} GB free, need >{min_headroom_bytes / 1e9:.1f} GB"
+            )
+        staging = dest.parent / f"{model_id}.partial"
+        if staging.exists():
+            shutil.rmtree(staging)
+        staging.mkdir(parents=True)
+        try:
+            fetcher.fetch_file(hf_repo, hf_filename, staging)
+        except Exception as exc:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise ModelFetchError(
+                f"auto-acquire of {model_id!r} from {hf_repo}/{hf_filename} failed: {exc}"
+            ) from exc
+        if dest.exists():
+            shutil.rmtree(dest)
+        staging.rename(dest)
     return dest
