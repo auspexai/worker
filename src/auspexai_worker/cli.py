@@ -1784,6 +1784,48 @@ def login(ctx: click.Context) -> None:
         db.close()
 
 
+@cli.command(
+    help="Log out: drop the GitHub-account binding, revert to T0 anonymous (worker keeps running)."
+)
+@click.pass_context
+def logout(ctx: click.Context) -> None:
+    """The inverse of `login`: the coordinator reverts this worker to T0-anonymous and the local
+    binding is cleared, but the worker stays enrolled and running -- NOT the `retire` purge.
+    Receipts you already earned stay credited to your account (it keeps its trust); run `login`
+    again to re-bind the SAME account (keep building) or a NEW one (start fresh). The
+    public-citation choice is re-offered at login."""
+    config: WorkerConfig = ctx.obj["config"]
+    db, repo = initialize_state(config)
+    try:
+        worker = repo.get()
+        if worker is None:
+            click.echo("not enrolled; nothing to log out of", err=True)
+            sys.exit(1)
+        if worker.account_binding_json is None:
+            click.echo("already anonymous (T0) -- no account binding to drop")
+            return
+        keystore = open_keystore(config)
+        signer = build_signer(keystore)
+        click.echo("calling coordinator to log out (unbind)...")
+        try:
+            with CoordinatorClient(base_url=config.coordinator_url, signer=signer) as client:
+                client.unbind_worker(worker_id=worker.worker_id)
+        except WorkerNotFoundError:
+            click.echo("coordinator has no record of this worker; clearing local binding anyway...")
+        except CoordinatorError as exc:
+            click.echo(f"coordinator unbind call failed: {exc}", err=True)
+            sys.exit(1)
+        repo.update_after_unbind()
+    finally:
+        db.close()
+    click.echo("")
+    click.echo("logged out -- reverted to T0 anonymous (still enrolled + running).")
+    click.echo(
+        "Receipts you earned stay credited to your account. "
+        "Run `auspexai-worker login` to re-bind (same account or a new one)."
+    )
+
+
 @cli.group(help="Account-level settings for this worker's bound identity.")
 def account() -> None:
     """Account-scoped actions for the bound GitHub identity (public-citation credit)."""

@@ -191,6 +191,29 @@ def _bootstrap_t1_bound(tmp_path: Path, account_id: str = "acct-fake") -> None:
     _generate_real_keystore(tmp_path)
 
 
+def test_update_after_unbind_clears_binding_and_resets_tier(tmp_path: Path) -> None:
+    """Worker logout (state side): the binding is dropped + tier reverts to 0, the inverse of
+    update_after_upgrade. The worker row stays (not deleted) -- logout is not retire."""
+    db = _bootstrap_t0_identity(tmp_path)
+    try:
+        repo = WorkerSelfRepository(db)
+        repo.update_after_upgrade(
+            new_tier=1,
+            account_binding_json=_json.dumps({"idp": "github", "account_id": "acct-x"}),
+        )
+        bound = repo.get()
+        assert bound is not None
+        assert bound.trust_tier == 1
+        assert bound.account_binding_json is not None
+        repo.update_after_unbind()
+        after = repo.get()
+        assert after is not None
+        assert after.trust_tier == 0
+        assert after.account_binding_json is None
+    finally:
+        db.close()
+
+
 class TestAccountAttribution:
     """D-inc4: `auspexai-worker account attribution` — the reversible opt-in surface."""
 

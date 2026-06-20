@@ -149,6 +149,15 @@ class WorkerSelfRepository:
                 (new_tier, account_binding_json),
             )
 
+    def update_after_unbind(self) -> None:
+        """Drop the account binding on logout: clear account_binding_json + reset trust_tier to
+        0 (T0 anonymous), in one transaction (the inverse of update_after_upgrade). The worker
+        stays enrolled and running; only the GitHub identity is detached."""
+        with self._db.transaction() as conn:
+            conn.execute(
+                "UPDATE worker_self SET trust_tier = 0, account_binding_json = NULL WHERE id = 1"
+            )
+
     def record_heartbeat(self, at: datetime, *, trust_tier: int | None = None) -> None:
         """Record the heartbeat timestamp. When the coordinator's heartbeat
         response carries the worker's current `trust_tier`, refresh the

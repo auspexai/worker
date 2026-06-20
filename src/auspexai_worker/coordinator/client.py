@@ -836,6 +836,43 @@ class CoordinatorClient:
             f"retire_worker: unexpected status {response.status_code}: {response.text[:500]}"
         )
 
+    def unbind_worker(self, *, worker_id: str) -> WorkerStatusResponse:
+        """POST /api/v0/workers/{worker_id}/actions/unbind. Worker-credentialed.
+
+        The LOGOUT call: the coordinator drops the account binding (account_id -> NULL,
+        trust_tier -> T0) and the worker keeps running anonymously. Unlike retire, no purge and
+        no key blacklist -- re-login (`login`) re-binds. Receipts already earned stay credited to
+        the account (the coordinator's account_id_at_issue snapshot).
+
+        Raises:
+            WorkerNotFoundError: 404, worker doesn't exist (or already retired).
+            WorkerIdMismatchError: 403, signer's worker doesn't match URL.
+            UnauthorizedError: 401/403 on signature/credential failure.
+        """
+        if self._signer is None:
+            raise CoordinatorError(
+                "unbind_worker requires a signer; CoordinatorClient was constructed without one"
+            )
+        response = self._signed_request(
+            method="POST",
+            path=f"/api/v0/workers/{worker_id}/actions/unbind",
+            json_body=None,
+        )
+        if response.status_code == 200:
+            return _parse_worker_status(response.json())
+        if response.status_code == 403:
+            code = _error_code(response)
+            if code == "worker_id_mismatch":
+                raise WorkerIdMismatchError(_error_message(response))
+            raise UnauthorizedError(_error_message(response))
+        if response.status_code == 401:
+            raise UnauthorizedError(_error_message(response))
+        if response.status_code == 404:
+            raise WorkerNotFoundError(_error_message(response))
+        raise CoordinatorError(
+            f"unbind_worker: unexpected status {response.status_code}: {response.text[:500]}"
+        )
+
     def get_canonical_receipt(
         self, *, worker_id: str, result_id: str
     ) -> CanonicalReceiptResponse | None:
