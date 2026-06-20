@@ -13,6 +13,7 @@ writers.
 from __future__ import annotations
 
 import html
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,8 @@ from auspexai_worker.worker_state import SelfState, derive_self_state
 from auspexai_worker.workspace import workspace_runs_dir
 
 from .templates import render_cards, render_kv, render_page, render_table
+
+_LOG = logging.getLogger(__name__)
 
 
 def _fmt_relative(when: datetime | None) -> str:
@@ -487,6 +490,18 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
                 "</form>\n"
             )
 
+        # Log out is an ACTION offered only while bound to an account — drop the
+        # binding, revert to T0, keep the worker running (the inverse of `login`).
+        logout_control = ""
+        if worker.account_binding_json is not None:
+            logout_control = (
+                '    <form method="post" action="/logout" style="margin:0.75em 0">'
+                '<button type="submit">log out (unbind account)</button> '
+                '<span class="muted">— drop the GitHub-account binding, revert to T0; '
+                "the worker keeps running. Re-bind with "
+                "<code>auspexai-worker login</code>.</span></form>\n"
+            )
+
         # The volunteer's heart monitor — "is my machine helping?" at a glance
         # (surface_liveness_and_activity_view_design.md). Skeleton rendered here;
         # the live poll fills the pulse + dot + narration on its immediate first
@@ -511,6 +526,7 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
         body = (
             state_banner
             + pause_control
+            + logout_control
             + heart_html
             + status_html
             + "\n"
@@ -536,6 +552,44 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
         if self_repo.get() is not None:
             self_repo.set_self_pause(False)
         return RedirectResponse("/", status_code=303)
+
+    @app.post("/logout")
+    def logout() -> RedirectResponse:
+        """The inverse of `login` (mirrors the CLI `logout`): the coordinator reverts
+        this worker to T0-anonymous and the local binding is cleared, but the worker
+        stays enrolled and running. Localhost-only, like the other action routes.
+
+        A coordinator-unreachable failure does NOT clear the local binding (the
+        volunteer is still bound — try again); a worker the coordinator no longer
+        knows is treated as already-unbound, so we clear locally anyway."""
+        worker = self_repo.get()
+        if worker is None or worker.account_binding_json is None:
+            # Not enrolled, or already T0-anonymous: nothing to unbind.
+            return RedirectResponse("/?logout=anon", status_code=303)
+
+        # Lazy imports: the keystore/coordinator deps are only needed for this one
+        # write path and shouldn't load on every dashboard render.
+        from auspexai_worker.bootstrap import build_signer, open_keystore
+        from auspexai_worker.coordinator.client import (
+            CoordinatorClient,
+            CoordinatorError,
+            WorkerNotFoundError,
+        )
+
+        keystore = open_keystore(config)
+        signer = build_signer(keystore)
+        try:
+            with CoordinatorClient(base_url=config.coordinator_url, signer=signer) as client:
+                client.unbind_worker(worker_id=worker.worker_id)
+        except WorkerNotFoundError:
+            # Coordinator has no record of this worker; clear the local binding anyway.
+            pass
+        except CoordinatorError as exc:
+            _LOG.warning("dashboard logout: coordinator unbind failed: %s", exc)
+            return RedirectResponse("/?logout=failed", status_code=303)
+
+        self_repo.update_after_unbind()
+        return RedirectResponse("/?logout=ok", status_code=303)
 
     # M9 leg 4: the executor-policy setter — the owner's code-execution consent
     # (synthetic/provisioned/off). This was deferred from the dashboard, not

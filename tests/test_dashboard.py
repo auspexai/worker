@@ -305,6 +305,75 @@ class TestSelfPause:
         assert self_ is not None and self_.self_paused is False
 
 
+class _NoopUnbindClient:
+    """Stand-in for CoordinatorClient: a context manager whose `unbind_worker`
+    is a no-op (the local dashboard logout route never touches the network)."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        pass
+
+    def __enter__(self) -> _NoopUnbindClient:
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+    def unbind_worker(self, *, worker_id: str) -> None:
+        return None
+
+
+def _enroll_bound(db: Database) -> None:
+    """Seed a worker that is enrolled AND bound to an account (T1)."""
+    _enroll(db)
+    WorkerSelfRepository(db).update_after_upgrade(
+        new_tier=1,
+        account_binding_json='{"account_id": "acct-test"}',
+    )
+
+
+class TestLogout:
+    """The local dashboard's `log out` action mirrors the CLI `logout`: unbind at
+    the coordinator, then clear the local binding + revert to T0 (worker keeps
+    running). Hermetic — the coordinator client + keystore are stubbed."""
+
+    def _patch_deps(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The route lazy-imports these from their home modules; patch there.
+        monkeypatch.setattr(
+            "auspexai_worker.coordinator.client.CoordinatorClient",
+            _NoopUnbindClient,
+        )
+        monkeypatch.setattr("auspexai_worker.bootstrap.open_keystore", lambda config: object())
+        monkeypatch.setattr("auspexai_worker.bootstrap.build_signer", lambda keystore: object())
+
+    def test_logout_form_shown_only_when_bound(self, client: TestClient, db: Database) -> None:
+        _enroll(db)  # T0 anonymous: no logout control
+        assert 'action="/logout"' not in client.get("/").text
+        WorkerSelfRepository(db).update_after_upgrade(
+            new_tier=1, account_binding_json='{"account_id": "acct-test"}'
+        )
+        assert 'action="/logout"' in client.get("/").text
+
+    def test_logout_unbinds_and_reverts_to_t0(
+        self, client: TestClient, db: Database, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _enroll_bound(db)
+        self._patch_deps(monkeypatch)
+        r = client.post("/logout", follow_redirects=False)
+        assert r.status_code == 303
+        self_ = WorkerSelfRepository(db).get()
+        assert self_ is not None
+        assert self_.trust_tier == 0
+        assert self_.account_binding_json is None
+
+    def test_logout_when_anonymous_is_noop(self, client: TestClient, db: Database) -> None:
+        _enroll(db)  # already T0 anonymous
+        r = client.post("/logout", follow_redirects=False)
+        assert r.status_code == 303
+        assert r.headers["location"] == "/?logout=anon"
+        self_ = WorkerSelfRepository(db).get()
+        assert self_ is not None and self_.account_binding_json is None
+
+
 class TestExecutorSetter:
     """M9 leg 4: the dashboard executor-policy setter — one-click downgrades, a
     confirm step before enabling provisioned, written to worker.toml and HOT-RELOADED
