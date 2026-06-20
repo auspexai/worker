@@ -13,10 +13,12 @@ writers.
 from __future__ import annotations
 
 import html
+import json
 import logging
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import parse_qs
 
 from fastapi import FastAPI, Request
@@ -41,6 +43,60 @@ from auspexai_worker.workspace import workspace_runs_dir
 from .templates import render_cards, render_kv, render_page, render_table
 
 _LOG = logging.getLogger(__name__)
+
+
+class _LoginSnapshot(NamedTuple):
+    status: str
+    user_code: str | None
+    verification_uri: str | None
+    error: str | None
+
+
+class _LoginSession:
+    """Thread-safe state for an in-progress dashboard login (GitHub Device Flow).
+
+    The Device Flow is multi-step and BLOCKS (it polls GitHub until the volunteer
+    authorizes), so it can't be a single POST like logout. The POST /login route
+    kicks off a background thread that drives the flow; this object is the bridge
+    the thread writes to and the GET /login page reads from. One instance per app.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._status = "idle"  # 'idle' | 'pending' | 'authorized' | 'failed'
+        self._user_code: str | None = None
+        self._verification_uri: str | None = None
+        self._error: str | None = None
+
+    def start(self) -> None:
+        with self._lock:
+            self._status = "pending"
+            self._user_code = None
+            self._verification_uri = None
+            self._error = None
+
+    def set_code(self, user_code: str, verification_uri: str) -> None:
+        with self._lock:
+            self._user_code = user_code
+            self._verification_uri = verification_uri
+
+    def set_authorized(self) -> None:
+        with self._lock:
+            self._status = "authorized"
+
+    def set_failed(self, error: str) -> None:
+        with self._lock:
+            self._status = "failed"
+            self._error = error
+
+    def snapshot(self) -> _LoginSnapshot:
+        with self._lock:
+            return _LoginSnapshot(
+                status=self._status,
+                user_code=self._user_code,
+                verification_uri=self._verification_uri,
+                error=self._error,
+            )
 
 
 def _fmt_relative(when: datetime | None) -> str:
@@ -313,6 +369,11 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
     pending_repo = PendingSubmissionRepository(db)
     tenant_lists = TenantListRepository(db)
 
+    # One login session per app — the bridge between the background Device-Flow
+    # thread (POST /login spawns it) and the GET /login page that polls for the
+    # code + completion. Captured as a closure variable by the login routes.
+    login_session = _LoginSession()
+
     def _gather_stats() -> dict[str, Any]:
         worker = self_repo.get()
         # Approximate counts via list-truncate-to-many. These are local-
@@ -490,9 +551,13 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
                 "</form>\n"
             )
 
-        # Log out is an ACTION offered only while bound to an account — drop the
-        # binding, revert to T0, keep the worker running (the inverse of `login`).
+        # Log out / log in is an ACTION pair (mutually exclusive). Bound → offer
+        # log out (drop the binding, revert to T0, keep the worker running — the
+        # inverse of `login`). Anonymous → offer log in (bind a GitHub account to
+        # build portable trust). Login is OFFERED whenever anonymous, independent
+        # of the upgrade-prompt threshold — it parallels the CLI `login`.
         logout_control = ""
+        login_control = ""
         if worker.account_binding_json is not None:
             logout_control = (
                 '    <form method="post" action="/logout" style="margin:0.75em 0">'
@@ -500,6 +565,14 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
                 '<span class="muted">— drop the GitHub-account binding, revert to T0; '
                 "the worker keeps running. Re-bind with "
                 "<code>auspexai-worker login</code>.</span></form>\n"
+            )
+        else:
+            login_control = (
+                '    <form method="post" action="/login" style="margin:0.75em 0">'
+                '<button type="submit">log in (link a GitHub account)</button> '
+                '<span class="muted">— bind this worker to a GitHub account to build '
+                "portable trust. Stays anonymous in citations unless you opt in "
+                "separately.</span></form>\n"
             )
 
         # The volunteer's heart monitor — "is my machine helping?" at a glance
@@ -527,6 +600,7 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
             state_banner
             + pause_control
             + logout_control
+            + login_control
             + heart_html
             + status_html
             + "\n"
@@ -590,6 +664,129 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
 
         self_repo.update_after_unbind()
         return RedirectResponse("/?logout=ok", status_code=303)
+
+    def _run_login() -> None:
+        """Background-thread body for the dashboard login (GitHub Device Flow).
+
+        Drives the full flow: blocks polling GitHub via `run_device_flow` (which
+        calls `on_code` early so the /login page can show the code), then runs the
+        same coordinator exchange + upgrade the CLI `login` does, and persists the
+        binding. Binds ANONYMOUS — the public-attribution opt-in is a separate,
+        deliberate choice (made later via the CLI / account controls), NOT here.
+
+        Catches broadly so any failure surfaces in the UI (status='failed') rather
+        than dying silently in the daemon thread."""
+        # Lazy imports: the keystore/coordinator/oauth deps are only needed for
+        # this one write path and shouldn't load on every dashboard render.
+        from auspexai_worker.bootstrap import build_signer, open_keystore
+        from auspexai_worker.coordinator.client import CoordinatorClient
+        from auspexai_worker.oauth import run_device_flow
+
+        try:
+            access_token = run_device_flow(
+                on_code=lambda c: login_session.set_code(c.user_code, c.verification_uri)
+            )
+            worker = self_repo.get()
+            if worker is None or worker.account_binding_json is not None:
+                # Enrollment vanished, or a concurrent bind already landed.
+                login_session.set_authorized()
+                return
+            keystore = open_keystore(config)
+            signer = build_signer(keystore)
+            with CoordinatorClient(base_url=config.coordinator_url, signer=signer) as client:
+                exchange = client.oauth_exchange(idp="github", access_token=access_token)
+                status_after = client.upgrade_worker(
+                    worker_id=worker.worker_id,
+                    binding_token=exchange.binding_token,
+                )
+            binding_payload = json.dumps(
+                {
+                    "idp": "github",
+                    "account_id": exchange.account_id,
+                    "bound_at": exchange.expires_at.isoformat(),
+                    "is_new_account": exchange.is_new_account,
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            self_repo.update_after_upgrade(
+                new_tier=status_after.trust_tier,
+                account_binding_json=binding_payload,
+            )
+            login_session.set_authorized()
+        except Exception as exc:  # surface in the UI, don't die silently in-thread
+            _LOG.warning("dashboard login: device flow / upgrade failed: %s", exc)
+            login_session.set_failed(str(exc))
+
+    @app.post("/login")
+    def login() -> RedirectResponse:
+        """Kick off a GitHub Device-Flow login (the inverse of `logout`). Unlike
+        logout, this can't be a single POST — the Device Flow is multi-step and
+        blocks polling GitHub — so we spawn a background thread and redirect to the
+        /login page, which polls for the code + completion. Localhost-only."""
+        worker = self_repo.get()
+        if worker is None or worker.account_binding_json is not None:
+            # Not enrolled, or already bound: nothing to do.
+            return RedirectResponse("/", status_code=303)
+        if login_session.snapshot().status == "pending":
+            # A flow is already running — don't start a second one.
+            return RedirectResponse("/login", status_code=303)
+        login_session.start()
+        threading.Thread(
+            target=_run_login,
+            name="auspexai-worker-dashboard-login",
+            daemon=True,
+        ).start()
+        return RedirectResponse("/login", status_code=303)
+
+    @app.get("/login", response_class=HTMLResponse, response_model=None)
+    def login_page() -> HTMLResponse | RedirectResponse:
+        """The login waiting room: shows the user_code + verification URI and polls
+        (meta-refresh) until the worker is bound. A standalone page using the
+        dashboard's base layout."""
+        worker = self_repo.get()
+        if worker is not None and worker.account_binding_json is not None:
+            # Bound (this flow, or any other) — done.
+            return RedirectResponse("/", status_code=303)
+
+        snap = login_session.snapshot()
+        if snap.status == "idle":
+            return RedirectResponse("/", status_code=303)
+
+        meta_refresh = '    <meta http-equiv="refresh" content="3">\n'
+        if snap.status == "pending":
+            if snap.user_code:
+                uri = html.escape(snap.verification_uri or "")
+                code = html.escape(snap.user_code)
+                body = (
+                    meta_refresh + "    <h2>Finish linking your GitHub account</h2>\n"
+                    f'    <p>Open <a href="{uri}" target="_blank" rel="noreferrer">'
+                    f"<code>{uri}</code></a> in a browser and enter this code:</p>\n"
+                    f'    <p style="font-size:1.6em;letter-spacing:0.12em">'
+                    f"<strong><code>{code}</code></strong></p>\n"
+                    '    <p class="muted">Waiting for authorization… this page updates '
+                    "automatically. The worker stays anonymous in citations unless you "
+                    "opt in separately.</p>\n"
+                )
+            else:
+                body = (
+                    meta_refresh + "    <h2>Starting GitHub login…</h2>\n"
+                    '    <p class="muted">Requesting a device code from GitHub…</p>\n'
+                )
+            return HTMLResponse(render_page(title="Log in", body=body, active_nav="/"))
+
+        if snap.status == "failed":
+            err = html.escape(snap.error or "unknown error")
+            body = (
+                f'    <div class="notice fault">Login failed: {err}</div>\n'
+                '    <form method="post" action="/login" style="margin:0.75em 0">'
+                '<button type="submit">try again</button></form>\n'
+                '    <p><a href="/">back to overview</a></p>\n'
+            )
+            return HTMLResponse(render_page(title="Log in", body=body, active_nav="/"))
+
+        # 'authorized' but not yet reflected on the worker row (or a no-op finish).
+        return RedirectResponse("/", status_code=303)
 
     # M9 leg 4: the executor-policy setter — the owner's code-execution consent
     # (synthetic/provisioned/off). This was deferred from the dashboard, not

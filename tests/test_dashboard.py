@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -372,6 +374,124 @@ class TestLogout:
         assert r.headers["location"] == "/?logout=anon"
         self_ = WorkerSelfRepository(db).get()
         assert self_ is not None and self_.account_binding_json is None
+
+
+class _FakeDeviceCode:
+    """Minimal stand-in for oauth.DeviceCode (only the fields the route reads)."""
+
+    user_code = "WDJB-MJHT"
+    verification_uri = "https://github.com/login/device"
+    expires_in = 900
+    interval = 5
+
+
+class _FakeExchange:
+    """Stand-in for OAuthExchangeResponse."""
+
+    account_id = "acct-login-test"
+    binding_token = "btok-test"
+    expires_at = datetime(2026, 6, 20, tzinfo=UTC)
+    is_new_account = True
+
+
+class _FakeStatusAfter:
+    trust_tier = 1
+
+
+class _UpgradeClient:
+    """Stand-in for CoordinatorClient used by the dashboard login flow: a context
+    manager whose oauth_exchange / upgrade_worker return canned objects (the local
+    dashboard test never touches the network)."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        pass
+
+    def __enter__(self) -> _UpgradeClient:
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+    def oauth_exchange(self, *, idp: str, access_token: str) -> _FakeExchange:
+        return _FakeExchange()
+
+    def upgrade_worker(self, *, worker_id: str, binding_token: str) -> _FakeStatusAfter:
+        return _FakeStatusAfter()
+
+
+class TestLogin:
+    """The local dashboard's `log in` action mirrors the CLI `login`: drive GitHub's
+    Device Flow in a background thread, exchange + upgrade at the coordinator, then
+    persist the binding. Hermetic — run_device_flow, the coordinator client, and the
+    keystore are stubbed so nothing touches network/disk. Binds ANONYMOUS (no
+    citation opt-in prompt) by design."""
+
+    def _patch_deps(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # run_device_flow runs synchronously in the test: invoke on_code (so the
+        # user_code is captured) then return a fake token. The route imports it
+        # from auspexai_worker.oauth; patch there.
+        def _fake_run_device_flow(*, on_code, **kwargs):  # type: ignore[no-untyped-def]
+            on_code(_FakeDeviceCode())
+            return "fake-access-token"
+
+        monkeypatch.setattr("auspexai_worker.oauth.run_device_flow", _fake_run_device_flow)
+        monkeypatch.setattr(
+            "auspexai_worker.coordinator.client.CoordinatorClient",
+            _UpgradeClient,
+        )
+        monkeypatch.setattr("auspexai_worker.bootstrap.open_keystore", lambda config: object())
+        monkeypatch.setattr("auspexai_worker.bootstrap.build_signer", lambda keystore: object())
+
+    def test_login_form_shown_only_when_anonymous(self, client: TestClient, db: Database) -> None:
+        _enroll(db)  # T0 anonymous: the login control shows
+        r = client.get("/")
+        assert 'action="/login"' in r.text
+        # ...and the logout control does NOT (mutually exclusive)
+        assert 'action="/logout"' not in r.text
+        WorkerSelfRepository(db).update_after_upgrade(
+            new_tier=1, account_binding_json='{"account_id": "acct-test"}'
+        )
+        r2 = client.get("/")
+        assert 'action="/login"' not in r2.text  # now bound → no login control
+        assert 'action="/logout"' in r2.text
+
+    def test_login_completes_and_binds_anonymous(
+        self, client: TestClient, db: Database, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _enroll(db)  # T0 anonymous
+        self._patch_deps(monkeypatch)
+
+        r = client.post("/login", follow_redirects=False)
+        assert r.status_code == 303
+        assert r.headers["location"] == "/login"
+
+        # The flow runs in a daemon thread; poll the worker row for the bound state.
+        repo = WorkerSelfRepository(db)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            self_ = repo.get()
+            if self_ is not None and self_.account_binding_json is not None:
+                break
+            time.sleep(0.02)
+
+        self_ = repo.get()
+        assert self_ is not None
+        assert self_.trust_tier == 1
+        assert self_.account_binding_json is not None
+        binding = json.loads(self_.account_binding_json)
+        assert binding["account_id"] == "acct-login-test"
+        assert binding["idp"] == "github"
+
+        # The overview now offers logout (not login) — mutually exclusive.
+        text = client.get("/").text
+        assert 'action="/logout"' in text
+        assert 'action="/login"' not in text
+
+    def test_login_when_already_bound_is_noop(self, client: TestClient, db: Database) -> None:
+        _enroll_bound(db)
+        r = client.post("/login", follow_redirects=False)
+        assert r.status_code == 303
+        assert r.headers["location"] == "/"
 
 
 class TestExecutorSetter:
