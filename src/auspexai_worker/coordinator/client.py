@@ -384,6 +384,57 @@ class CoordinatorClient:
             f"heartbeat: unexpected status {response.status_code}: {response.text[:500]}"
         )
 
+    # ---- /accounts/{id}/attribution (signed, account-self) --------------
+
+    def set_attribution(
+        self,
+        *,
+        account_id: str,
+        public_attribution: bool,
+        attribution_name: str | None = None,
+    ) -> dict[str, Any]:
+        """PUT /api/v0/accounts/{account_id}/attribution. Account-self (this worker's
+        bound account — its credential carries account_id once T1+). System B (D-inc4):
+        the public-citation opt-in. Returns the updated attribution state."""
+        if self._signer is None:
+            raise CoordinatorError("set_attribution requires a signer")
+        response = self._signed_request(
+            method="PUT",
+            path=f"/api/v0/accounts/{account_id}/attribution",
+            json_body={
+                "public_attribution": public_attribution,
+                "attribution_name": attribution_name,
+            },
+        )
+        if response.status_code == 200:
+            return response.json()
+        if response.status_code in (401, 403):
+            raise UnauthorizedError(_error_message(response))
+        if response.status_code == 404:
+            raise CoordinatorError(_error_message(response))
+        raise CoordinatorError(
+            f"set_attribution: unexpected status {response.status_code}: {response.text[:500]}"
+        )
+
+    def get_attribution(self, *, account_id: str) -> dict[str, Any]:
+        """GET /api/v0/accounts/{account_id}/attribution. Account-self. Returns the
+        current public-citation opt-in state (for the dashboard to display)."""
+        if self._signer is None:
+            raise CoordinatorError("get_attribution requires a signer")
+        response = self._signed_request(
+            method="GET",
+            path=f"/api/v0/accounts/{account_id}/attribution",
+        )
+        if response.status_code == 200:
+            return response.json()
+        if response.status_code in (401, 403):
+            raise UnauthorizedError(_error_message(response))
+        if response.status_code == 404:
+            raise CoordinatorError(_error_message(response))
+        raise CoordinatorError(
+            f"get_attribution: unexpected status {response.status_code}: {response.text[:500]}"
+        )
+
     # ---- /workers/{id}/assignments (signed) -----------------------------
 
     def get_assignment(self, *, worker_id: str) -> AssignmentResponse:

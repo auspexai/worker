@@ -1743,6 +1743,102 @@ def login(ctx: click.Context) -> None:
         click.echo(f"account_id: {exchange.account_id}")
         if exchange.is_new_account:
             click.echo("(new AuspexAI account created on first login)")
+
+        # System B (D-inc4): the public-citation opt-in — a SEPARATE, explicit choice
+        # from authentication. Linking GitHub is auth-consent, NOT consent to be named
+        # publicly, so we ask the distinct question here at the identity moment, off by
+        # default. Reversible later via `auspexai-worker account attribution`. Only when
+        # interactive: a scripted / non-TTY login skips it (stays off; set it later).
+        if sys.stdin.isatty():
+            click.echo("")
+            click.echo(
+                "Optional — public credit. Research you contribute compute to may be "
+                "published with a contributor acknowledgment. This is separate from "
+                "signing in, and off unless you opt in."
+            )
+            if click.confirm("Be publicly credited by name in those citations?", default=False):
+                cred_name = click.prompt(
+                    "Name to credit (leave blank to use your GitHub name)",
+                    default="",
+                    show_default=False,
+                ).strip()
+                try:
+                    with CoordinatorClient(
+                        base_url=config.coordinator_url, signer=signer
+                    ) as client:
+                        client.set_attribution(
+                            account_id=exchange.account_id,
+                            public_attribution=True,
+                            attribution_name=cred_name or None,
+                        )
+                    click.echo(f"You'll be credited as: {cred_name or 'your GitHub name'}.")
+                except CoordinatorError as exc:
+                    click.echo(
+                        f"(couldn't record public credit now: {exc} — set it later with "
+                        "`auspexai-worker account attribution`)",
+                        err=True,
+                    )
+            else:
+                click.echo("No public credit — your contributions stay anonymous in citations.")
+    finally:
+        db.close()
+
+
+@cli.group(help="Account-level settings for this worker's bound identity.")
+def account() -> None:
+    """Account-scoped actions for the bound GitHub identity (public-citation credit)."""
+
+
+@account.command(
+    "attribution",
+    help="Show or change your public-citation credit (System B opt-in; reversible).",
+)
+@click.option(
+    "--public/--anonymous",
+    "public",
+    default=None,
+    help="Opt in (--public) or out (--anonymous). Omit to just show the current state.",
+)
+@click.option(
+    "--name",
+    default=None,
+    help="Name to be credited as (with --public; blank uses your GitHub name).",
+)
+@click.pass_context
+def account_attribution(ctx: click.Context, public: bool | None, name: str | None) -> None:
+    config: WorkerConfig = ctx.obj["config"]
+    db, repo = initialize_state(config)
+    try:
+        worker = repo.get()
+        if worker is None or worker.trust_tier < 1 or not worker.account_binding_json:
+            click.echo("not bound to an account — run `auspexai-worker login` first", err=True)
+            sys.exit(1)
+        try:
+            account_id = json.loads(worker.account_binding_json).get("account_id")
+        except (ValueError, TypeError):
+            account_id = None
+        if not account_id:
+            click.echo("no account_id in the local binding", err=True)
+            sys.exit(1)
+        signer = build_signer(open_keystore(config))
+        try:
+            with CoordinatorClient(base_url=config.coordinator_url, signer=signer) as client:
+                if public is None:
+                    state = client.get_attribution(account_id=account_id)
+                else:
+                    state = client.set_attribution(
+                        account_id=account_id,
+                        public_attribution=public,
+                        attribution_name=(name or None) if public else None,
+                    )
+        except CoordinatorError as exc:
+            click.echo(f"coordinator call failed: {exc}", err=True)
+            sys.exit(1)
+        if state.get("public_attribution"):
+            shown = state.get("attribution_name") or "your GitHub name"
+            click.echo(f"public credit: ON — credited as {shown}")
+        else:
+            click.echo("public credit: OFF — anonymous in citations")
     finally:
         db.close()
 

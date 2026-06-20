@@ -104,6 +104,12 @@ class _FakeCoordinatorClient:
             retired_at=datetime(2026, 5, 22, 11, 0, 0, tzinfo=UTC),
         )
         self.retire_exc: Exception | None = None
+        self.attribution_state: dict = {
+            "account_id": "acct-fake",
+            "public_attribution": False,
+            "attribution_name": None,
+        }
+        self.attribution_exc: Exception | None = None
 
     def __enter__(self) -> _FakeCoordinatorClient:
         return self
@@ -131,6 +137,32 @@ class _FakeCoordinatorClient:
             raise self.retire_exc
         return self.retire_response
 
+    def set_attribution(self, *, account_id, public_attribution, attribution_name=None) -> dict:
+        self.calls.append(
+            (
+                "set_attribution",
+                {
+                    "account_id": account_id,
+                    "public_attribution": public_attribution,
+                    "attribution_name": attribution_name,
+                },
+            )
+        )
+        if self.attribution_exc is not None:
+            raise self.attribution_exc
+        self.attribution_state = {
+            "account_id": account_id,
+            "public_attribution": public_attribution,
+            "attribution_name": attribution_name,
+        }
+        return self.attribution_state
+
+    def get_attribution(self, *, account_id) -> dict:
+        self.calls.append(("get_attribution", {"account_id": account_id}))
+        if self.attribution_exc is not None:
+            raise self.attribution_exc
+        return self.attribution_state
+
 
 @pytest.fixture
 def fake_client_factory(monkeypatch: pytest.MonkeyPatch):
@@ -144,6 +176,66 @@ def fake_client_factory(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(cli_module, "CoordinatorClient", factory)
     return holder
+
+
+def _bootstrap_t1_bound(tmp_path: Path, account_id: str = "acct-fake") -> None:
+    """A T0 identity upgraded to a T1 account-bound worker (local state only)."""
+    db = _bootstrap_t0_identity(tmp_path)
+    try:
+        WorkerSelfRepository(db).update_after_upgrade(
+            new_tier=1,
+            account_binding_json=_json.dumps({"idp": "github", "account_id": account_id}),
+        )
+    finally:
+        db.close()
+    _generate_real_keystore(tmp_path)
+
+
+class TestAccountAttribution:
+    """D-inc4: `auspexai-worker account attribution` — the reversible opt-in surface."""
+
+    def test_opt_in_with_name(self, tmp_path: Path, fake_client_factory) -> None:
+        _bootstrap_t1_bound(tmp_path)
+        cfg = _write_config(tmp_path)
+        result = CliRunner().invoke(
+            cli,
+            ["--config", str(cfg), "account", "attribution", "--public", "--name", "Ada Lovelace"],
+            env=_env(tmp_path),
+        )
+        assert result.exit_code == 0, result.output
+        assert "public credit: ON" in result.output
+        assert "Ada Lovelace" in result.output
+        fake = fake_client_factory["instance"]
+        assert (
+            "set_attribution",
+            {
+                "account_id": "acct-fake",
+                "public_attribution": True,
+                "attribution_name": "Ada Lovelace",
+            },
+        ) in fake.calls
+
+    def test_opt_out(self, tmp_path: Path, fake_client_factory) -> None:
+        _bootstrap_t1_bound(tmp_path)
+        cfg = _write_config(tmp_path)
+        result = CliRunner().invoke(
+            cli,
+            ["--config", str(cfg), "account", "attribution", "--anonymous"],
+            env=_env(tmp_path),
+        )
+        assert result.exit_code == 0, result.output
+        assert "public credit: OFF" in result.output
+
+    def test_not_bound_errors(self, tmp_path: Path, fake_client_factory) -> None:
+        _bootstrap_t0_identity(tmp_path).close()  # T0, never bound
+        cfg = _write_config(tmp_path)
+        result = CliRunner().invoke(
+            cli,
+            ["--config", str(cfg), "account", "attribution"],
+            env=_env(tmp_path),
+        )
+        assert result.exit_code == 1
+        assert "not bound" in result.output
 
 
 def _stub_device_flow(
