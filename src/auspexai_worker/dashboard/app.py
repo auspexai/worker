@@ -89,6 +89,15 @@ class _LoginSession:
             self._status = "failed"
             self._error = error
 
+    def reset(self) -> None:
+        """Return to idle — consume a completed flow so the one-time citation prompt
+        doesn't re-show once the volunteer has made (or skipped) the choice."""
+        with self._lock:
+            self._status = "idle"
+            self._user_code = None
+            self._verification_uri = None
+            self._error = None
+
     def snapshot(self) -> _LoginSnapshot:
         with self._lock:
             return _LoginSnapshot(
@@ -745,11 +754,16 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
         (meta-refresh) until the worker is bound. A standalone page using the
         dashboard's base layout."""
         worker = self_repo.get()
-        if worker is not None and worker.account_binding_json is not None:
-            # Bound (this flow, or any other) — done.
-            return RedirectResponse("/", status_code=303)
-
+        bound = worker is not None and worker.account_binding_json is not None
         snap = login_session.snapshot()
+        if bound:
+            # Just bound via THIS flow → the one-time citation prompt, then the
+            # dashboard. (snap is pending/authorized only during the flow that's
+            # landing the bind; a previously-bound worker sits at idle and goes
+            # straight to "/".)
+            if snap.status in ("pending", "authorized"):
+                return RedirectResponse("/login/citation", status_code=303)
+            return RedirectResponse("/", status_code=303)
         if snap.status == "idle":
             return RedirectResponse("/", status_code=303)
 
@@ -765,8 +779,8 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
                     f'    <p style="font-size:1.6em;letter-spacing:0.12em">'
                     f"<strong><code>{code}</code></strong></p>\n"
                     '    <p class="muted">Waiting for authorization… this page updates '
-                    "automatically. The worker stays anonymous in citations unless you "
-                    "opt in separately.</p>\n"
+                    "automatically. Once you're linked, you'll choose whether to be "
+                    "publicly credited in research citations.</p>\n"
                 )
             else:
                 body = (
@@ -840,11 +854,12 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
         # which now reflects the new policy immediately.
         return RedirectResponse("/config", status_code=303)
 
-    # System B (D): the public-citation opt-in, on the web. Authentication binds
-    # ANONYMOUS (login never asks — see `_run_login`); this is the deliberate,
-    # separate choice the login defers to. The CLI has it (`account attribution`);
-    # this gives a web-onboarded volunteer the same control without dropping to a
-    # terminal. Localhost-only ⇒ box owner only. Account-self PUT to the coordinator.
+    # System B (D): the public-citation opt-in as a ONE-TIME step in the login flow.
+    # Authentication binds ANONYMOUS (login never asks — see `_run_login`); this is
+    # the deliberate, separate choice the login defers to, presented on a single
+    # ephemeral page right after the bind lands — and re-asked at EVERY login, since
+    # logging out reverts the worker to anonymous (new work stays anonymous until the
+    # next login). NOT a standing dashboard control. Localhost-only ⇒ box owner only.
     def _bound_account_id() -> str | None:
         w = self_repo.get()
         if w is None or w.account_binding_json is None:
@@ -854,92 +869,61 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
         except (ValueError, TypeError):
             return None
 
-    @app.get("/citation", response_class=HTMLResponse, response_model=None)
-    def citation_page(saved: str | None = None, error: str | None = None) -> HTMLResponse:
-        """Choose whether to be publicly credited by name in research citations."""
+    @app.get("/login/citation", response_class=HTMLResponse, response_model=None)
+    def login_citation() -> HTMLResponse | RedirectResponse:
+        """The one-time post-login citation choice. Reached only right after a fresh
+        bind (the login flow is pending/authorized); a revisit / non-fresh state goes
+        straight to the dashboard. Defaults to ANONYMOUS — opt-in is explicit, and the
+        question is re-asked at every login."""
         account_id = _bound_account_id()
-        if account_id is None:
-            body = (
-                "    <h2>Public citation</h2>\n"
-                '    <div class="notice">This worker isn\'t linked to a GitHub account yet, '
-                'so there\'s no profile to credit. <a href="/">Link a GitHub account</a> '
-                "first, then come back to choose whether to be publicly credited.</div>\n"
-            )
-            return HTMLResponse(render_page(title="Citation", body=body, active_nav="/citation"))
-
-        from auspexai_worker.bootstrap import build_signer, open_keystore
-        from auspexai_worker.coordinator.client import CoordinatorClient
-
-        state: dict | None = None
-        load_err: str | None = None
-        try:
-            signer = build_signer(open_keystore(config))
-            with CoordinatorClient(base_url=config.coordinator_url, signer=signer) as client:
-                state = client.get_attribution(account_id=account_id)
-        except Exception as exc:  # surface, don't crash the page
-            load_err = str(exc)
-
-        public_now = bool(state and state.get("public_attribution"))
-        name_now = (state or {}).get("attribution_name") or ""
-        checked = " checked" if public_now else ""
-        current = (
-            "public credit is <strong>ON</strong> — credited as "
-            f"<code>{html.escape(name_now or 'your GitHub name')}</code>"
-            if public_now
-            else "public credit is <strong>OFF</strong> — you are anonymous in citations"
-        )
-        notices = ""
-        if saved == "ok":
-            notices += '    <div class="notice">Saved — applies to future citations.</div>\n'
-        if error or load_err:
-            msg = html.escape(load_err or "could not save — try again")
-            notices += (
-                f'    <div class="notice fault">Couldn\'t reach the coordinator: {msg}</div>\n'
-            )
-
+        if account_id is None or login_session.snapshot().status not in ("pending", "authorized"):
+            return RedirectResponse("/", status_code=303)
         body = (
-            "    <h2>Public citation</h2>\n"
+            "    <h2>You're linked. One choice before your dashboard.</h2>\n"
             '    <p class="muted">Research you contribute compute to may be published with a '
-            "contributor acknowledgment. This is <strong>separate from signing in</strong> — "
-            "you stay anonymous unless you opt in, and you can change it anytime.</p>\n"
-            + notices
-            + f"    <p>Right now, {current}.</p>\n"
-            '    <form method="post" action="/citation" style="margin:1em 0">\n'
-            f'      <label><input type="checkbox" name="public"{checked}> '
-            "Be publicly credited by name in research citations</label>\n"
-            '      <p style="margin:0.6em 0">Credited as: '
-            f'<input type="text" name="name" value="{html.escape(name_now)}" '
-            'placeholder="your GitHub name" style="min-width:16em"></p>\n'
-            '      <button type="submit">Save</button>\n'
+            "contributor acknowledgment. It's your call — separate from signing in — and you're "
+            "asked again each time you log in. (Logged out, your new work is anonymous.)</p>\n"
+            '    <form method="post" action="/login/citation" style="margin:1em 0">\n'
+            '      <fieldset style="border:1px solid #2a2a35;border-radius:8px;padding:0.7em 1em">\n'
+            '        <label style="display:block;margin:0.35em 0"><input type="radio" name="choice" '
+            'value="anonymous" checked> Stay <strong>anonymous</strong> — no public credit</label>\n'
+            '        <label style="display:block;margin:0.35em 0"><input type="radio" name="choice" '
+            'value="cite"> <strong>Credit me</strong> publicly in research citations</label>\n'
+            '        <p style="margin:0.5em 0 0">Credited as: <input type="text" name="name" '
+            'placeholder="your GitHub name" style="min-width:14em"></p>\n'
+            "      </fieldset>\n"
+            '      <button type="submit" style="margin-top:0.8em">Continue to my dashboard</button>\n'
             "    </form>\n"
         )
-        return HTMLResponse(render_page(title="Citation", body=body, active_nav="/citation"))
+        return HTMLResponse(render_page(title="Citation", body=body, active_nav="/"))
 
-    @app.post("/citation", response_model=None)
-    async def set_citation(request: Request) -> RedirectResponse:
+    @app.post("/login/citation", response_model=None)
+    async def login_citation_set(request: Request) -> RedirectResponse:
+        """Capture the one-time choice (best-effort PUT), consume the login flow, and
+        send the volunteer to their dashboard. A coordinator hiccup leaves them on the
+        anonymous default — re-choosable by logging out and back in, or via the CLI
+        `account attribution`."""
         account_id = _bound_account_id()
-        if account_id is None:
-            return RedirectResponse("/citation", status_code=303)
-        raw = (await request.body()).decode("utf-8", "replace")
-        fields = parse_qs(raw)
-        public = bool(fields.get("public"))  # checkbox present ⇒ opted in
-        name = (fields.get("name", [""])[0] or "").strip() or None
+        if account_id is not None:
+            raw = (await request.body()).decode("utf-8", "replace")
+            fields = parse_qs(raw)
+            public = fields.get("choice", ["anonymous"])[0] == "cite"
+            name = (fields.get("name", [""])[0] or "").strip() or None
+            from auspexai_worker.bootstrap import build_signer, open_keystore
+            from auspexai_worker.coordinator.client import CoordinatorClient
 
-        from auspexai_worker.bootstrap import build_signer, open_keystore
-        from auspexai_worker.coordinator.client import CoordinatorClient
-
-        try:
-            signer = build_signer(open_keystore(config))
-            with CoordinatorClient(base_url=config.coordinator_url, signer=signer) as client:
-                client.set_attribution(
-                    account_id=account_id,
-                    public_attribution=public,
-                    attribution_name=(name if public else None),
-                )
-        except Exception as exc:
-            _LOG.warning("dashboard: set attribution failed: %s", exc)
-            return RedirectResponse("/citation?error=1", status_code=303)
-        return RedirectResponse("/citation?saved=ok", status_code=303)
+            try:
+                signer = build_signer(open_keystore(config))
+                with CoordinatorClient(base_url=config.coordinator_url, signer=signer) as client:
+                    client.set_attribution(
+                        account_id=account_id,
+                        public_attribution=public,
+                        attribution_name=(name if public else None),
+                    )
+            except Exception as exc:  # best-effort; anonymous is the safe fallback
+                _LOG.warning("dashboard: post-login attribution set failed: %s", exc)
+        login_session.reset()  # one-time — don't re-show this flow's prompt
+        return RedirectResponse("/", status_code=303)
 
     @app.get("/activity", response_class=HTMLResponse)
     def activity() -> str:

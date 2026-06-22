@@ -733,21 +733,21 @@ class TestUpdateNotice:
         assert c.get("/api/stats").json()["flavor"] == "inference"
 
 
-class TestCitation:
-    """The web public-citation opt-in (System B) — the dashboard equivalent of the
-    CLI `account attribution`. Login binds anonymous; this is the separate, reachable
-    control a web-onboarded volunteer needs (the gap a manual re-bind test surfaced)."""
+class TestLoginCitation:
+    """The one-time post-login public-citation prompt (System B): shown only right
+    after a fresh bind, defaulting to anonymous, re-asked at every login. NOT a
+    standing dashboard control. (The bound + fresh-login render is validated live —
+    it depends on the in-process login-session state.)"""
 
-    def test_citation_in_nav(self, client: TestClient) -> None:
-        assert 'href="/citation"' in client.get("/").text
+    def test_no_persistent_citation_tab(self, client: TestClient) -> None:
+        # the standing settings page + nav tab are gone — it lives in the login flow now
+        assert 'href="/citation"' not in client.get("/").text
 
-    def test_citation_unbound_prompts_to_link(self, client: TestClient) -> None:
-        # no account binding ⇒ no profile to credit ⇒ points to login, no coordinator call
-        r = client.get("/citation")
-        assert r.status_code == 200
-        assert "isn't linked to a GitHub account" in r.text
-        assert "Link a GitHub account" in r.text
+    def test_login_citation_not_fresh_goes_to_dashboard(self, client: TestClient) -> None:
+        # not freshly bound (no worker / idle session) ⇒ no prompt, straight to "/"
+        r = client.get("/login/citation", follow_redirects=False)
+        assert r.status_code == 303 and r.headers["location"] == "/"
 
-    def test_citation_post_unbound_redirects(self, client: TestClient) -> None:
-        r = client.post("/citation", data={"public": "on"}, follow_redirects=False)
-        assert r.status_code == 303 and r.headers["location"] == "/citation"
+    def test_login_citation_post_goes_to_dashboard(self, client: TestClient) -> None:
+        r = client.post("/login/citation", data={"choice": "anonymous"}, follow_redirects=False)
+        assert r.status_code == 303 and r.headers["location"] == "/"
