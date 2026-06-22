@@ -383,6 +383,25 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
     # code + completion. Captured as a closure variable by the login routes.
     login_session = _LoginSession()
 
+    @app.middleware("http")
+    async def _citation_gate(request: Request, call_next):
+        # One-time post-login citation gate: until a freshly-bound volunteer resolves
+        # the /login/citation prompt, every dashboard GET bounces back to it — so the
+        # choice can't be sidestepped by editing the URL to "/" (or any page). Exempt:
+        # the login flow itself (/login*) and the stats poll. Only triggers in the
+        # post-bind/pre-choice window (login_session pending/authorized); a long-bound
+        # worker sits at idle and is unaffected.
+        path = request.url.path
+        if request.method == "GET" and not path.startswith("/login") and path != "/api/stats":
+            w = self_repo.get()
+            if (
+                w is not None
+                and w.account_binding_json is not None
+                and login_session.snapshot().status in ("pending", "authorized")
+            ):
+                return RedirectResponse("/login/citation", status_code=303)
+        return await call_next(request)
+
     def _gather_stats() -> dict[str, Any]:
         worker = self_repo.get()
         # Approximate counts via list-truncate-to-many. These are local-
@@ -888,9 +907,11 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
             '        <label style="display:block;margin:0.35em 0"><input type="radio" name="choice" '
             'value="anonymous" checked> Stay <strong>anonymous</strong> — no public credit</label>\n'
             '        <label style="display:block;margin:0.35em 0"><input type="radio" name="choice" '
-            'value="cite"> <strong>Credit me</strong> publicly in research citations</label>\n'
-            '        <p style="margin:0.5em 0 0">Credited as: <input type="text" name="name" '
-            'placeholder="your GitHub name" style="min-width:14em"></p>\n'
+            'value="cite"> <strong>Credit me</strong> publicly, under my verified GitHub '
+            "identity</label>\n"
+            '        <p class="muted" style="margin:0.5em 0 0;font-size:0.9em">Credit always uses '
+            "the GitHub account name you signed in with — there's no custom name to set, so a "
+            "citation is always a real, verifiable identity.</p>\n"
             "      </fieldset>\n"
             '      <button type="submit" style="margin-top:0.8em">Continue to my dashboard</button>\n'
             "    </form>\n"
@@ -908,7 +929,6 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
             raw = (await request.body()).decode("utf-8", "replace")
             fields = parse_qs(raw)
             public = fields.get("choice", ["anonymous"])[0] == "cite"
-            name = (fields.get("name", [""])[0] or "").strip() or None
             from auspexai_worker.bootstrap import build_signer, open_keystore
             from auspexai_worker.coordinator.client import CoordinatorClient
 
@@ -918,7 +938,9 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
                     client.set_attribution(
                         account_id=account_id,
                         public_attribution=public,
-                        attribution_name=(name if public else None),
+                        # Credit always uses the account's verified GitHub login
+                        # (display_name from OAuth) — no custom name, so it can't be faked.
+                        attribution_name=None,
                     )
             except Exception as exc:  # best-effort; anonymous is the safe fallback
                 _LOG.warning("dashboard: post-login attribution set failed: %s", exc)

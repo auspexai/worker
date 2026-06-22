@@ -482,7 +482,14 @@ class TestLogin:
         assert binding["account_id"] == "acct-login-test"
         assert binding["idp"] == "github"
 
-        # The overview now offers logout (not login) — mutually exclusive.
+        # After binding, the dashboard GATES on the one-time citation prompt — even
+        # navigating straight to "/" bounces there until the choice is made (no sidestep).
+        assert client.get("/", follow_redirects=False).headers["location"] == "/login/citation"
+        # The prompt has NO free-text name — credit is the verified GitHub identity.
+        assert 'name="name"' not in client.get("/login/citation").text
+        # Resolve it (default anonymous; consumes the one-time prompt).
+        client.post("/login/citation", data={"choice": "anonymous"})
+        # Now the overview offers logout (not login) — mutually exclusive.
         text = client.get("/").text
         assert 'action="/logout"' in text
         assert 'action="/login"' not in text
