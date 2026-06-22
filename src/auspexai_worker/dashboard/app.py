@@ -840,6 +840,107 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
         # which now reflects the new policy immediately.
         return RedirectResponse("/config", status_code=303)
 
+    # System B (D): the public-citation opt-in, on the web. Authentication binds
+    # ANONYMOUS (login never asks — see `_run_login`); this is the deliberate,
+    # separate choice the login defers to. The CLI has it (`account attribution`);
+    # this gives a web-onboarded volunteer the same control without dropping to a
+    # terminal. Localhost-only ⇒ box owner only. Account-self PUT to the coordinator.
+    def _bound_account_id() -> str | None:
+        w = self_repo.get()
+        if w is None or w.account_binding_json is None:
+            return None
+        try:
+            return json.loads(w.account_binding_json).get("account_id")
+        except (ValueError, TypeError):
+            return None
+
+    @app.get("/citation", response_class=HTMLResponse, response_model=None)
+    def citation_page(saved: str | None = None, error: str | None = None) -> HTMLResponse:
+        """Choose whether to be publicly credited by name in research citations."""
+        account_id = _bound_account_id()
+        if account_id is None:
+            body = (
+                "    <h2>Public citation</h2>\n"
+                '    <div class="notice">This worker isn\'t linked to a GitHub account yet, '
+                'so there\'s no profile to credit. <a href="/">Link a GitHub account</a> '
+                "first, then come back to choose whether to be publicly credited.</div>\n"
+            )
+            return HTMLResponse(render_page(title="Citation", body=body, active_nav="/citation"))
+
+        from auspexai_worker.bootstrap import build_signer, open_keystore
+        from auspexai_worker.coordinator.client import CoordinatorClient
+
+        state: dict | None = None
+        load_err: str | None = None
+        try:
+            signer = build_signer(open_keystore(config))
+            with CoordinatorClient(base_url=config.coordinator_url, signer=signer) as client:
+                state = client.get_attribution(account_id=account_id)
+        except Exception as exc:  # surface, don't crash the page
+            load_err = str(exc)
+
+        public_now = bool(state and state.get("public_attribution"))
+        name_now = (state or {}).get("attribution_name") or ""
+        checked = " checked" if public_now else ""
+        current = (
+            "public credit is <strong>ON</strong> — credited as "
+            f"<code>{html.escape(name_now or 'your GitHub name')}</code>"
+            if public_now
+            else "public credit is <strong>OFF</strong> — you are anonymous in citations"
+        )
+        notices = ""
+        if saved == "ok":
+            notices += '    <div class="notice">Saved — applies to future citations.</div>\n'
+        if error or load_err:
+            msg = html.escape(load_err or "could not save — try again")
+            notices += (
+                f'    <div class="notice fault">Couldn\'t reach the coordinator: {msg}</div>\n'
+            )
+
+        body = (
+            "    <h2>Public citation</h2>\n"
+            '    <p class="muted">Research you contribute compute to may be published with a '
+            "contributor acknowledgment. This is <strong>separate from signing in</strong> — "
+            "you stay anonymous unless you opt in, and you can change it anytime.</p>\n"
+            + notices
+            + f"    <p>Right now, {current}.</p>\n"
+            '    <form method="post" action="/citation" style="margin:1em 0">\n'
+            f'      <label><input type="checkbox" name="public"{checked}> '
+            "Be publicly credited by name in research citations</label>\n"
+            '      <p style="margin:0.6em 0">Credited as: '
+            f'<input type="text" name="name" value="{html.escape(name_now)}" '
+            'placeholder="your GitHub name" style="min-width:16em"></p>\n'
+            '      <button type="submit">Save</button>\n'
+            "    </form>\n"
+        )
+        return HTMLResponse(render_page(title="Citation", body=body, active_nav="/citation"))
+
+    @app.post("/citation", response_model=None)
+    async def set_citation(request: Request) -> RedirectResponse:
+        account_id = _bound_account_id()
+        if account_id is None:
+            return RedirectResponse("/citation", status_code=303)
+        raw = (await request.body()).decode("utf-8", "replace")
+        fields = parse_qs(raw)
+        public = bool(fields.get("public"))  # checkbox present ⇒ opted in
+        name = (fields.get("name", [""])[0] or "").strip() or None
+
+        from auspexai_worker.bootstrap import build_signer, open_keystore
+        from auspexai_worker.coordinator.client import CoordinatorClient
+
+        try:
+            signer = build_signer(open_keystore(config))
+            with CoordinatorClient(base_url=config.coordinator_url, signer=signer) as client:
+                client.set_attribution(
+                    account_id=account_id,
+                    public_attribution=public,
+                    attribution_name=(name if public else None),
+                )
+        except Exception as exc:
+            _LOG.warning("dashboard: set attribution failed: %s", exc)
+            return RedirectResponse("/citation?error=1", status_code=303)
+        return RedirectResponse("/citation?saved=ok", status_code=303)
+
     @app.get("/activity", response_class=HTMLResponse)
     def activity() -> str:
         rows_raw = audit_repo.recent(limit=50)

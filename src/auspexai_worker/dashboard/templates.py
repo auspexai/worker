@@ -250,6 +250,7 @@ _NAV_ITEMS = [
     ("/activity", "Activity"),
     ("/models", "Models"),
     ("/receipts", "Receipts"),
+    ("/citation", "Citation"),
     ("/config", "Config"),
 ]
 

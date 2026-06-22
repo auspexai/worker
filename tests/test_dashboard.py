@@ -731,3 +731,23 @@ class TestUpdateNotice:
         c = TestClient(build_app(db=db, config=cfg, config_path=tmp_path / "worker.toml"))
         assert ">inference<" in c.get("/").text.replace("<code>inference</code>", ">inference<")
         assert c.get("/api/stats").json()["flavor"] == "inference"
+
+
+class TestCitation:
+    """The web public-citation opt-in (System B) — the dashboard equivalent of the
+    CLI `account attribution`. Login binds anonymous; this is the separate, reachable
+    control a web-onboarded volunteer needs (the gap a manual re-bind test surfaced)."""
+
+    def test_citation_in_nav(self, client: TestClient) -> None:
+        assert 'href="/citation"' in client.get("/").text
+
+    def test_citation_unbound_prompts_to_link(self, client: TestClient) -> None:
+        # no account binding ⇒ no profile to credit ⇒ points to login, no coordinator call
+        r = client.get("/citation")
+        assert r.status_code == 200
+        assert "isn't linked to a GitHub account" in r.text
+        assert "Link a GitHub account" in r.text
+
+    def test_citation_post_unbound_redirects(self, client: TestClient) -> None:
+        r = client.post("/citation", data={"public": "on"}, follow_redirects=False)
+        assert r.status_code == 303 and r.headers["location"] == "/citation"
