@@ -1753,15 +1753,13 @@ def login(ctx: click.Context) -> None:
             click.echo("")
             click.echo(
                 "Optional — public credit. Research you contribute compute to may be "
-                "published with a contributor acknowledgment. This is separate from "
-                "signing in, and off unless you opt in."
+                "published with a contributor acknowledgment, under your verified GitHub "
+                "identity. This is separate from signing in, and off unless you opt in."
             )
-            if click.confirm("Be publicly credited by name in those citations?", default=False):
-                cred_name = click.prompt(
-                    "Name to credit (leave blank to use your GitHub name)",
-                    default="",
-                    show_default=False,
-                ).strip()
+            if click.confirm(
+                "Be publicly credited (as your GitHub account) in those citations?",
+                default=False,
+            ):
                 try:
                     with CoordinatorClient(
                         base_url=config.coordinator_url, signer=signer
@@ -1769,9 +1767,10 @@ def login(ctx: click.Context) -> None:
                         client.set_attribution(
                             account_id=exchange.account_id,
                             public_attribution=True,
-                            attribution_name=cred_name or None,
+                            # Credit always uses the verified GitHub login — no custom name.
+                            attribution_name=None,
                         )
-                    click.echo(f"You'll be credited as: {cred_name or 'your GitHub name'}.")
+                    click.echo("You'll be credited under your GitHub account name.")
                 except CoordinatorError as exc:
                     click.echo(
                         f"(couldn't record public credit now: {exc} — set it later with "
@@ -1839,15 +1838,11 @@ def account() -> None:
     "--public/--anonymous",
     "public",
     default=None,
-    help="Opt in (--public) or out (--anonymous). Omit to just show the current state.",
-)
-@click.option(
-    "--name",
-    default=None,
-    help="Name to be credited as (with --public; blank uses your GitHub name).",
+    help="Opt in (--public) or out (--anonymous). Omit to just show the current state. "
+    "Credit always uses your verified GitHub account name — there is no custom name.",
 )
 @click.pass_context
-def account_attribution(ctx: click.Context, public: bool | None, name: str | None) -> None:
+def account_attribution(ctx: click.Context, public: bool | None) -> None:
     config: WorkerConfig = ctx.obj["config"]
     db, repo = initialize_state(config)
     try:
@@ -1871,14 +1866,14 @@ def account_attribution(ctx: click.Context, public: bool | None, name: str | Non
                     state = client.set_attribution(
                         account_id=account_id,
                         public_attribution=public,
-                        attribution_name=(name or None) if public else None,
+                        # Credit always uses the verified GitHub login — no custom name.
+                        attribution_name=None,
                     )
         except CoordinatorError as exc:
             click.echo(f"coordinator call failed: {exc}", err=True)
             sys.exit(1)
         if state.get("public_attribution"):
-            shown = state.get("attribution_name") or "your GitHub name"
-            click.echo(f"public credit: ON — credited as {shown}")
+            click.echo("public credit: ON — credited under your verified GitHub account name")
         else:
             click.echo("public credit: OFF — anonymous in citations")
     finally:

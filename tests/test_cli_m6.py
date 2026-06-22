@@ -217,26 +217,37 @@ def test_update_after_unbind_clears_binding_and_resets_tier(tmp_path: Path) -> N
 class TestAccountAttribution:
     """D-inc4: `auspexai-worker account attribution` — the reversible opt-in surface."""
 
-    def test_opt_in_with_name(self, tmp_path: Path, fake_client_factory) -> None:
+    def test_opt_in_uses_verified_identity(self, tmp_path: Path, fake_client_factory) -> None:
+        """Opting in credits the verified GitHub account — no custom name is accepted."""
         _bootstrap_t1_bound(tmp_path)
         cfg = _write_config(tmp_path)
         result = CliRunner().invoke(
             cli,
-            ["--config", str(cfg), "account", "attribution", "--public", "--name", "Ada Lovelace"],
+            ["--config", str(cfg), "account", "attribution", "--public"],
             env=_env(tmp_path),
         )
         assert result.exit_code == 0, result.output
         assert "public credit: ON" in result.output
-        assert "Ada Lovelace" in result.output
         fake = fake_client_factory["instance"]
         assert (
             "set_attribution",
             {
                 "account_id": "acct-fake",
                 "public_attribution": True,
-                "attribution_name": "Ada Lovelace",
+                "attribution_name": None,  # always the verified GitHub identity
             },
         ) in fake.calls
+
+    def test_name_option_is_removed(self, tmp_path: Path, fake_client_factory) -> None:
+        """`--name` is gone — citation must use real credentials, not a typed name."""
+        _bootstrap_t1_bound(tmp_path)
+        cfg = _write_config(tmp_path)
+        result = CliRunner().invoke(
+            cli,
+            ["--config", str(cfg), "account", "attribution", "--public", "--name", "Faker"],
+            env=_env(tmp_path),
+        )
+        assert result.exit_code == 2  # click: no such option
 
     def test_opt_out(self, tmp_path: Path, fake_client_factory) -> None:
         _bootstrap_t1_bound(tmp_path)
