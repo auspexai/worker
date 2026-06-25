@@ -1,13 +1,13 @@
 """FastAPI app factory for the worker dashboard.
 
-Four read-only HTML pages plus a small JSON `/api/stats` endpoint
-for live numbers (could feed a future polling refresh in the UI; for
-now the pages render server-side on each request).
+Five HTML pages (Overview, Activity, Models, Receipts, Config) plus a small JSON
+`/api/stats` endpoint that drives the live poll. Mostly read-only views, with a
+few localhost-only controls — pause/resume, account login/logout, and the
+execution-policy setter; the daemon's existing threads remain the writers for
+everything else.
 
 The app captures the worker's local SQLite state DB + the WorkerConfig
-at construction time and reads from them on each request. No
-write-side surface; the daemon's existing threads remain the only
-writers.
+at construction time and reads from them on each request.
 """
 
 from __future__ import annotations
@@ -362,6 +362,9 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
     from auspexai_worker.config import default_worker_toml_path, set_executor_policy
 
     toml_path = config_path or default_worker_toml_path()
+    # The accelerator is static hardware — detect it ONCE at build (its probe
+    # shells out to nvidia-smi / reads /dev), not on every /api/stats poll.
+    accelerator_label = detect_accelerator().label
     app = FastAPI(
         title="AuspexAI Worker — local dashboard",
         version=__version__,
@@ -448,23 +451,13 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
             worker, thermal_critical=_thermal_critical(config), now=datetime.now(UTC)
         )
 
-        # ── Details: the static "what + who is this worker" facts in ONE section
-        # (Capabilities + Identity merged). The LIVE signals (heartbeat, thermal,
-        # coordinator/inference reachability) are the heart's vitals; the metrics
-        # (units/experiments/receipts/pending) + tier ride the heart too.
-        #   - model count lives on its own Models page (the nav covers it);
-        #   - execution mode is shown CALMLY here (a small dot + the bare word) and
-        #     CHANGED on Config, where the loud consent control lives — no
-        #     duplicative deep-link from here;
-        #   - pubkey is truncated (full on hover); enrolled is relative (full on
-        #     hover). Values share one type system: plain text, mono only for the
-        #     pubkey identifier — no <code> chips or badge pills.
-        acc = detect_accelerator()
-        exec_policy = _current_executor_policy(config, config_path)
+        # ── Identity: who this worker IS — public key · enrolled · flavor. Its
+        # OPERATIONAL state moved UP into the heart: how it computes (accelerator),
+        # what it runs (execution), heat + inference are the heart's vitals; its
+        # liveness is the heart's pulse; its metrics + tier ride the heart too.
+        # Values share one type system: plain text, mono only for the pubkey.
         pubkey_short = f"{worker.pubkey_hex[:10]}…{worker.pubkey_hex[-8:]}"
-        detail_rows: list[tuple[str, str, bool]] = [
-            ("accelerator", html.escape(acc.label), False),
-            ("execution", _executor_indicator(exec_policy), False),
+        identity_rows: list[tuple[str, str, bool]] = [
             ("public key", f'<span title="{worker.pubkey_hex}">{pubkey_short}</span>', True),
             (
                 "enrolled",
@@ -474,7 +467,7 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
             ),
             *([("flavor", html.escape(config.flavor), False)] if config.flavor else []),
         ]
-        details_html = "    <h2>Details</h2>\n" + render_cards(detail_rows)
+        identity_html = "    <h2>Identity</h2>\n" + render_cards(identity_rows)
 
         # Units completed + distinct experiments are the heart's headline metrics,
         # and receipts + pending are folded into the heart's metrics row too — so
@@ -611,7 +604,7 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
         body = (
             state_banner
             + heart_html
-            + details_html
+            + identity_html
             + "\n"
             + upgrade_html
             + f'\n    <div class="actions">{account_control}</div>\n'
@@ -1239,6 +1232,11 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
                 "thermal_temp_c": thermal_temp_c,
                 "thermal_state": thermal_state,
                 "coordinator_url": config.coordinator_url,
+                # Heart vitals (the worker's operational state): how it computes
+                # (accelerator, static — cached at build) + what it runs (execution,
+                # the live hot-reloaded policy). thermal + inference are alongside.
+                "accelerator": accelerator_label,
+                "execution": _current_executor_policy(config, config_path),
                 "inference": _inference_status(config),  # live backend reachability (or null)
                 # §9 #46: update-available notice (server-built, escaped) + flavor.
                 "update_available": bool(notice_html),

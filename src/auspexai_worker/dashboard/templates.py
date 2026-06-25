@@ -135,6 +135,10 @@ _LIVE_SCRIPT = """  <script>
     var heartHist = [];
     function heartState(d) {
       if (!d.worker_id) return 'idle';
+      // no contact with the network (stale/absent heartbeat) is a problem — the
+      // worker can't receive or report work. Liveness IS the heartbeat.
+      var hbMs = d.last_heartbeat_at ? (Date.now() - new Date(d.last_heartbeat_at).getTime()) : null;
+      if (hbMs == null || hbMs >= 180000) return 'problem';
       if (d.state_tone === 'warn' || d.state_tone === 'error') return 'problem';
       if (d.thermal_enabled && d.thermal_state === 'critical') return 'problem';
       var h = String(d.activity_headline || '').toLowerCase();
@@ -163,16 +167,26 @@ _LIVE_SCRIPT = """  <script>
         strip.innerHTML = bars;
       }
       var st = heartState(d);
+      var hbMs = d.last_heartbeat_at ? (Date.now() - new Date(d.last_heartbeat_at).getTime()) : null;
+      var noContact = !!d.worker_id && (hbMs == null || hbMs >= 180000);
       var dot = document.getElementById('heart-dot');
       if (dot) dot.className = 'pulse-dot ' + st;
       var statusEl = document.getElementById('heart-status');
-      if (statusEl) statusEl.textContent = st === 'working' ? 'working' : (st === 'problem' ? 'attention' : 'idle');
+      if (statusEl) {
+        statusEl.textContent = noContact ? 'no contact' : (st === 'working' ? 'working' : (st === 'problem' ? 'attention' : 'idle'));
+        // The heartbeat IS the worker→coordinator contact; its freshness + the
+        // coordinator URL ride the status tooltip (no separate "coordinator" vital).
+        var contact = !d.worker_id ? 'not enrolled' : (d.last_heartbeat_at ? 'last contact ' + rel(d.last_heartbeat_at) : 'no contact yet');
+        statusEl.title = contact + (d.coordinator_url ? ' \\u00B7 ' + String(d.coordinator_url).replace(/[<>&"]/g, '') : '');
+      }
       var narr = document.getElementById('heart-narration');
       if (narr) {
         // Activity/state only — the unit/experiment counts are the metrics row
         // below, so the line speaks to what's HAPPENING, not the totals.
         var parts = [];
-        if (st === 'problem' && d.state_label) {
+        if (noContact && !d.state_label) {
+          parts.push('no contact with the network' + (d.last_heartbeat_at ? ' (' + rel(d.last_heartbeat_at) + ')' : '') + ' \\u2014 is the daemon running?');
+        } else if (st === 'problem' && d.state_label) {
           // a hold (paused/quarantined/overheating) — say so, don't claim "idle";
           // the loud detail + reason is in the banner above.
           parts.push(String(d.state_label).toLowerCase());
@@ -185,16 +199,15 @@ _LIVE_SCRIPT = """  <script>
       var vit = document.getElementById('heart-vitals');
       if (vit) {
         var v = [];
-        // coordinator connection = heartbeat freshness (the worker→coordinator link);
-        // the URL rides the tooltip. flavor is a static fact (Identity owns it).
-        var hbMs = d.last_heartbeat_at ? (Date.now() - new Date(d.last_heartbeat_at).getTime()) : null;
-        var coordOk = hbMs != null && hbMs < 180000;
-        var coordTxt = !d.worker_id ? 'coordinator \\u00B7 not enrolled'
-          : (hbMs == null ? 'coordinator \\u00B7 no contact'
-          : (coordOk ? 'coordinator \\u00B7 connected ' + rel(d.last_heartbeat_at)
-          : 'coordinator \\u00B7 no contact ' + rel(d.last_heartbeat_at)));
-        var coordUrl = String(d.coordinator_url || '').replace(/[<>&"]/g, '');
-        v.push('<span class="vital' + (coordOk ? '' : ' bad') + '" title="' + coordUrl + '"><i class="vdot ' + (coordOk ? 'ok' : 'down') + '"></i>' + coordTxt + '</span>');
+        // The worker's operational state: how it computes (accelerator) + what it
+        // runs (execution) + heat + the inference backend. Network liveness is NOT
+        // here — it's the heartbeat itself (the pulse goes "no contact" when stale).
+        if (d.accelerator) {
+          v.push('<span class="vital"><i class="vdot"></i>' + String(d.accelerator).replace(/[<>&"]/g, '') + '</span>');
+        }
+        if (d.execution) {
+          v.push('<span class="vital"><i class="vdot"></i>' + String(d.execution).replace(/[<>&"]/g, '') + '</span>');
+        }
         if (d.thermal_enabled && d.thermal_state) {
           var tcls = d.thermal_state === 'critical' ? 'bad' : (d.thermal_state === 'warm' ? 'warn' : '');
           v.push('<span class="vital ' + tcls + '">' + (d.thermal_temp_c != null ? d.thermal_temp_c + '\\u00B0C' : String(d.thermal_state).replace(/[<>&]/g, '')) + '</span>');
@@ -309,8 +322,9 @@ def render_page(*, title: str, body: str, active_nav: str, live: bool = False) -
   <main>
 {body}
   </main>
-  <p class="meta">Local volunteer dashboard · localhost-only · read-only.
-    Withdrawal and tier upgrades remain CLI-only.
+  <p class="meta">Local volunteer dashboard · localhost-only.
+    Pause, account login/logout, and execution policy are controllable here;
+    full withdrawal (<code>auspexai-worker retire</code>) stays CLI-only.
     See <a href="https://github.com/auspexai/worker" style="color:#A78BFA">github.com/auspexai/worker</a>.</p>
 {live_script}</body>
 </html>"""

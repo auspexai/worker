@@ -76,7 +76,8 @@ class TestOverview:
         assert r.status_code == 200
         assert "wkr-test" in r.text  # worker_id rides the heart header now
         assert "T0 anonymous" in r.text
-        # the coordinator is the heart's connection vital now — URL via /api/stats
+        # the coordinator URL rides the heart's status tooltip now (the heartbeat
+        # IS the contact — no separate vital); it's still carried in /api/stats
         assert "coord.auspexai.network" in client.get("/api/stats").json()["coordinator_url"]
 
     def test_enrolled_overview_is_live(self, client: TestClient, db: Database) -> None:
@@ -213,28 +214,28 @@ class TestReceipts:
 
 
 class TestConfig:
-    def test_overview_details_section_merges_capabilities_and_identity(
+    def test_overview_identity_section_is_pure_identity(
         self, client: TestClient, db: Database
     ) -> None:
-        """The heart owns the live signals + metrics + tier; the static facts
-        (accelerator, execution mode, public key, enrolled) merge into ONE tightened
-        "Details" section — no separate Capabilities/Identity grids, no models card
-        (Models has its own nav page), no Contribution ledger."""
+        """The heart owns the worker's operational state — accelerator, execution,
+        thermal, inference are its vitals (client-rendered from /api/stats); the
+        remaining server section is pure IDENTITY: public key, enrolled, flavor."""
         _enroll(db)
         r = client.get("/")
         assert r.status_code == 200
-        assert "<h2>Details</h2>" in r.text
-        assert "accelerator" in r.text
-        assert "execution" in r.text  # the calm execution-mode cell (was "executor mode")
+        assert "<h2>Identity</h2>" in r.text
         assert "public key" in r.text
         assert "enrolled" in r.text
-        # merged away / dropped:
+        # no leftover section headers from the earlier passes:
+        assert "<h2>Details</h2>" not in r.text
         assert "<h2>Capabilities</h2>" not in r.text
-        assert "<h2>Identity</h2>" not in r.text
-        assert "models in store" not in r.text  # Models has its own nav page
-        assert "<h2>Contribution ledger</h2>" not in r.text  # folded into the heart
-        # The heart leads; then the Details section.
-        assert r.text.index('id="wkr-heart"') < r.text.index("<h2>Details</h2>")
+        assert "<h2>Contribution ledger</h2>" not in r.text
+        # accelerator + execution are heart VITALS now — in /api/stats, not a card:
+        d = client.get("/api/stats").json()
+        assert d.get("accelerator")
+        assert "execution" in d
+        # The heart leads; then the Identity section.
+        assert r.text.index('id="wkr-heart"') < r.text.index("<h2>Identity</h2>")
 
     def test_models_page_renders_store_and_accelerator(self, client: TestClient) -> None:
         r = client.get("/models")
@@ -569,10 +570,9 @@ class TestExecutorSetter:
         # the mayhem1 bug: NO stale "synthetic only" badge from a snapshot read
         # while the live policy is provisioned (the read-only kv row was removed).
         assert "synthetic only" not in r.text
-        # overview shows the live mode too — now the calm Details "execution" cell
-        # (the bare word + a tooltip), not the loud badge (that's the Config page).
-        ov = client.get("/")
-        assert "provisioned" in ov.text
+        # the live mode is also a heart vital on the overview — client-rendered from
+        # /api/stats (not a server-side card), so assert it on the poll source.
+        assert client.get("/api/stats").json()["execution"] == "provisioned"
 
     def test_invalid_policy_is_ignored(self, client: TestClient, toml_path: Path) -> None:
         r = client.post("/executor", data={"policy": "bogus"}, follow_redirects=False)
@@ -582,8 +582,9 @@ class TestExecutorSetter:
 
 
 class TestNoExternalSurface:
-    """Sanity-check that the dashboard is read-only: no PUT/POST/DELETE
-    surface on any route."""
+    """The DISPLAY pages take no POST — they're read-only views. (The control
+    routes — /self-pause, /executor, /login, /logout — are separate POST
+    endpoints with their own tests; this guards the view pages.)"""
 
     def test_no_post_routes_on_html_pages(self, client: TestClient) -> None:
         for path in ("/", "/activity", "/receipts", "/config", "/api/stats"):
