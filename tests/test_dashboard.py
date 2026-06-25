@@ -565,7 +565,7 @@ class TestExecutorSetter:
         assert "Pending restart" not in r.text  # no stale-snapshot banner anymore
         assert "set synthetic (echo only)" in r.text  # offers downgrades from provisioned
         assert "enable provisioned" not in r.text
-        assert "runs provisioned tenant code" in r.text
+        assert "Runs provisioned tenant code" in r.text  # the calm indicator's tooltip
         # the mayhem1 bug: NO stale "synthetic only" badge from a snapshot read
         # while the live policy is provisioned (the read-only kv row was removed).
         assert "synthetic only" not in r.text

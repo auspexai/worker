@@ -24,10 +24,9 @@ th, td { text-align: left; padding: 0.45em 0.6em; border-bottom: 1px solid #2a2e
 th { color: #9ca3af; font-weight: 500; }
 .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.85em; }
 .dim { color: #9ca3af; }
-/* small inline status dot (execution mode in Details): ok=green, warn=amber. */
-.dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #2a3450; margin-right: 0.45em; vertical-align: middle; }
-.dot.ok { background: #6ee7b7; }
-.dot.warn { background: #fbbf24; }
+/* a neutral bullet for the execution-mode word (Details + Config). Executor mode
+   is a configuration, not a health status, so it carries NO good/warn/bad color. */
+.dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #5b6478; margin-right: 0.45em; vertical-align: middle; }
 .kv { display: grid; grid-template-columns: 12em 1fr; gap: 0.3em 1em; }
 .kv dt { color: #9ca3af; }
 .kv dd { margin: 0; }

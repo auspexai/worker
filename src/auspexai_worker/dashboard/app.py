@@ -139,14 +139,21 @@ def _tier_badge(tier: int) -> str:
     return f'<span class="badge tier-{tier}">{label}</span>'
 
 
-def _executor_badge(policy: str) -> str:
-    """Make the code-execution consent setting unmissable (§5.14)."""
-    label, cls = {
-        "synthetic": ("synthetic only — no third-party code", "ok"),
-        "provisioned": ("runs provisioned tenant code", "warn"),
-        "off": ("off — refuses all work", ""),
-    }.get(policy, (policy, ""))
-    return f'<span class="badge {cls}">{html.escape(label)}</span>'
+def _executor_indicator(policy: str) -> str:
+    """The code-execution mode as a calm dot + word (+ tooltip) — shared by the
+    overview Details and the Config "current" line.
+
+    The dot is NEUTRAL: executor mode is a configuration, not a health status, so
+    it carries no good/warn/bad color. In particular provisioned is NOT amber —
+    running provisioned tenant code is a deliberate, consented operating mode, not
+    a warning. The explicit word + the tooltip carry the §5.14 consent awareness;
+    the loud, deliberate-act friction lives on the /executor/confirm enable step."""
+    tip = {
+        "synthetic": "Synthetic only — no third-party code runs.",
+        "provisioned": "Runs provisioned tenant code — you consented to run third-party code here.",
+        "off": "Off — this worker refuses all work.",
+    }.get(policy, "")
+    return f'<span class="dot"></span><span title="{html.escape(tip)}">{html.escape(policy)}</span>'
 
 
 def _current_executor_policy(config: WorkerConfig, config_path: Path | None) -> str:
@@ -454,20 +461,10 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
         #     pubkey identifier — no <code> chips or badge pills.
         acc = detect_accelerator()
         exec_policy = _current_executor_policy(config, config_path)
-        exec_dot = {"synthetic": "ok", "provisioned": "warn", "off": ""}.get(exec_policy, "")
-        exec_tip = {
-            "synthetic": "Synthetic only — no third-party code runs.",
-            "provisioned": "Runs provisioned tenant code (you consented). Change it on Config.",
-            "off": "Off — refuses all work.",
-        }.get(exec_policy, "")
-        execution_cell = (
-            f'<span class="dot {exec_dot}"></span>'
-            f'<span title="{html.escape(exec_tip)}">{html.escape(exec_policy)}</span>'
-        )
         pubkey_short = f"{worker.pubkey_hex[:10]}…{worker.pubkey_hex[-8:]}"
         detail_rows: list[tuple[str, str, bool]] = [
             ("accelerator", html.escape(acc.label), False),
-            ("execution", execution_cell, False),
+            ("execution", _executor_indicator(exec_policy), False),
             ("public key", f'<span title="{worker.pubkey_hex}">{pubkey_short}</span>', True),
             (
                 "enrolled",
@@ -1140,7 +1137,7 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
             )
         executor_setter = (
             "    <h3>Code-execution policy</h3>\n"
-            f"    <p>current: {_executor_badge(current)}</p>\n"
+            f"    <p>current: {_executor_indicator(current)}</p>\n"
             f'    <div class="btn-row">{"".join(setter_buttons)}</div>\n'
             '    <p class="muted">Your consent to run third-party tenant code on this '
             "machine. The running daemon <strong>hot-reloads</strong> the change — "
