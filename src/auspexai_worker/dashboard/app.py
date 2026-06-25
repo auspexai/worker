@@ -464,33 +464,12 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
         ]
         status_html = "    <h2>Capabilities</h2>\n" + render_cards(cap_rows)
 
-        # ── Units completed + distinct experiments are the heart's headline
-        # metrics; this is the fuller ledger behind them.
+        # Units completed + distinct experiments are the heart's headline metrics,
+        # and receipts + pending are folded into the heart's metrics row too — so
+        # there's no separate "Contribution ledger" section. (The old audit-row
+        # count + tenant allow/deny cards were plumbing with no volunteer value;
+        # they're off the overview — audit lives on Activity, allow/deny on Config.)
         progress = results_repo.progress_summary()
-        contribution_html = "    <h2>Contribution ledger</h2>\n" + render_cards(
-            [
-                (
-                    "receipts earned",
-                    f'<span data-live="receipts_count">{stats["receipts_count"]}</span>',
-                    False,
-                ),
-                (
-                    "pending submissions",
-                    f'<span data-live="pending_submissions">{stats["pending_submissions"]}</span>',
-                    False,
-                ),
-                (
-                    "audit-log rows",
-                    f'<span data-live="audit_count">{stats["audit_count"]}</span>',
-                    False,
-                ),
-                (
-                    "tenant allow / deny",
-                    f"{stats['tenant_allow_count']} / {stats['tenant_deny_count']}",
-                    False,
-                ),
-            ]
-        )
 
         upgrade_html = ""
         if (
@@ -513,7 +492,7 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
                 if config.flavor
                 else []
             ),
-            ("trust tier", _tier_badge(int(worker.trust_tier)), False),
+            # trust tier now rides the heart header as a chip.
             ("public key", html.escape(worker.pubkey_hex), True),
             (
                 "enrolled",
@@ -559,24 +538,28 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
         # is operator-controlled — don't dangle a pause/unpause that wouldn't
         # change the work state; if self-paused *under* an operator hold, say
         # resuming won't restore work until the hold lifts.
+        # The pause/resume toggle is the work on/off switch — it lives in the
+        # heart's lower-right, by the state it controls. Compact button; the longer
+        # explanation rides the title tooltip.
         pause_control = ""
         if worker.self_paused:
-            note = ""
+            tip = "Resume receiving work."
             if worker.operator_hold_kind is not None:
-                note = (
-                    ' <span class="muted">(an operator hold is also active — resuming '
-                    "won't restore work until the operator lifts it)</span>"
+                tip = (
+                    "An operator hold is also active — resuming won't restore work "
+                    "until the operator lifts it."
                 )
             pause_control = (
-                '    <form method="post" action="/self-unpause" style="margin:0.75em 0">'
-                '<button type="submit">resume (unpause)</button>' + note + "</form>\n"
+                '<form method="post" action="/self-unpause" class="action">'
+                f'<button type="submit" class="btn" title="{html.escape(tip)}">resume</button>'
+                "</form>"
             )
         elif worker.operator_hold_kind is None:
             pause_control = (
-                '    <form method="post" action="/self-pause" style="margin:0.75em 0">'
-                '<button type="submit">pause this worker</button> '
-                '<span class="muted">— stop receiving work; keep enrollment + tier</span>'
-                "</form>\n"
+                '<form method="post" action="/self-pause" class="action">'
+                '<button type="submit" class="btn" '
+                'title="Stop receiving work; keep your enrollment + tier.">pause</button>'
+                "</form>"
             )
 
         # Log out / log in is an ACTION pair (mutually exclusive). Bound → offer
@@ -584,58 +567,64 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
         # inverse of `login`). Anonymous → offer log in (bind a GitHub account to
         # build portable trust). Login is OFFERED whenever anonymous, independent
         # of the upgrade-prompt threshold — it parallels the CLI `login`.
-        logout_control = ""
-        login_control = ""
+        # Log out / log in is an ACCOUNT action (mutually exclusive) — it belongs
+        # with Identity, not the activity heart. Styled button; the rationale rides
+        # the title tooltip. Bound → offer log out (revert to T0, keep running);
+        # anonymous → offer log in (bind a GitHub account for portable trust).
+        account_control = ""
         if worker.account_binding_json is not None:
-            logout_control = (
-                '    <form method="post" action="/logout" style="margin:0.75em 0">'
-                '<button type="submit">log out (unbind account)</button> '
-                '<span class="muted">— drop the GitHub-account binding, revert to T0; '
-                "the worker keeps running. Re-bind with "
-                "<code>auspexai-worker login</code>.</span></form>\n"
+            account_control = (
+                '<form method="post" action="/logout" class="action">'
+                '<button type="submit" class="btn danger" '
+                'title="Drop the GitHub-account binding and revert to T0; the worker '
+                'keeps running. Re-bind any time with: auspexai-worker login.">'
+                "log out</button></form>"
             )
         else:
-            login_control = (
-                '    <form method="post" action="/login" style="margin:0.75em 0">'
-                '<button type="submit">log in (link a GitHub account)</button> '
-                '<span class="muted">— bind this worker to a GitHub account to build '
-                "portable trust. Stays anonymous in citations unless you opt in "
-                "separately.</span></form>\n"
+            account_control = (
+                '<form method="post" action="/login" class="action">'
+                '<button type="submit" class="btn" '
+                'title="Bind this worker to a GitHub account to build portable trust. '
+                'Stays anonymous in citations unless you opt in separately.">'
+                "log in</button></form>"
             )
 
         # The volunteer's heart monitor — "is my machine helping?" at a glance
         # (surface_liveness_and_activity_view_design.md). Skeleton rendered here;
         # the live poll fills the pulse + dot + narration on its immediate first
         # tick (no blank flash), then keeps it beating.
+        tier_chip = _tier_badge(int(worker.trust_tier))
         heart_html = f"""    <section class="heart" id="wkr-heart">
       <header>
         <span class="pulse-dot" id="heart-dot"></span>
         <h2 class="heart-h">Activity</h2>
+        {tier_chip}
         <span class="heart-status" id="heart-status">—</span>
       </header>
       <div class="heart-id">{html.escape(worker.worker_id)} · v{html.escape(__version__)}</div>
       <div class="strip" id="heart-strip"><span class="strip-empty">listening…</span></div>
       <p class="narration" id="heart-narration">—</p>
       <div class="heart-vitals" id="heart-vitals"></div>
-      <div class="heart-metrics">
-        <div class="hm"><span class="n" id="heart-units">{progress["completed_units"]}</span><span class="l">units contributed</span></div>
-        <div class="hm"><span class="n" id="heart-exps">{progress["distinct_experiments"]}</span><span class="l">experiments</span></div>
+      <div class="heart-foot">
+        <div class="heart-metrics">
+          <div class="hm"><span class="n" id="heart-units">{progress["completed_units"]}</span><span class="l">units contributed</span></div>
+          <div class="hm"><span class="n" id="heart-exps">{progress["distinct_experiments"]}</span><span class="l">experiments</span></div>
+          <div class="hm"><span class="n" data-live="receipts_count">{stats["receipts_count"]}</span><span class="l">receipts</span></div>
+          <div class="hm"><span class="n" data-live="pending_submissions">{stats["pending_submissions"]}</span><span class="l">pending</span></div>
+        </div>
+        {pause_control}
       </div>
     </section>
 """
 
         body = (
             state_banner
-            + pause_control
-            + logout_control
-            + login_control
             + heart_html
             + status_html
             + "\n"
-            + contribution_html
-            + "\n"
             + upgrade_html
             + identity_html
+            + f'\n    <div class="actions">{account_control}</div>\n'
         )
         return render_page(title="Overview", body=body, active_nav="/", live=True)
 

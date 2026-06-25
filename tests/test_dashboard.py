@@ -90,11 +90,10 @@ class TestOverview:
         assert 'id="live-ind"' in r.text  # header indicator
         assert "/api/stats" in r.text  # the poll target is wired into the script
         for marker in (
-            # heartbeat / thermal / completed_units / distinct_experiments moved
-            # into the activity heart (rendered via renderHeart, not data-live).
+            # completed_units / distinct_experiments render via renderHeart;
+            # receipts + pending are folded into the heart's metrics row (data-live).
             'data-live="receipts_count"',
             'data-live="pending_submissions"',
-            'data-live="audit_count"',
             'data-live="state_banner"',  # the state is the live banner now
         ):
             assert marker in r.text, marker
@@ -159,7 +158,7 @@ class TestOverview:
         r = client.get("/")
         assert "active" in r.text
         assert "notice fault" not in r.text
-        assert "pause this worker" in r.text
+        assert 'action="/self-pause"' in r.text  # the pause toggle lives in the heart
 
         # Quarantine = fault → fault-toned notice; the pause control is withdrawn
         # (operator-controlled, the volunteer can't lift it).
@@ -167,7 +166,7 @@ class TestOverview:
         r = client.get("/")
         assert "quarantined" in r.text
         assert "notice fault" in r.text
-        assert "pause this worker" not in r.text
+        assert 'action="/self-pause"' not in r.text  # withdrawn under an operator hold
 
         # No-fault operator pause → neutral notice (no fault tone).
         repo.record_operator_hold("pause", reason="rolling upgrade")
@@ -217,9 +216,11 @@ class TestConfig:
     def test_overview_capabilities_section_groups_static_signals(
         self, client: TestClient, db: Database
     ) -> None:
-        """The activity heart owns the live signals (heartbeat, thermal, units);
-        the Capabilities section keeps the static config (executor, models,
-        accelerator). The heart leads, then Capabilities → Contribution → Identity."""
+        """The activity heart owns the live signals (heartbeat, thermal, units +
+        receipts/pending); the Capabilities section keeps the static config
+        (executor, models, accelerator). The heart leads, then Capabilities →
+        Identity. (The old Contribution-ledger section is gone — its metrics fold
+        into the heart, its plumbing cards were dropped.)"""
         _enroll(db)
         r = client.get("/")
         assert r.status_code == 200
@@ -227,10 +228,10 @@ class TestConfig:
         assert "executor mode" in r.text
         assert "synthetic only" in r.text  # the executor badge (default synthetic)
         assert "models in store" in r.text
+        assert "<h2>Contribution ledger</h2>" not in r.text  # folded into the heart
         # The heart leads; then static sections in order.
         assert r.text.index('id="wkr-heart"') < r.text.index("<h2>Capabilities</h2>")
-        assert r.text.index("<h2>Capabilities</h2>") < r.text.index("<h2>Contribution ledger</h2>")
-        assert r.text.index("<h2>Contribution ledger</h2>") < r.text.index("<h2>Identity</h2>")
+        assert r.text.index("<h2>Capabilities</h2>") < r.text.index("<h2>Identity</h2>")
 
     def test_models_page_renders_store_and_accelerator(self, client: TestClient) -> None:
         r = client.get("/models")

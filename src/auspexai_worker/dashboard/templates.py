@@ -46,11 +46,13 @@ th { color: #9ca3af; font-weight: 500; }
 .muted { color: #6b7280; }
 code { font-family: ui-monospace, monospace; background: #1a1e2a; padding: 0.1em 0.35em; border-radius: 3px; font-size: 0.85em; }
 .empty { color: #6b7280; font-style: italic; padding: 1em 0; }
-.notice { background: #1e3a5f; border: 1px solid #3b82f6; border-radius: 6px; padding: 0.75em 1em; margin: 1em 0; color: #93c5fd; }
+/* notice = an identity/CTA card (login, update-available); purple-tinted so BLUE
+   stays the heart's idle lane exclusively. .ok/.fault keep their semantic green/red. */
+.notice { background: #171428; border: 1px solid #4c3a82; border-radius: 6px; padding: 0.75em 1em; margin: 1em 0; color: #c4b5fd; }
 .notice.ok { background: #0f2a1a; border-color: #14532d; color: #86efac; }
 .notice.fault { background: #3a1e1e; border-color: #b91c1c; color: #fca5a5; }
 .notice code { background: #0a0e1a; }
-.notice .copy-cmd { background: #1f2937; border: 1px solid #3b82f6; color: inherit; border-radius: 4px; padding: 0.15em 0.6em; margin-left: 0.4em; font: inherit; font-size: 0.85em; cursor: pointer; }
+.notice .copy-cmd { background: #1f2937; border: 1px solid #4c3a82; color: inherit; border-radius: 4px; padding: 0.15em 0.6em; margin-left: 0.4em; font: inherit; font-size: 0.85em; cursor: pointer; }
 .notice .copy-cmd:hover { background: #2a2e3a; }
 .live-ind { font-size: 0.6em; font-weight: 500; color: #86efac; margin-left: 0.5em; vertical-align: middle; }
 /* the state banner is a HOLD alert now (option B): empty for active/idle → collapse it */
@@ -85,6 +87,14 @@ code { font-family: ui-monospace, monospace; background: #1a1e2a; padding: 0.1em
 .heart .hm { display: flex; flex-direction: column; gap: 0.1rem; }
 .heart .hm .n { font-size: 1.05rem; font-weight: 600; color: #e6ebf5; }
 .heart .hm .l { font-size: 0.66rem; color: #7c849a; text-transform: uppercase; letter-spacing: 0.04em; }
+/* heart foot: metrics on the left, the pause/resume toggle at the lower-right. */
+.heart .heart-foot { display: flex; align-items: flex-end; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+/* action buttons — neutral by default; .danger warms toward red on hover (logout). */
+.btn { display: inline-flex; align-items: center; gap: 0.35em; background: #161d2c; color: #cdd5e6; border: 1px solid #2a3450; border-radius: 6px; padding: 0.32em 0.8em; font: inherit; font-size: 0.85em; line-height: 1.2; cursor: pointer; text-decoration: none; }
+.btn:hover { border-color: #4a5a82; background: #1a2336; }
+.btn.danger:hover { border-color: #b91c1c; color: #fca5a5; background: #241620; }
+form.action { display: inline; margin: 0; }
+.actions { margin: 0.6em 0 0.2em; }
 """
 
 # Baseline-poll live updater (M6 #3, worker side). Completes the same principle
