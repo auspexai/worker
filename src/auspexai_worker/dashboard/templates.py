@@ -102,6 +102,12 @@ code { font-family: ui-monospace, monospace; background: #1a1e2a; padding: 0.1em
 form.action { display: inline; margin: 0; }
 .actions { margin: 0.6em 0 0.2em; }
 .btn-row { display: flex; flex-wrap: wrap; gap: 0.5em; align-items: center; margin: 0.5em 0; }
+/* /login/citation choice list — radios in a bordered group matching the cards. */
+.choice-form { margin: 1em 0; }
+.choices { border: 1px solid #2a2e3a; border-radius: 8px; padding: 0.7em 1em; min-width: 0; }
+.choice { display: flex; gap: 0.55em; align-items: flex-start; margin: 0.45em 0; cursor: pointer; }
+.choice input { margin-top: 0.3em; flex: none; }
+.choice-note { margin: 0.6em 0 0; font-size: 0.85em; }
 """
 
 # Baseline-poll live updater (M6 #3, worker side). Completes the same principle
@@ -217,7 +223,7 @@ _LIVE_SCRIPT = """  <script>
           var infName = String(inf.backend || 'inference').replace(/[<>&]/g, '');
           var infVer = inf.version ? ' v' + String(inf.version).replace(/[<>&]/g, '') : '';
           var infTxt = infName + infVer + (inf.reachable ? '' : ' \\u2014 unreachable');
-          v.push('<span class="vital' + (inf.reachable ? '' : ' bad') + '"><i class="vdot ' + (inf.reachable ? 'ok' : 'down') + '"></i>' + infTxt + '</span>');
+          v.push('<span class="vital' + (inf.reachable ? '' : ' bad') + '"><i class="vdot ' + (inf.reachable ? '' : 'down') + '"></i>' + infTxt + '</span>');
         }
         vit.innerHTML = v.join('');
       }

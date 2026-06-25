@@ -870,22 +870,23 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
         if account_id is None or login_session.snapshot().status not in ("pending", "authorized"):
             return RedirectResponse("/", status_code=303)
         body = (
-            "    <h2>You're linked. One choice before your dashboard.</h2>\n"
-            '    <p class="muted">Research you contribute compute to may be published with a '
-            "contributor acknowledgment. It's your call — separate from signing in — and you're "
-            "asked again each time you log in. (Logged out, your new work is anonymous.)</p>\n"
-            '    <form method="post" action="/login/citation" style="margin:1em 0">\n'
-            '      <fieldset style="border:1px solid #2a2a35;border-radius:8px;padding:0.7em 1em">\n'
-            '        <label style="display:block;margin:0.35em 0"><input type="radio" name="choice" '
-            'value="anonymous" checked> Stay <strong>anonymous</strong> — no public credit</label>\n'
-            '        <label style="display:block;margin:0.35em 0"><input type="radio" name="choice" '
-            'value="cite"> <strong>Credit me</strong> publicly, under my verified GitHub '
-            "identity</label>\n"
-            '        <p class="muted" style="margin:0.5em 0 0;font-size:0.9em">Credit always uses '
-            "the GitHub account name you signed in with — there's no custom name to set, so a "
-            "citation is always a real, verifiable identity.</p>\n"
+            "    <h2>You're signed in — one quick choice.</h2>\n"
+            '    <p class="muted">When research your compute helped run gets published, you can be '
+            "named in its contributor acknowledgment — or stay anonymous. Your call, separate from "
+            "signing in, and we ask again each time you log in. (While logged out, new work stays "
+            "anonymous.)</p>\n"
+            '    <form method="post" action="/login/citation" class="choice-form">\n'
+            '      <fieldset class="choices">\n'
+            '        <label class="choice"><input type="radio" name="choice" value="anonymous" '
+            "checked> <span>Stay <strong>anonymous</strong> — no public credit</span></label>\n"
+            '        <label class="choice"><input type="radio" name="choice" value="cite"> '
+            "<span><strong>Credit me</strong> publicly, under my verified GitHub identity</span>"
+            "</label>\n"
+            '        <p class="muted choice-note">Credit always uses the GitHub login you signed '
+            "in with — there's no free-text name, so a citation is always a real, verifiable "
+            "identity.</p>\n"
             "      </fieldset>\n"
-            '      <button type="submit" style="margin-top:0.8em">Continue to my dashboard</button>\n'
+            '      <button type="submit" class="btn primary">Continue to my dashboard</button>\n'
             "    </form>\n"
         )
         return HTMLResponse(render_page(title="Citation", body=body, active_nav="/"))
