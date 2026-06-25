@@ -37,7 +37,7 @@ from auspexai_worker.state import (
     TenantListRepository,
     WorkerSelfRepository,
 )
-from auspexai_worker.worker_state import SelfState, derive_self_state
+from auspexai_worker.worker_state import derive_self_state
 from auspexai_worker.workspace import workspace_runs_dir
 
 from .templates import render_cards, render_kv, render_page, render_table
@@ -247,32 +247,6 @@ def _work_activity(
     )
 
 
-def _state_banner(
-    worker,
-    state,
-    config: WorkerConfig,
-    *,
-    runs_dir: Path,
-    last_submitted_at: datetime | None,
-    now: datetime,
-) -> tuple[str, str]:
-    """Return (css_class, inner_html) for the overview state banner. Shared by
-    the server render and /api/stats so the banner updates live + identically.
-    Option B: active/idle is the activity heart's job now, so the banner is
-    EMPTY there (the container collapses via CSS); it is reserved for HOLD states
-    (paused / quarantined / self-paused / overheating / offline), where a loud,
-    reason-carrying alert beats the heart's thin red line. Returning ('', '')
-    lets the live poll flip a hold in/out without a reload."""
-    if state.state is SelfState.ACTIVE:
-        # active or idle — the heart shows it; no banner.
-        _ = (runs_dir, last_submitted_at, now)  # (kept for signature parity)
-        return "", ""
-    headline, detail = state.label, state.detail
-    cls = "notice fault" if state.fault else "notice"
-    inner = f"<strong>{html.escape(headline)}</strong> — {html.escape(detail)}"
-    return cls, inner
-
-
 def _update_notice(worker, config: WorkerConfig) -> tuple[str, str]:
     """§9 #46: (css_class, inner_html) for the update-available notice, or
     ('', '') when the worker is current / nothing announced. Quiet and
@@ -447,10 +421,6 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
             )
             return render_page(title="Overview", body=body, active_nav="/")
 
-        state = derive_self_state(
-            worker, thermal_critical=_thermal_critical(config), now=datetime.now(UTC)
-        )
-
         # ── Identity: who this worker IS — public key · enrolled · flavor. Its
         # OPERATIONAL state moved UP into the heart: how it computes (accelerator),
         # what it runs (execution), heat + inference are the heart's vitals; its
@@ -489,31 +459,12 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
                 "</div>\n"
             )
 
-        # §2.1 #11 (volunteer surface) + I4 (ui_triage_first_ia_redesign.md §5):
-        # the state banner leads the page so "is anything wrong with my box?" is
-        # answered first — ALWAYS rendered. For an ACTIVE worker the second
-        # clause is DYNAMIC + accurate: it claims "receiving work" only when work
-        # is actually flowing (a live runner / a recently-submitted unit), else
-        # it says idle/available. Hold states use their own accurate detail
-        # (quarantine = fault → red; every other hold is no-fault → neutral).
-        recent_submitted = results_repo.recent(limit=1)
-        last_submitted_at = recent_submitted[0].submitted_at if recent_submitted else None
-        banner_cls, banner_inner = _state_banner(
-            worker,
-            state,
-            config,
-            runs_dir=workspace_runs_dir(config.state_dir),
-            last_submitted_at=last_submitted_at,
-            now=datetime.now(UTC),
-        )
-        state_banner = (
-            f'    <div class="{banner_cls}" data-live="state_banner">{banner_inner}</div>\n'
-        )
-        # §9 #46: the update-available notice sits right under the state banner.
-        # ALWAYS render the container (possibly empty) so the live poll can flip
-        # it on without a page reload.
+        # Worker state (active / idle / hold / fault) is the HEART's job now — the
+        # redundant state banner was removed (one state surface). What remains is the
+        # §9 #46 update-available notice; ALWAYS render the container (possibly empty)
+        # so the live poll can flip it on without a page reload.
         notice_cls, notice_inner = _update_notice(worker, config)
-        state_banner += (
+        update_notice = (
             f'    <div class="{notice_cls}" data-live="update_notice">{notice_inner}</div>\n'
         )
 
@@ -602,7 +553,7 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
 """
 
         body = (
-            state_banner
+            update_notice
             + heart_html
             + identity_html
             + "\n"
@@ -1173,8 +1124,7 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
         progress = results_repo.progress_summary()
         # Derived volunteer-facing state (§2.1 #11) — kept live by the poll so the
         # status badge flips within a tick on an operator hold / self-pause / etc.
-        state_key = state_label = state_tone = None
-        banner_class = banner_html = None
+        state_key = state_label = state_tone = state_detail = None
         activity_headline = activity_detail = None
         notice_class = notice_html = ""
         if worker is not None:
@@ -1186,22 +1136,16 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
                 thermal_critical=(thermal_enabled and thermal_state == "critical"),
                 now=now,
             )
-            state_key, state_label, state_tone = st.state.value, st.label, st.tone
-            # The dynamic state banner (kept live so "receiving work" vs "idle"
-            # flips within a tick as work starts/stops) — same helper the page
-            # render uses, so server + poll agree exactly.
+            state_key, state_label, state_tone, state_detail = (
+                st.state.value,
+                st.label,
+                st.tone,
+                st.detail,
+            )
             recent_submitted = results_repo.recent(limit=1)
             last_submitted_at = recent_submitted[0].submitted_at if recent_submitted else None
-            banner_class, banner_html = _state_banner(
-                worker,
-                st,
-                config,
-                runs_dir=workspace_runs_dir(config.state_dir),
-                last_submitted_at=last_submitted_at,
-                now=now,
-            )
-            # Plain (headline, detail) for the activity heart — the same signal
-            # the banner shows, unwrapped so the heart can render its own line.
+            # Plain (headline, detail) for the activity heart — what's HAPPENING,
+            # for the heart's own line (the worker-state line is state_label/detail).
             activity_headline, activity_detail = _work_activity(
                 config,
                 runs_dir=workspace_runs_dir(config.state_dir),
@@ -1215,8 +1159,7 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
                 "worker_state": state_key,
                 "state_label": state_label,
                 "state_tone": state_tone,
-                "state_banner_class": banner_class,
-                "state_banner_html": banner_html,
+                "state_detail": state_detail,
                 "last_heartbeat_at": (
                     worker.last_heartbeat_at.isoformat()
                     if worker and worker.last_heartbeat_at

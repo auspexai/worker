@@ -95,7 +95,7 @@ class TestOverview:
             # receipts + pending are folded into the heart's metrics row (data-live).
             'data-live="receipts_count"',
             'data-live="pending_submissions"',
-            'data-live="state_banner"',  # the state is the live banner now
+            'data-live="update_notice"',  # worker-state is the heart's job now (no banner)
         ):
             assert marker in r.text, marker
 
@@ -146,34 +146,33 @@ class TestOverview:
         assert "<dt>worker_id</dt>" not in r.text  # moved OUT of the Identity dl
         assert r.headers.get("cache-control") == "no-store"
 
-    def test_overview_status_badge_and_fault_tone(self, client: TestClient, db: Database) -> None:
-        """§2.1 #11: the overview shows a single worker-state badge, and a
-        quarantine (the one fault signal) renders the fault-toned notice while a
-        no-fault operator pause does not."""
+    def test_worker_state_and_fault_tone_via_stats(self, client: TestClient, db: Database) -> None:
+        """§2.1 #11: worker-state surfaces via /api/stats — the heart renders it (no
+        separate banner). Quarantine is the one fault (tone 'error'); an operator
+        pause is a no-fault hold (neutral tone). The pause control is offered only
+        when the volunteer can act."""
         from auspexai_worker.state import WorkerSelfRepository
 
         _enroll(db)
         repo = WorkerSelfRepository(db)
-        # Fresh heartbeat → active; no fault notice; the volunteer pause control is offered.
+        # Fresh heartbeat → active (tone ok); the volunteer pause control is offered.
         repo.record_heartbeat(datetime.now(UTC), trust_tier=0)
-        r = client.get("/")
-        assert "active" in r.text
-        assert "notice fault" not in r.text
-        assert 'action="/self-pause"' in r.text  # the pause toggle lives in the heart
+        d = client.get("/api/stats").json()
+        assert d["worker_state"] == "active" and d["state_tone"] == "ok"
+        assert 'action="/self-pause"' in client.get("/").text  # pause toggle in the heart
 
-        # Quarantine = fault → fault-toned notice; the pause control is withdrawn
-        # (operator-controlled, the volunteer can't lift it).
+        # Quarantine = the one fault → tone 'error' + actionable detail; pause withdrawn.
         repo.record_operator_hold("quarantine", reason="manipulation suspected")
-        r = client.get("/")
-        assert "quarantined" in r.text
-        assert "notice fault" in r.text
-        assert 'action="/self-pause"' not in r.text  # withdrawn under an operator hold
+        d = client.get("/api/stats").json()
+        assert d["worker_state"] == "quarantined" and d["state_tone"] == "error"
+        assert "Reason: manipulation suspected" in d["state_detail"]
+        assert 'action="/self-pause"' not in client.get("/").text  # withdrawn under a hold
 
-        # No-fault operator pause → neutral notice (no fault tone).
+        # No-fault operator pause → neutral tone (not a fault).
         repo.record_operator_hold("pause", reason="rolling upgrade")
-        r = client.get("/")
-        assert "paused by operator" in r.text
-        assert "notice fault" not in r.text
+        d = client.get("/api/stats").json()
+        assert d["worker_state"] == "operator-paused" and d["state_tone"] == ""
+        assert "rolling upgrade" in d["state_detail"]
 
     def test_static_pages_are_not_live(self, client: TestClient, db: Database) -> None:
         """Static log/config pages don't carry the poll script (no live data)."""
@@ -599,24 +598,18 @@ class TestNoExternalSurface:
 class TestI4Overview:
     """I4 (ui_triage_first_ia_redesign.md §5): state-banner-first + inference."""
 
-    def test_active_idle_worker_shows_no_banner_and_honest_activity(
+    def test_active_idle_worker_is_honest_no_overclaim(
         self, client: TestClient, db: Database
     ) -> None:
-        """Option B: an idle worker shows NO state banner (the heart owns active/
-        idle) — the container stays present-but-empty so the live poll can flip a
-        hold in, and the heart's activity source honestly says 'Idle', never
-        'Receiving work'."""
+        """An idle (active, no-work) worker honestly says 'Idle', never 'Receiving
+        work' — via the heart's activity source (/api/stats). No banner."""
         from auspexai_worker.state import WorkerSelfRepository
 
         _enroll(db)
         WorkerSelfRepository(db).record_heartbeat(datetime.now(UTC), trust_tier=0)
-        r = client.get("/")
-        start = r.text.index('data-live="state_banner"')
-        banner = r.text[start : r.text.index("</div>", start)]
-        assert "receiving work" not in banner.lower()  # no overclaim
-        # the honest activity lives in the heart's source now
         d = client.get("/api/stats").json()
-        assert d["activity_headline"] == "Idle"
+        assert d["worker_state"] == "active"
+        assert d["activity_headline"] == "Idle"  # honest, no overclaim
 
     def test_active_worker_with_recent_work_says_receiving(
         self, client: TestClient, db: Database
@@ -641,18 +634,16 @@ class TestI4Overview:
         d = client.get("/api/stats").json()
         assert d["activity_headline"] == "Receiving work"
 
-    def test_api_stats_banner_empty_for_active_activity_in_headline(
-        self, client: TestClient, db: Database
-    ) -> None:
-        """The banner is a HOLD alert (option B): EMPTY for an active/idle worker
-        (the container collapses); the live activity is carried in
-        activity_headline, which the heart renders."""
+    def test_api_stats_active_state_for_idle_worker(self, client: TestClient, db: Database) -> None:
+        """An active/idle worker reports state 'active' (tone ok) + an honest 'Idle'
+        activity headline — what the heart renders. The banner fields are gone."""
         from auspexai_worker.state import WorkerSelfRepository
 
         _enroll(db)
         WorkerSelfRepository(db).record_heartbeat(datetime.now(UTC), trust_tier=0)
         d = client.get("/api/stats").json()
-        assert d["state_banner_html"] == "" and d["state_banner_class"] == ""
+        assert d["worker_state"] == "active" and d["state_tone"] == "ok"
+        assert "state_banner_html" not in d  # banner removed
         assert d["activity_headline"] == "Idle"
 
     def test_inference_absent_when_backend_none(self, client: TestClient, db: Database) -> None:

@@ -57,9 +57,11 @@ code { font-family: ui-monospace, monospace; background: #1a1e2a; padding: 0.1em
 .notice code { background: #0a0e1a; }
 .notice .copy-cmd { background: #1f2937; border: 1px solid #4c3a82; color: inherit; border-radius: 4px; padding: 0.15em 0.6em; margin-left: 0.4em; font: inherit; font-size: 0.85em; cursor: pointer; }
 .notice .copy-cmd:hover { background: #2a2e3a; }
-.live-ind { font-size: 0.6em; font-weight: 500; color: #86efac; margin-left: 0.5em; vertical-align: middle; }
-/* the state banner is a HOLD alert now (option B): empty for active/idle → collapse it */
-[data-live="state_banner"]:empty { display: none; }
+/* page-poll tick: neutral when live, amber when stale — calm by default; it's a
+   PAGE-meta signal (auto-refresh health), distinct from the worker's heart. */
+.live-ind { font-size: 0.6em; font-weight: 500; color: #6b7280; margin-left: 0.5em; vertical-align: middle; }
+/* the update-available notice collapses when empty (nothing announced). */
+[data-live="update_notice"]:empty { display: none; }
 /* activity heart (overview) — shared identity: cyan=working, blue=idle, red=problem */
 .heart { border: 1px solid #1f6b78; border-radius: 12px; background: linear-gradient(180deg,#101727 0%,#0c1322 100%); padding: 1rem 1.1rem; margin: 1em 0; display: flex; flex-direction: column; gap: 0.6rem; }
 .heart header { display: flex; align-items: center; gap: 0.55rem; margin: 0; }
@@ -69,6 +71,8 @@ code { font-family: ui-monospace, monospace; background: #1a1e2a; padding: 0.1em
 .pulse-dot.working { background: #67e8f9; animation: heartbeat 1.1s ease-out infinite; }
 .pulse-dot.idle { background: #4a7dff; }
 .pulse-dot.problem { background: #fca5a5; }
+.pulse-dot.warn { background: #fbbf24; }
+.pulse-dot.hold { background: #5b6478; }
 @keyframes heartbeat { 0% { box-shadow: 0 0 0 0 rgba(103,232,249,0.55); } 70% { box-shadow: 0 0 0 8px rgba(103,232,249,0); } 100% { box-shadow: 0 0 0 0 rgba(103,232,249,0); } }
 .heart .strip { display: flex; align-items: flex-end; gap: 2px; height: 64px; padding: 4px; background: #080d18; border: 1px solid #161d2c; border-radius: 8px; overflow: hidden; }
 .heart .bar { flex: 0 0 3px; min-width: 3px; background: #233049; border-radius: 2px; align-self: flex-end; }
@@ -78,6 +82,8 @@ code { font-family: ui-monospace, monospace; background: #1a1e2a; padding: 0.1em
 .heart .narration.good { color: #67e8f9; }
 .heart .narration.reassure { color: #4a7dff; }
 .heart .narration.bad { color: #fca5a5; }
+.heart .narration.warn { color: #fbbf24; }
+.heart .narration.hold { color: #9aa3b8; }
 .heart .heart-vitals { display: flex; flex-wrap: wrap; gap: 0.9rem; font-size: 0.76rem; color: #9aa3b8; }
 .heart .vital { display: inline-flex; align-items: center; gap: 0.35rem; }
 .heart .vital.muted { color: #6b7488; }
@@ -131,7 +137,7 @@ _LIVE_SCRIPT = """  <script>
     function setLive(ok) {
       if (!ind) return;
       ind.textContent = ok ? '\\u25CF live' : '\\u25CF stale';
-      ind.style.color = ok ? '#86efac' : '#fbbf24';
+      ind.style.color = ok ? '#6b7280' : '#fbbf24';
       ind.title = ok ? 'live \\u2014 this page auto-updates (poll); no refresh needed'
                      : 'stale \\u2014 auto-refresh is failing right now';
     }
@@ -141,12 +147,13 @@ _LIVE_SCRIPT = """  <script>
     var heartHist = [];
     function heartState(d) {
       if (!d.worker_id) return 'idle';
-      // no contact with the network (stale/absent heartbeat) is a problem — the
-      // worker can't receive or report work. Liveness IS the heartbeat.
-      var hbMs = d.last_heartbeat_at ? (Date.now() - new Date(d.last_heartbeat_at).getTime()) : null;
-      if (hbMs == null || hbMs >= 180000) return 'problem';
-      if (d.state_tone === 'warn' || d.state_tone === 'error') return 'problem';
-      if (d.thermal_enabled && d.thermal_state === 'critical') return 'problem';
+      // A non-active derived state (a hold/fault) drives the heart by its tone:
+      //   error → fault (red) · warn → warn (amber) · neutral → hold (gray) · ok → active.
+      if (d.worker_state && d.worker_state !== 'active') {
+        return d.state_tone === 'error' ? 'problem'
+             : d.state_tone === 'warn' ? 'warn'
+             : 'hold';
+      }
       var h = String(d.activity_headline || '').toLowerCase();
       if (h.indexOf('running') >= 0 || h.indexOf('receiving') >= 0) return 'working';
       return 'idle';
@@ -173,13 +180,16 @@ _LIVE_SCRIPT = """  <script>
         strip.innerHTML = bars;
       }
       var st = heartState(d);
-      var hbMs = d.last_heartbeat_at ? (Date.now() - new Date(d.last_heartbeat_at).getTime()) : null;
-      var noContact = !!d.worker_id && (hbMs == null || hbMs >= 180000);
+      var hold = !!(d.worker_id && d.worker_state && d.worker_state !== 'active');
       var dot = document.getElementById('heart-dot');
       if (dot) dot.className = 'pulse-dot ' + st;
       var statusEl = document.getElementById('heart-status');
       if (statusEl) {
-        statusEl.textContent = noContact ? 'no contact' : (st === 'working' ? 'working' : (st === 'problem' ? 'attention' : 'idle'));
+        // status word: a terse state (working/idle, or the hold/fault); the full
+        // label + the fix live in the narration below.
+        var ws = d.worker_state;
+        statusEl.textContent = !hold ? st
+          : (ws === 'operator-paused' || ws === 'self-paused') ? 'paused' : ws;
         // The heartbeat IS the worker→coordinator contact; its freshness + the
         // coordinator URL ride the status tooltip (no separate "coordinator" vital).
         var contact = !d.worker_id ? 'not enrolled' : (d.last_heartbeat_at ? 'last contact ' + rel(d.last_heartbeat_at) : 'no contact yet');
@@ -187,20 +197,17 @@ _LIVE_SCRIPT = """  <script>
       }
       var narr = document.getElementById('heart-narration');
       if (narr) {
-        // Activity/state only — the unit/experiment counts are the metrics row
-        // below, so the line speaks to what's HAPPENING, not the totals.
+        // Worker state when held/faulted (label + the actionable detail, folded in
+        // from the old banner — the heart is the single state surface now); else
+        // what's HAPPENING (the activity line).
         var parts = [];
-        if (noContact && !d.state_label) {
-          parts.push('no contact with the network' + (d.last_heartbeat_at ? ' (' + rel(d.last_heartbeat_at) + ')' : '') + ' \\u2014 is the daemon running?');
-        } else if (st === 'problem' && d.state_label) {
-          // a hold (paused/quarantined/overheating) — say so, don't claim "idle";
-          // the loud detail + reason is in the banner above.
-          parts.push(String(d.state_label).toLowerCase());
+        if (hold) {
+          parts.push(d.state_label + (d.state_detail ? ' \\u2014 ' + d.state_detail : ''));
         } else if (d.activity_headline) {
           parts.push(String(d.activity_detail ? (d.activity_headline + ' \\u2014 ' + d.activity_detail) : d.activity_headline).toLowerCase());
         }
         narr.textContent = parts.join(' \\u00B7 ') || 'waiting for work\\u2026';
-        narr.className = 'narration ' + (st === 'working' ? 'good' : (st === 'problem' ? 'bad' : 'reassure'));
+        narr.className = 'narration ' + (st === 'working' ? 'good' : st === 'problem' ? 'bad' : st === 'warn' ? 'warn' : st === 'hold' ? 'hold' : 'reassure');
       }
       var vit = document.getElementById('heart-vitals');
       if (vit) {
@@ -251,13 +258,6 @@ _LIVE_SCRIPT = """  <script>
             if (k === 'worker_state') {
               if (d.state_label != null) el.textContent = d.state_label;
               el.className = 'badge ' + (d.state_tone || '');
-              return;
-            }
-            if (k === 'state_banner') {
-              // The dynamic state banner: server-built (already escaped) inner
-              // HTML + class, so "receiving work" vs "idle" flips live.
-              if (d.state_banner_html != null) el.innerHTML = d.state_banner_html;
-              if (d.state_banner_class != null) el.className = d.state_banner_class;
               return;
             }
             if (k === 'update_notice') {
