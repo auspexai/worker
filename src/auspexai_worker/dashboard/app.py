@@ -441,28 +441,43 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
             worker, thermal_critical=_thermal_critical(config), now=datetime.now(UTC)
         )
 
-        # ── Status: every live "right now" signal in ONE place (the state itself
-        # is the banner above; here are the supporting live signals the volunteer
-        # asked to have grouped — heartbeat, thermal, what's executing, serving).
-        # Current temp/thermal lives here (status); the thresholds are a setting,
-        # on Config. Executor mode is read-only here (change it on Config).
-        model_count = len(ModelStore(config.models_store_path).list())
+        # ── Details: the static "what + who is this worker" facts in ONE section
+        # (Capabilities + Identity merged). The LIVE signals (heartbeat, thermal,
+        # coordinator/inference reachability) are the heart's vitals; the metrics
+        # (units/experiments/receipts/pending) + tier ride the heart too.
+        #   - model count lives on its own Models page (the nav covers it);
+        #   - execution mode is shown CALMLY here (a small dot + the bare word) and
+        #     CHANGED on Config, where the loud consent control lives — no
+        #     duplicative deep-link from here;
+        #   - pubkey is truncated (full on hover); enrolled is relative (full on
+        #     hover). Values share one type system: plain text, mono only for the
+        #     pubkey identifier — no <code> chips or badge pills.
         acc = detect_accelerator()
-        executor_cell = (
-            f"{_executor_badge(_current_executor_policy(config, config_path))} "
-            '<a href="/config" class="dim">change</a>'
+        exec_policy = _current_executor_policy(config, config_path)
+        exec_dot = {"synthetic": "ok", "provisioned": "warn", "off": ""}.get(exec_policy, "")
+        exec_tip = {
+            "synthetic": "Synthetic only — no third-party code runs.",
+            "provisioned": "Runs provisioned tenant code (you consented). Change it on Config.",
+            "off": "Off — refuses all work.",
+        }.get(exec_policy, "")
+        execution_cell = (
+            f'<span class="dot {exec_dot}"></span>'
+            f'<span title="{html.escape(exec_tip)}">{html.escape(exec_policy)}</span>'
         )
-        # Heartbeat + thermal (the live "right now" signals) now live in the
-        # activity heart's vitals; this section keeps the static capabilities, as
-        # cards (researcher-dashboard aesthetic).
-        # Coordinator-connection + inference reachability are LIVE health → heart
-        # vitals (dots), not cards; this section is the static capabilities.
-        cap_rows = [
+        pubkey_short = f"{worker.pubkey_hex[:10]}…{worker.pubkey_hex[-8:]}"
+        detail_rows: list[tuple[str, str, bool]] = [
             ("accelerator", html.escape(acc.label), False),
-            ("executor mode", executor_cell, False),
-            ("models in store", f'{model_count} (<a href="/models">manage</a>)', False),
+            ("execution", execution_cell, False),
+            ("public key", f'<span title="{worker.pubkey_hex}">{pubkey_short}</span>', True),
+            (
+                "enrolled",
+                f'<span title="{html.escape(worker.enrolled_at.isoformat())}">'
+                f"{_fmt_relative(worker.enrolled_at)}</span>",
+                False,
+            ),
+            *([("flavor", html.escape(config.flavor), False)] if config.flavor else []),
         ]
-        status_html = "    <h2>Capabilities</h2>\n" + render_cards(cap_rows)
+        details_html = "    <h2>Details</h2>\n" + render_cards(detail_rows)
 
         # Units completed + distinct experiments are the heart's headline metrics,
         # and receipts + pending are folded into the heart's metrics row too — so
@@ -483,27 +498,6 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
                 "Run <code>auspexai-worker login</code> to claim your contributions."
                 "</div>\n"
             )
-
-        # ── Identity: the deeper "who is this worker" facts (worker_id + version
-        # now ride the heart header). Cards, like the other sections.
-        identity_rows: list[tuple[str, str, bool]] = [
-            *(
-                [("flavor", f"<code>{html.escape(config.flavor)}</code>", False)]
-                if config.flavor
-                else []
-            ),
-            # trust tier now rides the heart header as a chip.
-            ("public key", html.escape(worker.pubkey_hex), True),
-            (
-                "enrolled",
-                html.escape(worker.enrolled_at.isoformat())
-                + f' <span class="muted">({_fmt_relative(worker.enrolled_at)})</span>',
-                False,
-            ),
-            # coordinator reachability is the heart's coordinator vital now; the
-            # URL rides that vital's tooltip.
-        ]
-        identity_html = "    <h2>Identity</h2>\n" + render_cards(identity_rows)
 
         # §2.1 #11 (volunteer surface) + I4 (ui_triage_first_ia_redesign.md §5):
         # the state banner leads the page so "is anything wrong with my box?" is
@@ -620,10 +614,9 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
         body = (
             state_banner
             + heart_html
-            + status_html
+            + details_html
             + "\n"
             + upgrade_html
-            + identity_html
             + f'\n    <div class="actions">{account_control}</div>\n'
         )
         return render_page(title="Overview", body=body, active_nav="/", live=True)
@@ -1042,73 +1035,81 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
 
     @app.get("/config", response_class=HTMLResponse)
     def config_page() -> str:
-        rows: list[tuple[str, str, bool]] = [
+        # Read-only settings, GROUPED so the page reads as sections rather than a
+        # flat 15-row dump. Values share one type system: mono only for technical
+        # identifiers (url, paths); plain text otherwise — no <code> chips.
+        # NB: execute_tenant_code is NOT in these tables — it has its own live
+        # "Code-execution policy" section below (these read the frozen daemon-start
+        # snapshot, which would disagree after a hot-reload).
+        setting_groups: list[tuple[str, list[tuple[str, str, bool]]]] = [
             (
-                "coordinator_url",
-                f"<code>{html.escape(config.coordinator_url)}</code>",
-                False,
+                "Connection",
+                [
+                    ("coordinator url", html.escape(config.coordinator_url), True),
+                    ("heartbeat interval", f"{config.heartbeat_interval_seconds}s", False),
+                    ("assignment poll", f"{config.assignment_poll_interval_seconds}s", False),
+                ],
             ),
             (
-                "heartbeat interval",
-                f"{config.heartbeat_interval_seconds}s",
-                False,
+                "Storage",
+                [
+                    ("state dir", html.escape(str(config.state_dir)), True),
+                    ("data dir", html.escape(str(config.data_dir)), True),
+                    ("provisioning dir", html.escape(str(config.provisioning_path)), True),
+                    ("model store dir", html.escape(str(config.models_store_path)), True),
+                ],
             ),
             (
-                "assignment poll interval",
-                f"{config.assignment_poll_interval_seconds}s",
-                False,
-            ),
-            ("state dir", html.escape(str(config.state_dir)), True),
-            ("data dir", html.escape(str(config.data_dir)), True),
-            (
-                "keystore backend",
-                html.escape(config.keystore_backend or "auto"),
-                False,
-            ),
-            (
-                "sandbox use_bubblewrap",
-                "yes" if config.sandbox_use_bubblewrap else "no",
-                False,
-            ),
-            (
-                "sandbox resource caps",
-                (
-                    "off"
-                    if not config.sandbox_resource_limits
-                    else (
-                        f"mem={config.sandbox_memory_max_mb or '∞'}MB · "
-                        f"pids={config.sandbox_pids_max or '∞'} (STRICT only)"
-                    )
-                ),
-                False,
+                "Sandbox & safety",
+                [
+                    ("keystore backend", html.escape(config.keystore_backend or "auto"), False),
+                    (
+                        "sandbox (bubblewrap)",
+                        "yes" if config.sandbox_use_bubblewrap else "no",
+                        False,
+                    ),
+                    (
+                        "resource caps",
+                        (
+                            "off"
+                            if not config.sandbox_resource_limits
+                            else (
+                                f"mem={config.sandbox_memory_max_mb or '∞'}MB · "
+                                f"pids={config.sandbox_pids_max or '∞'} (STRICT only)"
+                            )
+                        ),
+                        False,
+                    ),
+                    ("runner timeout", f"{config.runner_timeout_seconds}s", False),
+                ],
             ),
             (
-                "runner timeout",
-                f"{config.runner_timeout_seconds}s",
-                False,
-            ),
-            # NB: execute_tenant_code is NOT listed here — it has its own live
-            # "Code-execution policy" section above (this table reads the frozen
-            # daemon-start snapshot, which would disagree after a hot-reload).
-            ("provisioning dir", html.escape(str(config.provisioning_path)), True),
-            ("model store dir", html.escape(str(config.models_store_path)), True),
-            (
-                "thermal thresholds",
-                f"warn {config.thermal_warn_c:.0f}°C / crit {config.thermal_crit_c:.0f}°C "
-                f"/ resume {config.thermal_resume_c:.0f}°C",
-                False,
+                "Thermal",
+                [
+                    (
+                        "thresholds",
+                        f"warn {config.thermal_warn_c:.0f}°C / crit {config.thermal_crit_c:.0f}°C "
+                        f"/ resume {config.thermal_resume_c:.0f}°C",
+                        False,
+                    ),
+                ],
             ),
             (
-                "dashboard",
-                f"{'enabled' if config.dashboard_enabled else 'disabled'} at "
-                f"{config.dashboard_host}:{config.dashboard_port}",
-                False,
-            ),
-            (
-                "upgrade prompt",
-                f"{'enabled' if config.upgrade_prompt_enabled else 'disabled'}"
-                f" (threshold: {config.upgrade_prompt_threshold} units)",
-                False,
+                "Dashboard",
+                [
+                    (
+                        "dashboard",
+                        f"{'enabled' if config.dashboard_enabled else 'disabled'} at "
+                        f"{config.dashboard_host}:{config.dashboard_port}",
+                        False,
+                    ),
+                    (
+                        "upgrade prompt",
+                        f"{'enabled' if config.upgrade_prompt_enabled else 'disabled'}"
+                        f" (threshold: {config.upgrade_prompt_threshold} units)",
+                        False,
+                    ),
+                ],
             ),
         ]
         # M9 leg 4: the one writable control on this page — the executor-policy
@@ -1120,26 +1121,27 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
         setter_buttons: list[str] = []
         if current != "synthetic":
             setter_buttons.append(
-                '<form method="post" action="/executor" style="display:inline">'
+                '<form method="post" action="/executor" class="action">'
                 '<input type="hidden" name="policy" value="synthetic">'
-                '<button type="submit">set synthetic (echo only)</button></form>'
+                '<button type="submit" class="btn">set synthetic (echo only)</button></form>'
             )
         if current != "off":
             setter_buttons.append(
-                '<form method="post" action="/executor" style="display:inline;margin-left:0.5em">'
+                '<form method="post" action="/executor" class="action">'
                 '<input type="hidden" name="policy" value="off">'
-                '<button type="submit">set off (refuse all)</button></form>'
+                '<button type="submit" class="btn">set off (refuse all)</button></form>'
             )
         if current != "provisioned":
-            # the deliberate-act path (confirm step before enabling 3rd-party code)
+            # the deliberate-act path (confirm step before enabling 3rd-party code);
+            # emphasized — it's the consequential consent action on this page.
             setter_buttons.append(
-                '<a href="/executor/confirm" style="margin-left:0.5em" '
-                'role="button">enable provisioned…</a>'
+                '<a href="/executor/confirm" class="btn primary" role="button">'
+                "enable provisioned…</a>"
             )
         executor_setter = (
             "    <h3>Code-execution policy</h3>\n"
             f"    <p>current: {_executor_badge(current)}</p>\n"
-            f'    <div style="margin:0.5em 0">{"".join(setter_buttons)}</div>\n'
+            f'    <div class="btn-row">{"".join(setter_buttons)}</div>\n'
             '    <p class="muted">Your consent to run third-party tenant code on this '
             "machine. The running daemon <strong>hot-reloads</strong> the change — "
             "effective within one heartbeat, <strong>no restart needed</strong>. "
@@ -1147,15 +1149,15 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
             "network only routes real (model-gated) experiments to provisioned "
             "workers.</p>\n"
         )
+        settings_html = "".join(
+            f"    <h3>{title}</h3>\n{render_kv(rows)}\n" for title, rows in setting_groups
+        )
         body = (
             "    <h2>Configuration</h2>\n"
             + executor_setter
-            + "    <h3>Other settings (read-only)</h3>\n"
-            + render_kv(rows)
-            + "\n"
-            '    <p class="muted">The code-execution policy above is live-editable. '
-            "Other settings: edit <code>~/.config/auspexai-worker/worker.toml</code> or "
-            "the matching env var, then restart the daemon.</p>"
+            + '    <p class="muted">The settings below are read-only — edit '
+            "<code>~/.config/auspexai-worker/worker.toml</code> or the matching env var, "
+            "then restart the daemon.</p>\n" + settings_html
         )
         return render_page(title="Config", body=body, active_nav="/config")
 

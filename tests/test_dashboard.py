@@ -213,25 +213,28 @@ class TestReceipts:
 
 
 class TestConfig:
-    def test_overview_capabilities_section_groups_static_signals(
+    def test_overview_details_section_merges_capabilities_and_identity(
         self, client: TestClient, db: Database
     ) -> None:
-        """The activity heart owns the live signals (heartbeat, thermal, units +
-        receipts/pending); the Capabilities section keeps the static config
-        (executor, models, accelerator). The heart leads, then Capabilities →
-        Identity. (The old Contribution-ledger section is gone — its metrics fold
-        into the heart, its plumbing cards were dropped.)"""
+        """The heart owns the live signals + metrics + tier; the static facts
+        (accelerator, execution mode, public key, enrolled) merge into ONE tightened
+        "Details" section — no separate Capabilities/Identity grids, no models card
+        (Models has its own nav page), no Contribution ledger."""
         _enroll(db)
         r = client.get("/")
         assert r.status_code == 200
-        assert "<h2>Capabilities</h2>" in r.text
-        assert "executor mode" in r.text
-        assert "synthetic only" in r.text  # the executor badge (default synthetic)
-        assert "models in store" in r.text
+        assert "<h2>Details</h2>" in r.text
+        assert "accelerator" in r.text
+        assert "execution" in r.text  # the calm execution-mode cell (was "executor mode")
+        assert "public key" in r.text
+        assert "enrolled" in r.text
+        # merged away / dropped:
+        assert "<h2>Capabilities</h2>" not in r.text
+        assert "<h2>Identity</h2>" not in r.text
+        assert "models in store" not in r.text  # Models has its own nav page
         assert "<h2>Contribution ledger</h2>" not in r.text  # folded into the heart
-        # The heart leads; then static sections in order.
-        assert r.text.index('id="wkr-heart"') < r.text.index("<h2>Capabilities</h2>")
-        assert r.text.index("<h2>Capabilities</h2>") < r.text.index("<h2>Identity</h2>")
+        # The heart leads; then the Details section.
+        assert r.text.index('id="wkr-heart"') < r.text.index("<h2>Details</h2>")
 
     def test_models_page_renders_store_and_accelerator(self, client: TestClient) -> None:
         r = client.get("/models")
@@ -249,15 +252,16 @@ class TestConfig:
         # execute_tenant_code now lives in its own live "Code-execution policy"
         # section (not the read-only table, which would show a stale snapshot).
         assert "Code-execution policy" in r.text
-        assert "model store dir" in r.text
-        assert "thermal thresholds" in r.text
+        assert "model store dir" in r.text  # under the grouped Storage section
+        assert "<h3>Thermal</h3>" in r.text  # read-only settings are grouped now
+        assert "thresholds" in r.text
 
     def test_config_page_renders_loaded_values(
         self, client: TestClient, config: WorkerConfig
     ) -> None:
         r = client.get("/config")
         assert r.status_code == 200
-        assert "coordinator_url" in r.text
+        assert "coordinator url" in r.text
         assert config.coordinator_url in r.text
         assert "heartbeat interval" in r.text
         assert "60s" in r.text
@@ -565,9 +569,10 @@ class TestExecutorSetter:
         # the mayhem1 bug: NO stale "synthetic only" badge from a snapshot read
         # while the live policy is provisioned (the read-only kv row was removed).
         assert "synthetic only" not in r.text
-        # overview shows the live mode too
+        # overview shows the live mode too — now the calm Details "execution" cell
+        # (the bare word + a tooltip), not the loud badge (that's the Config page).
         ov = client.get("/")
-        assert "runs provisioned tenant code" in ov.text
+        assert "provisioned" in ov.text
 
     def test_invalid_policy_is_ignored(self, client: TestClient, toml_path: Path) -> None:
         r = client.post("/executor", data={"policy": "bogus"}, follow_redirects=False)

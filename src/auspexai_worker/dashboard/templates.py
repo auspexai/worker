@@ -24,6 +24,10 @@ th, td { text-align: left; padding: 0.45em 0.6em; border-bottom: 1px solid #2a2e
 th { color: #9ca3af; font-weight: 500; }
 .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.85em; }
 .dim { color: #9ca3af; }
+/* small inline status dot (execution mode in Details): ok=green, warn=amber. */
+.dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #2a3450; margin-right: 0.45em; vertical-align: middle; }
+.dot.ok { background: #6ee7b7; }
+.dot.warn { background: #fbbf24; }
 .kv { display: grid; grid-template-columns: 12em 1fr; gap: 0.3em 1em; }
 .kv dt { color: #9ca3af; }
 .kv dd { margin: 0; }
@@ -93,8 +97,12 @@ code { font-family: ui-monospace, monospace; background: #1a1e2a; padding: 0.1em
 .btn { display: inline-flex; align-items: center; gap: 0.35em; background: #161d2c; color: #cdd5e6; border: 1px solid #2a3450; border-radius: 6px; padding: 0.32em 0.8em; font: inherit; font-size: 0.85em; line-height: 1.2; cursor: pointer; text-decoration: none; }
 .btn:hover { border-color: #4a5a82; background: #1a2336; }
 .btn.danger:hover { border-color: #b91c1c; color: #fca5a5; background: #241620; }
+/* .primary = the emphasized action (the consent-granting button); purple accent. */
+.btn.primary { border-color: #6d28d9; color: #c4b5fd; }
+.btn.primary:hover { border-color: #7c3aed; background: #1e1635; color: #ddd6fe; }
 form.action { display: inline; margin: 0; }
 .actions { margin: 0.6em 0 0.2em; }
+.btn-row { display: flex; flex-wrap: wrap; gap: 0.5em; align-items: center; margin: 0.5em 0; }
 """
 
 # Baseline-poll live updater (M6 #3, worker side). Completes the same principle
