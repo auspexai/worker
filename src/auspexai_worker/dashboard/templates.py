@@ -66,7 +66,6 @@ code { font-family: ui-monospace, monospace; background: #1a1e2a; padding: 0.1em
 .heart { border: 1px solid #1f6b78; border-radius: 12px; background: linear-gradient(180deg,#101727 0%,#0c1322 100%); padding: 1rem 1.1rem; margin: 1em 0; display: flex; flex-direction: column; gap: 0.6rem; }
 .heart header { display: flex; align-items: center; gap: 0.55rem; margin: 0; }
 .heart .heart-h { margin: 0; font-size: 0.95rem; border: none; padding: 0; }
-.heart .heart-status { margin-left: auto; font-size: 0.72rem; color: #8b93a7; text-transform: lowercase; }
 .pulse-dot { width: 10px; height: 10px; border-radius: 50%; background: #2a3450; flex: none; }
 .pulse-dot.working { background: #67e8f9; animation: heartbeat 1.1s ease-out infinite; }
 .pulse-dot.idle { background: #4a7dff; }
@@ -183,18 +182,6 @@ _LIVE_SCRIPT = """  <script>
       var hold = !!(d.worker_id && d.worker_state && d.worker_state !== 'active');
       var dot = document.getElementById('heart-dot');
       if (dot) dot.className = 'pulse-dot ' + st;
-      var statusEl = document.getElementById('heart-status');
-      if (statusEl) {
-        // status word: a terse state (working/idle, or the hold/fault); the full
-        // label + the fix live in the narration below.
-        var ws = d.worker_state;
-        statusEl.textContent = !hold ? st
-          : (ws === 'operator-paused' || ws === 'self-paused') ? 'paused' : ws;
-        // The heartbeat IS the worker→coordinator contact; its freshness + the
-        // coordinator URL ride the status tooltip (no separate "coordinator" vital).
-        var contact = !d.worker_id ? 'not enrolled' : (d.last_heartbeat_at ? 'last contact ' + rel(d.last_heartbeat_at) : 'no contact yet');
-        statusEl.title = contact + (d.coordinator_url ? ' \\u00B7 ' + String(d.coordinator_url).replace(/[<>&"]/g, '') : '');
-      }
       var narr = document.getElementById('heart-narration');
       if (narr) {
         // Worker state when held/faulted (label + the actionable detail, folded in

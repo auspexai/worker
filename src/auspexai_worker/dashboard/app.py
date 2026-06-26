@@ -534,7 +534,6 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
         <span class="pulse-dot" id="heart-dot"></span>
         <h2 class="heart-h">Activity</h2>
         {tier_chip}
-        <span class="heart-status" id="heart-status">—</span>
       </header>
       <div class="heart-id">{html.escape(worker.worker_id)} · v{html.escape(__version__)}</div>
       <div class="strip" id="heart-strip"><span class="strip-empty">listening…</span></div>
