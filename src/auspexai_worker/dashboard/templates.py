@@ -40,8 +40,6 @@ th { color: #9ca3af; font-weight: 500; }
 /* compact identity line in the heart header (worker_id · version) */
 .heart .heart-id { font-size: 0.72em; color: #7c849a; font-family: ui-monospace, monospace; margin: -0.2em 0 0.1em; }
 .badge { display: inline-block; padding: 0.1em 0.55em; border-radius: 3px; font-size: 0.8em; font-weight: 500; }
-.badge.tier-0 { background: #2a2e3a; color: #9ca3af; }
-.badge.tier-1, .badge.tier-2, .badge.tier-3, .badge.tier-4 { background: #312e81; color: #c4b5fd; }
 .badge.ok { background: #14532d; color: #86efac; }
 .badge.warn { background: #713f12; color: #fcd34d; }
 .badge.error { background: #7f1d1d; color: #fca5a5; }
@@ -62,17 +60,12 @@ code { font-family: ui-monospace, monospace; background: #1a1e2a; padding: 0.1em
 .live-ind { font-size: 0.6em; font-weight: 500; color: #6b7280; margin-left: 0.5em; vertical-align: middle; }
 /* the update-available notice collapses when empty (nothing announced). */
 [data-live="update_notice"]:empty { display: none; }
-/* activity heart (overview) — shared identity: cyan=working, blue=idle, red=problem */
+/* activity heart (overview) — the worker's state lives in the narration's TEXT
+   COLOR now (cyan=working · blue=idle · red=fault · amber=warn · gray=hold). */
 .heart { border: 1px solid #1f6b78; border-radius: 12px; background: linear-gradient(180deg,#101727 0%,#0c1322 100%); padding: 1rem 1.1rem; margin: 1em 0; display: flex; flex-direction: column; gap: 0.6rem; }
-.heart header { display: flex; align-items: center; gap: 0.55rem; margin: 0; }
-.heart .heart-h { margin: 0; font-size: 0.95rem; border: none; padding: 0; }
-.pulse-dot { width: 10px; height: 10px; border-radius: 50%; background: #2a3450; flex: none; }
-.pulse-dot.working { background: #67e8f9; animation: heartbeat 1.1s ease-out infinite; }
-.pulse-dot.idle { background: #4a7dff; }
-.pulse-dot.problem { background: #fca5a5; }
-.pulse-dot.warn { background: #fbbf24; }
-.pulse-dot.hold { background: #5b6478; }
-@keyframes heartbeat { 0% { box-shadow: 0 0 0 0 rgba(103,232,249,0.55); } 70% { box-shadow: 0 0 0 8px rgba(103,232,249,0); } 100% { box-shadow: 0 0 0 0 rgba(103,232,249,0); } }
+/* trust tier as inline colored text in the heart-id line: purple T1+, gray T0. */
+.tier-text.tier-0 { color: #9ca3af; }
+.tier-text.tier-1, .tier-text.tier-2, .tier-text.tier-3, .tier-text.tier-4 { color: #c4b5fd; }
 .heart .strip { display: flex; align-items: flex-end; gap: 2px; height: 64px; padding: 4px; background: #080d18; border: 1px solid #161d2c; border-radius: 8px; overflow: hidden; }
 .heart .bar { flex: 0 0 3px; min-width: 3px; background: #233049; border-radius: 2px; align-self: flex-end; }
 .heart .bar.beat { background: #67e8f9; }
@@ -180,8 +173,6 @@ _LIVE_SCRIPT = """  <script>
       }
       var st = heartState(d);
       var hold = !!(d.worker_id && d.worker_state && d.worker_state !== 'active');
-      var dot = document.getElementById('heart-dot');
-      if (dot) dot.className = 'pulse-dot ' + st;
       var narr = document.getElementById('heart-narration');
       if (narr) {
         // Worker state when held/faulted (label + the actionable detail, folded in

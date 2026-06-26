@@ -127,7 +127,6 @@ class TestOverview:
         for marker in (
             'id="wkr-heart"',
             'id="heart-strip"',
-            'id="heart-dot"',
             'id="heart-narration"',
             "renderHeart",  # the poll fills the heart
         ):

@@ -128,7 +128,9 @@ def _fmt_relative(when: datetime | None) -> str:
     return f"{secs // 86400}d ago"
 
 
-def _tier_badge(tier: int) -> str:
+def _tier_text(tier: int) -> str:
+    """Trust tier as inline COLORED TEXT (not a badge chip) for the heart-id line:
+    purple for an authenticated tier (T1+), gray for T0 anonymous."""
     names = {
         0: "T0 anonymous",
         1: "T1 authenticated",
@@ -136,7 +138,7 @@ def _tier_badge(tier: int) -> str:
         3: "T3 vetted",
     }
     label = html.escape(names.get(tier, f"T{tier}"))
-    return f'<span class="badge tier-{tier}">{label}</span>'
+    return f'<span class="tier-text tier-{tier}">{label}</span>'
 
 
 def _executor_indicator(policy: str) -> str:
@@ -528,16 +530,11 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
         # (surface_liveness_and_activity_view_design.md). Skeleton rendered here;
         # the live poll fills the pulse + dot + narration on its immediate first
         # tick (no blank flash), then keeps it beating.
-        tier_chip = _tier_badge(int(worker.trust_tier))
+        tier_text = _tier_text(int(worker.trust_tier))
         heart_html = f"""    <section class="heart" id="wkr-heart">
-      <header>
-        <span class="pulse-dot" id="heart-dot"></span>
-        <h2 class="heart-h">Activity</h2>
-        {tier_chip}
-      </header>
-      <div class="heart-id">{html.escape(worker.worker_id)} · v{html.escape(__version__)}</div>
-      <div class="strip" id="heart-strip"><span class="strip-empty">listening…</span></div>
       <p class="narration" id="heart-narration">—</p>
+      <div class="heart-id">{html.escape(worker.worker_id)} · v{html.escape(__version__)} · {tier_text}</div>
+      <div class="strip" id="heart-strip"><span class="strip-empty">listening…</span></div>
       <div class="heart-vitals" id="heart-vitals"></div>
       <div class="heart-foot">
         <div class="heart-metrics">
