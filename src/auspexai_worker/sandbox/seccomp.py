@@ -124,10 +124,16 @@ def _build_bpf() -> bytes:
             eperm, "clone", seccomp.Arg(0, seccomp.MASKED_EQ, CLONE_NEWUSER, CLONE_NEWUSER)
         )
         flt.add_rule(seccomp.ERRNO(_ENOSYS), "clone3")
-    except (ValueError, RuntimeError, AttributeError):  # pragma: no cover
-        logger.warning(
-            "seccomp: clone-newuser arg-filter unavailable; namespace-via-clone not blocked"
-        )
+    except (ValueError, RuntimeError, AttributeError) as e:  # pragma: no cover
+        # AUD-8 (A9 audit): fail CLOSED. STRICT must not run + sign "strict" without
+        # this sub-protection — the rest of STRICT fails closed on a build failure
+        # (dispatch → SANDBOX_UNAVAILABLE), and the clone(CLONE_NEWUSER) arg-filter
+        # is part of that contract, not best-effort. (Only triggers on a libseccomp
+        # that can't express MASKED_EQ arg-filtering — NOT the supported install.)
+        raise SeccompUnavailableError(
+            "seccomp: clone-newuser arg-filter unavailable on this libseccomp; "
+            "STRICT namespace-via-clone containment cannot be guaranteed"
+        ) from e
 
     with tempfile.TemporaryFile() as fh:
         flt.export_bpf(fh)

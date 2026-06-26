@@ -102,7 +102,8 @@ class TestStrictPolicy:
                 executor_package_dir="/srv/pkg",
                 models_dir="/srv/models",
                 inference_socket="/var/lib/auspexai-worker/work/u-1/broker.sock",
-            )
+            ),
+            seccomp_fd=7,  # AUD-9: STRICT now requires a seccomp fd
         )
         assert "--dev-bind" not in argv  # host-fs hole closed
         for ns in ("--unshare-net", "--unshare-pid", "--unshare-ipc", "--unshare-uts"):

@@ -204,8 +204,15 @@ def build_argv(config: SandboxConfig, *, seccomp_fd: int | None = None) -> list[
         # The "escape via syscall" gate: a seccomp denylist of the escape /
         # kernel-attack syscalls. STRICT without it is refused upstream
         # (dispatch fails closed), so seccomp_fd is normally present here.
-        if seccomp_fd is not None:
-            argv += ["--seccomp", str(seccomp_fd)]
+        # AUD-9 (A9 audit): fail CLOSED at the builder too — never emit a STRICT
+        # sandbox without the seccomp gate (the invariant previously lived only in
+        # the dispatch caller; this is defense-in-depth against a future caller).
+        if seccomp_fd is None:
+            raise SandboxNotAvailableError(
+                "STRICT policy requires a seccomp fd; refusing to build a "
+                "seccomp-less STRICT sandbox"
+            )
+        argv += ["--seccomp", str(seccomp_fd)]
     else:
         argv += _permissive_fs_argv(config)
         # §5.17: real tenant code gets NO network (the inference broker socket is

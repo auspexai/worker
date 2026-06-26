@@ -10,6 +10,7 @@ import pytest
 
 from auspexai_worker.sandbox import (
     SandboxConfig,
+    SandboxNotAvailableError,
     SandboxPolicy,
     build_argv,
     check_bubblewrap_available,
@@ -67,11 +68,17 @@ class TestStrictArgv:
     def test_strict_adds_capdrop_and_cgroup_ns(self) -> None:
         if not check_bubblewrap_available():
             pytest.skip("bwrap not installed")
-        argv = build_argv(_strict_config())
+        argv = build_argv(_strict_config(), seccomp_fd=7)
         assert "--cap-drop" in argv and argv[argv.index("--cap-drop") + 1] == "ALL"
         assert "--unshare-cgroup-try" in argv
-        # No fd given → no --seccomp flag (dispatch supplies the fd in prod).
-        assert "--seccomp" not in argv
+
+    def test_strict_without_seccomp_fd_fails_closed(self) -> None:
+        # AUD-9 (A9 audit): build_argv must NOT emit a seccomp-less STRICT sandbox —
+        # it fails closed (the dispatch caller maps this to SANDBOX_UNAVAILABLE).
+        if not check_bubblewrap_available():
+            pytest.skip("bwrap not installed")
+        with pytest.raises(SandboxNotAvailableError):
+            build_argv(_strict_config())
 
     def test_strict_wires_seccomp_fd(self) -> None:
         if not check_bubblewrap_available():
