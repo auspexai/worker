@@ -33,6 +33,17 @@ MIN_PYTHON_MINOR=11
 # on this single value.
 OS="$(uname -s)"  # Linux | Darwin (macOS)
 
+# macOS installs USER-LOCAL with NO sudo: everything under $HOME (a writable venv prefix
+# + a launchd agent + a ~/.local/bin symlink). Linux installs system-wide to /opt with
+# sudo + a systemd unit. SUDO is empty on macOS, so the same install commands run
+# unprivileged there.
+if [ "$OS" = "Darwin" ]; then
+    INSTALL_PREFIX="$HOME/.local/auspexai-worker"
+    SUDO=""
+else
+    SUDO="sudo"
+fi
+
 # ── Helpers ──────────────────────────────────────────────────────────
 
 info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
@@ -142,44 +153,41 @@ list_flavors() {
 # this installer heals it. The flavor choice IS the volunteer's consent to
 # this third-party install — the menu text says so plainly.
 install_ollama() {
+    # 1) Install if absent. macOS: Homebrew (the ollama.com/install.sh is the LINUX
+    #    installer — it half-installs the CLI then fails to launch a desktop app).
     if command -v ollama >/dev/null 2>&1; then
         info "Ollama already installed ($(ollama --version 2>/dev/null || echo 'version unknown')) — skipping install"
-        # Installed ≠ serving: a pre-existing Ollama can have a broken/stale
-        # service (seen live: a leftover systemd override with a bad
-        # OLLAMA_MODELS crash-looped `ollama serve` while the binary looked
-        # fine). Verify it actually answers before declaring this flavor good.
-        if curl -fsS -m 3 http://127.0.0.1:11434/api/version >/dev/null 2>&1; then
-            info "Ollama serving: $(curl -fsS -m 3 http://127.0.0.1:11434/api/version 2>/dev/null)"
+    else
+        info "Installing Ollama …"
+        if [ "$OS" = "Darwin" ]; then
+            if ! command -v brew >/dev/null 2>&1; then
+                flavor_issue "Ollama isn't installed and Homebrew wasn't found. Install Ollama from https://ollama.com/download (or 'brew install ollama'), then re-run this installer (inference flavor) to finish."
+                return 0
+            fi
+            if ! brew install ollama; then
+                flavor_issue "'brew install ollama' failed — install Ollama from https://ollama.com/download, then re-run this installer (inference flavor)."
+                return 0
+            fi
         else
-            flavor_issue "Ollama is installed but NOT serving on 127.0.0.1:11434 — inference stays unavailable until it runs. Check: systemctl status ollama (and any /etc/systemd/system/ollama.service.d/ overrides)"
+            info "(official installer from ollama.com; can be a large download)"
+            if ! curl -fsSL https://ollama.com/install.sh | sh; then
+                flavor_issue "Ollama install failed — inference serving stays unavailable until Ollama is present. Re-run this installer (same flavor) to retry."
+                return 0
+            fi
         fi
-        return 0
     fi
-    info "Installing Ollama …"
-    if [ "$OS" = "Darwin" ]; then
-        # ollama.com/install.sh is the LINUX installer (it half-installs the CLI then
-        # tries to launch a desktop app that isn't there). On macOS use Homebrew —
-        # the headless `ollama` formula + a brew service that serves on :11434.
-        if ! command -v brew >/dev/null 2>&1; then
-            flavor_issue "Ollama isn't installed and Homebrew wasn't found. Install Ollama from https://ollama.com/download (or 'brew install ollama'), then re-run this installer (inference flavor) to finish."
-            return 0
-        fi
-        if ! brew install ollama; then
-            flavor_issue "'brew install ollama' failed — install Ollama from https://ollama.com/download, then re-run this installer (inference flavor)."
-            return 0
-        fi
+
+    # 2) Ensure it's SERVING. Linux's installer registers a systemd service that starts
+    #    on its own; macOS needs an explicit start. Idempotent — skipped if it already
+    #    answers (covers an already-installed-but-stopped Ollama).
+    if ! curl -fsS -m 3 http://127.0.0.1:11434/api/version >/dev/null 2>&1 && [ "$OS" = "Darwin" ]; then
+        info "Starting Ollama …"
         if ! brew services start ollama >/dev/null 2>&1; then
             nohup ollama serve >/dev/null 2>&1 &
         fi
-    else
-        info "(official installer from ollama.com; can be a large download)"
-        if ! curl -fsSL https://ollama.com/install.sh | sh; then
-            flavor_issue "Ollama install failed — inference serving stays unavailable until Ollama is present. Re-run this installer (same flavor) to retry."
-            return 0
-        fi
     fi
-    # Surface the installed version (determinism provenance; the daemon
-    # re-reports it in heartbeat capabilities once serving).
+
+    # 3) Verify it answers (it can take a moment to come up).
     local tries=0
     while [ $tries -lt 15 ]; do
         if curl -fsS http://127.0.0.1:11434/api/version >/dev/null 2>&1; then
@@ -189,7 +197,11 @@ install_ollama() {
         tries=$((tries + 1))
         sleep 2
     done
-    flavor_issue "Ollama installed but not reachable on 127.0.0.1:11434 yet — it may still be starting. Verify later: curl 127.0.0.1:11434/api/version"
+    if [ "$OS" = "Darwin" ]; then
+        flavor_issue "Ollama installed but not serving on 127.0.0.1:11434 yet. Start it with:  brew services start ollama   (or run 'ollama serve'), then re-check:  curl 127.0.0.1:11434/api/version"
+    else
+        flavor_issue "Ollama installed but not reachable on 127.0.0.1:11434 yet — it may still be starting. Verify later: curl 127.0.0.1:11434/api/version"
+    fi
 }
 
 # Issues hit while applying the flavor (pip/system/config steps). Each is
@@ -217,7 +229,7 @@ apply_flavor() {
         if [ -x "${INSTALL_PREFIX}/bin/pip" ]; then
             info "Installing flavor pip packages: ${pip_pkgs} …"
             # shellcheck disable=SC2086 — word-splitting the package list is intended
-            sudo "${INSTALL_PREFIX}/bin/pip" install -q $pip_pkgs \
+            $SUDO "${INSTALL_PREFIX}/bin/pip" install -q $pip_pkgs \
                 || flavor_issue "could not install pip packages (${pip_pkgs}); some flavor features may be unavailable"
         else
             flavor_issue "pip not found in ${INSTALL_PREFIX}; install ${pip_pkgs} manually"
@@ -517,7 +529,7 @@ do_uninstall() {
     else
         # Remove pip-installed artifacts
         info "Removing ${INSTALL_PREFIX} …"
-        sudo rm -rf "${INSTALL_PREFIX}"
+        $SUDO rm -rf "${INSTALL_PREFIX}"
         sudo rm -f /usr/local/bin/auspexai-worker
         sudo rm -f "${SYSTEMD_UNIT_DIR}/auspexai-worker.service"
         sudo rm -f "${APPARMOR_DIR}/auspexai-worker"
@@ -548,6 +560,25 @@ do_uninstall() {
         echo "Downloaded models (if any) live under ~/.local/share/auspexai-worker/models/."
     fi
     echo "To remove everything: rm -rf ~/.local/state/auspexai-worker ~/.local/share/auspexai-worker"
+}
+
+# Add ~/.local/bin to the user's PATH for the macOS user-local install so the CLI
+# resolves in new terminals — idempotent, no sudo. The launchd daemon already uses the
+# binary's full path, so this is purely for the interactive `auspexai-worker` command.
+ensure_local_bin_on_path() {
+    local bindir="$HOME/.local/bin"
+    export PATH="$bindir:$PATH"  # make it resolve in this installer process immediately
+    local profile
+    case "$(basename "${SHELL:-zsh}")" in
+        bash) profile="$HOME/.bash_profile" ;;
+        *)    profile="$HOME/.zshrc" ;;  # zsh = the macOS default shell
+    esac
+    if [ -f "$profile" ] && grep -qF '.local/bin' "$profile" 2>/dev/null; then
+        info "~/.local/bin already on your PATH (via ${profile})."
+        return 0
+    fi
+    printf '\n# Added by the AuspexAI worker installer\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$profile"
+    info "Added ~/.local/bin to your PATH in ${profile} — open a NEW terminal (or run: source ${profile}) to use the 'auspexai-worker' command."
 }
 
 # Start (and enable-at-boot) the worker service — launchd on macOS, systemd on
@@ -745,20 +776,26 @@ main() {
         # Create or reuse venv
         if [ ! -d "${INSTALL_PREFIX}" ]; then
             info "Creating venv at ${INSTALL_PREFIX} …"
-            sudo "$python" -m venv "${INSTALL_PREFIX}"
+            $SUDO "$python" -m venv "${INSTALL_PREFIX}"
         fi
 
         # Wipe old package dir before reinstall — pip overlays without
         # cleaning, so stale .py files from the previous version survive.
-        sudo rm -rf "${INSTALL_PREFIX}"/lib/python*/site-packages/auspexai_worker*
+        $SUDO rm -rf "${INSTALL_PREFIX}"/lib/python*/site-packages/auspexai_worker*
 
         info "Installing wheel (this may compile native extensions) …"
-        sudo "${INSTALL_PREFIX}/bin/pip" install --no-cache-dir --upgrade pip setuptools wheel 2>/dev/null
-        sudo "${INSTALL_PREFIX}/bin/pip" install --no-cache-dir "${tmpdir}/${whl_pattern}"
+        $SUDO "${INSTALL_PREFIX}/bin/pip" install --no-cache-dir --upgrade pip setuptools wheel 2>/dev/null
+        $SUDO "${INSTALL_PREFIX}/bin/pip" install --no-cache-dir "${tmpdir}/${whl_pattern}"
 
         # Symlink CLI into PATH
         info "Creating CLI symlink …"
-        sudo ln -sf "${INSTALL_PREFIX}/bin/auspexai-worker" /usr/local/bin/auspexai-worker
+        if [ "$OS" = "Darwin" ]; then
+            mkdir -p "$HOME/.local/bin"
+            ln -sf "${INSTALL_PREFIX}/bin/auspexai-worker" "$HOME/.local/bin/auspexai-worker"
+            ensure_local_bin_on_path
+        else
+            sudo ln -sf "${INSTALL_PREFIX}/bin/auspexai-worker" /usr/local/bin/auspexai-worker
+        fi
 
         # Install the service: a launchd LaunchAgent on macOS, a systemd user unit
         # on Linux (one installer, OS-aware — same command on both).
@@ -1020,7 +1057,7 @@ APPARMOR
             y|Y|yes|YES)
                 if [ -x "${INSTALL_PREFIX}/bin/pip" ]; then
                     info "Installing model-download support (huggingface_hub) …"
-                    sudo "${INSTALL_PREFIX}/bin/pip" install -q huggingface_hub \
+                    $SUDO "${INSTALL_PREFIX}/bin/pip" install -q huggingface_hub \
                         || warn "could not install huggingface_hub; \`model pull\` will be unavailable"
                 else
                     warn "pip not found in ${INSTALL_PREFIX}; install huggingface_hub manually for \`model pull\`"
@@ -1032,6 +1069,10 @@ APPARMOR
                 echo "    then \`auspexai-worker model setup\` anytime."
                 ;;
         esac
+    fi
+
+    if [ "$OS" = "Darwin" ] && [ -d "/opt/auspexai-worker" ]; then
+        info "An earlier /opt/auspexai-worker install is now unused (this install is user-local). Remove it anytime:  sudo rm -rf /opt/auspexai-worker"
     fi
 
     cat <<'EOF'
