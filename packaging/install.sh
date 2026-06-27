@@ -318,15 +318,12 @@ resolve_flavor() {
 
 # §41: the volunteer's host-isolation choice for running tenant code. Mirrors
 # resolve_sandbox_policy — interactive menu (prior choice is the default; Enter
-# keeps it) > recorded silently when there's no tty > STRICT. The volunteer is
+# keeps it) > recorded silently when there's no tty > permissive. The volunteer is
 # ASKED rather than silently defaulted, because this is the consent moment for
-# running other people's code on their machine. Default STRICT (2026-06-27): the
-# worker isolates from the host by default (narrow fs, no network, namespace-
-# isolated); permissive is the informed opt-out for fully-trusted setups. STRICT
-# fails closed at runtime if the host can't build the sandbox (e.g. restricted
-# unprivileged user namespaces) — the volunteer then sees `sandbox_unavailable`
-# and can fix the host or choose permissive. (Follow-up: an install-time STRICT
-# availability probe that warns + offers fallback before the first refusal.)
+# running other people's code on their machine. Default permissive (STRICT-by-
+# default was tried + reverted 2026-06-27 — it fails closed on hosts with restricted
+# unprivileged user namespaces, which would strand volunteers); the menu still
+# offers + describes strict ("narrow filesystem, no network, namespace-isolated").
 resolve_sandbox_policy() {
     local recorded=""
     local toml="$HOME/.config/auspexai-worker/worker.toml"
@@ -335,10 +332,7 @@ resolve_sandbox_policy() {
             | head -1 | sed 's/.*=[[:space:]]*"\{0,1\}//;s/"\{0,1\}[[:space:]]*$//') || true
         case "$recorded" in permissive | strict) ;; *) recorded="" ;; esac
     fi
-    # Default STRICT (2026-06-27): a volunteer's worker isolates from the host by
-    # default. STRICT fails closed if its deps are missing; ensure_sandbox_deps
-    # installs them below. A trusted-host operator may still choose permissive.
-    local default_policy="${recorded:-strict}"
+    local default_policy="${recorded:-permissive}"
     if ! (exec </dev/tty) 2>/dev/null; then
         [ -n "$recorded" ] && info "Keeping sandbox policy: ${recorded}" >&2
         echo "$default_policy"
@@ -348,12 +342,8 @@ resolve_sandbox_policy() {
         echo ""
         echo "This worker runs experiment code from researchers. How should it be isolated?"
         local strict_tag="" perm_tag=""
-        if [ -n "$recorded" ]; then
-            [ "$default_policy" = "strict" ] && strict_tag="  (current)"
-            [ "$default_policy" = "permissive" ] && perm_tag="  (current)"
-        else
-            strict_tag="  (recommended, default)"
-        fi
+        [ "$default_policy" = "strict" ] && strict_tag="  (current)"
+        [ "$default_policy" = "permissive" ] && [ -n "$recorded" ] && perm_tag="  (current)"
         echo "  1) strict      narrow filesystem, no network, namespace-isolated${strict_tag}"
         echo "  2) permissive  shares your host filesystem (only for fully-trusted setups)${perm_tag}"
         printf 'Sandbox policy [%s]: ' "$default_policy"

@@ -27,11 +27,9 @@ class TestConfigDefaults:
 
 
 class TestSandboxPolicy:
-    def test_defaults_strict(self, tmp_path: Path) -> None:
-        # 2026-06-27: the worker isolates from the host by DEFAULT — a fresh config
-        # with no [sandbox] policy resolves to STRICT (was permissive).
+    def test_defaults_permissive(self, tmp_path: Path) -> None:
         cfg = WorkerConfig.load(config_path=tmp_path / "missing.toml", env={})
-        assert cfg.sandbox_policy == "strict"
+        assert cfg.sandbox_policy == "permissive"
         assert cfg.sandbox_use_bubblewrap is True
 
     def test_strict_from_sandbox_block(self, tmp_path: Path) -> None:
