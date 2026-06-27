@@ -155,10 +155,28 @@ install_ollama() {
         fi
         return 0
     fi
-    info "Installing Ollama (official installer from ollama.com; can be a large download) …"
-    if ! curl -fsSL https://ollama.com/install.sh | sh; then
-        flavor_issue "Ollama install failed — inference serving stays unavailable until Ollama is present. Re-run this installer (same flavor) to retry."
-        return 0
+    info "Installing Ollama …"
+    if [ "$OS" = "Darwin" ]; then
+        # ollama.com/install.sh is the LINUX installer (it half-installs the CLI then
+        # tries to launch a desktop app that isn't there). On macOS use Homebrew —
+        # the headless `ollama` formula + a brew service that serves on :11434.
+        if ! command -v brew >/dev/null 2>&1; then
+            flavor_issue "Ollama isn't installed and Homebrew wasn't found. Install Ollama from https://ollama.com/download (or 'brew install ollama'), then re-run this installer (inference flavor) to finish."
+            return 0
+        fi
+        if ! brew install ollama; then
+            flavor_issue "'brew install ollama' failed — install Ollama from https://ollama.com/download, then re-run this installer (inference flavor)."
+            return 0
+        fi
+        if ! brew services start ollama >/dev/null 2>&1; then
+            nohup ollama serve >/dev/null 2>&1 &
+        fi
+    else
+        info "(official installer from ollama.com; can be a large download)"
+        if ! curl -fsSL https://ollama.com/install.sh | sh; then
+            flavor_issue "Ollama install failed — inference serving stays unavailable until Ollama is present. Re-run this installer (same flavor) to retry."
+            return 0
+        fi
     fi
     # Surface the installed version (determinism provenance; the daemon
     # re-reports it in heartbeat capabilities once serving).
@@ -735,8 +753,8 @@ main() {
         sudo rm -rf "${INSTALL_PREFIX}"/lib/python*/site-packages/auspexai_worker*
 
         info "Installing wheel (this may compile native extensions) …"
-        sudo "${INSTALL_PREFIX}/bin/pip" install --upgrade pip setuptools wheel 2>/dev/null
-        sudo "${INSTALL_PREFIX}/bin/pip" install "${tmpdir}/${whl_pattern}"
+        sudo "${INSTALL_PREFIX}/bin/pip" install --no-cache-dir --upgrade pip setuptools wheel 2>/dev/null
+        sudo "${INSTALL_PREFIX}/bin/pip" install --no-cache-dir "${tmpdir}/${whl_pattern}"
 
         # Symlink CLI into PATH
         info "Creating CLI symlink …"
