@@ -1437,8 +1437,10 @@ def sandbox_self_test() -> None:
             manifest_sha256="0" * 64,
         )
         profile = _seatbelt_profile(cfg, py)
+        # Import the worker's actual native/runtime deps (cryptography is a C
+        # extension — a good test of dylib loading under the read-allowlist).
         script = (
-            "import cryptography, cbor2, httpx, click;"
+            "import cryptography, httpx, click;"
             f"open({json.dumps(str(Path(ws) / 'output.json'))}, 'w').write('ok');"
             "print('PROFILE_OK')"
         )
