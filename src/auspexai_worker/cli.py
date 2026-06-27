@@ -1667,6 +1667,12 @@ def _print_device_code(code: DeviceCode) -> None:
     click.echo("Waiting for authorization... (Ctrl+C to cancel)")
 
 
+def _stdin_is_interactive() -> bool:
+    """Whether stdin is a TTY — isolated behind a helper so the interactive
+    public-credit prompt in `login` is testable (CliRunner's stdin is never a TTY)."""
+    return sys.stdin.isatty()
+
+
 @cli.command(help="Bind this worker to a GitHub account (T0 → T1).")
 @click.pass_context
 def login(ctx: click.Context) -> None:
@@ -1746,37 +1752,66 @@ def login(ctx: click.Context) -> None:
 
         # System B (D-inc4): the public-citation opt-in — a SEPARATE, explicit choice
         # from authentication. Linking GitHub is auth-consent, NOT consent to be named
-        # publicly, so we ask the distinct question here at the identity moment, off by
-        # default. Reversible later via `auspexai-worker account attribution`. Only when
-        # interactive: a scripted / non-TTY login skips it (stays off; set it later).
-        if sys.stdin.isatty():
+        # publicly, so we ask the distinct question here at the identity moment. We
+        # PRESERVE the account's standing choice across re-logins: read it first, make the
+        # default match it, and only write when the answer actually CHANGES it — so a
+        # routine re-login never silently re-anonymizes (nor wrongly tells an opted-in
+        # contributor they're anonymous). Reversible later via `account attribution`.
+        # Interactive only: a scripted / non-TTY login leaves the standing choice untouched.
+        if _stdin_is_interactive():
+            # Read the current opt-in so a re-login preserves it. On failure, fall back to a
+            # safe anonymous default — combined with the write-only-on-change guard below, a
+            # failed read can never overwrite an existing opt-in.
+            current_public = False
+            try:
+                with CoordinatorClient(base_url=config.coordinator_url, signer=signer) as client:
+                    state = client.get_attribution(account_id=exchange.account_id)
+                current_public = bool(state.get("public_attribution", False))
+            except CoordinatorError:
+                current_public = False
+
             click.echo("")
-            click.echo(
-                "Optional — public credit. Research you contribute compute to may be "
-                "published with a contributor acknowledgment, under your verified GitHub "
-                "identity. This is separate from signing in, and off unless you opt in."
-            )
-            if click.confirm(
-                "Be publicly credited (as your GitHub account) in those citations?",
-                default=False,
-            ):
+            if current_public:
+                click.echo(
+                    "Public credit: you're currently credited under your verified GitHub "
+                    "account in citations of research you contribute to."
+                )
+                new_public = click.confirm("Keep being publicly credited?", default=True)
+            else:
+                click.echo(
+                    "Optional — public credit. Research you contribute compute to may be "
+                    "published with a contributor acknowledgment, under your verified GitHub "
+                    "identity. This is separate from signing in, and off unless you opt in."
+                )
+                new_public = click.confirm(
+                    "Be publicly credited (as your GitHub account) in those citations?",
+                    default=False,
+                )
+
+            # Write ONLY when the choice changes — preserves the standing opt-in, avoids a
+            # redundant consent-audit row, and means False is written only on a deliberate,
+            # informed opt-out (currently credited + an explicit "no").
+            if new_public != current_public:
                 try:
                     with CoordinatorClient(
                         base_url=config.coordinator_url, signer=signer
                     ) as client:
                         client.set_attribution(
                             account_id=exchange.account_id,
-                            public_attribution=True,
+                            public_attribution=new_public,
                             # Credit always uses the verified GitHub login — no custom name.
                             attribution_name=None,
                         )
-                    click.echo("You'll be credited under your GitHub account name.")
                 except CoordinatorError as exc:
                     click.echo(
-                        f"(couldn't record public credit now: {exc} — set it later with "
+                        f"(couldn't update public credit now: {exc} — set it later with "
                         "`auspexai-worker account attribution`)",
                         err=True,
                     )
+                    new_public = current_public
+
+            if new_public:
+                click.echo("You'll be credited under your GitHub account name.")
             else:
                 click.echo("No public credit — your contributions stay anonymous in citations.")
     finally:

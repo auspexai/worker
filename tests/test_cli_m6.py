@@ -19,6 +19,7 @@ from auspexai_worker import cli as cli_module
 from auspexai_worker.cli import cli
 from auspexai_worker.coordinator import (
     BindingTokenExpiredError,
+    CoordinatorError,
     OAuthExchangeResponse,
     WorkerStatusResponse,
 )
@@ -166,16 +167,20 @@ class _FakeCoordinatorClient:
 
 @pytest.fixture
 def fake_client_factory(monkeypatch: pytest.MonkeyPatch):
-    """Replace cli_module.CoordinatorClient with a singleton fake for inspection."""
-    holder: dict[str, _FakeCoordinatorClient] = {}
+    """Replace cli_module.CoordinatorClient with a singleton fake for inspection.
+
+    One instance is reused for every ``CoordinatorClient(...)`` call within a test, so
+    calls accumulate and attribution state persists across the several short-lived
+    clients the `login` flow opens (exchange/upgrade, then get, then set). Pre-built so a
+    test can seed ``["instance"].attribution_state`` before invoking the command.
+    """
+    instance = _FakeCoordinatorClient(base_url="", signer=None)
 
     def factory(*args, **kwargs) -> _FakeCoordinatorClient:
-        instance = _FakeCoordinatorClient(*args, **kwargs)
-        holder["instance"] = instance
         return instance
 
     monkeypatch.setattr(cli_module, "CoordinatorClient", factory)
-    return holder
+    return {"instance": instance}
 
 
 def _bootstrap_t1_bound(tmp_path: Path, account_id: str = "acct-fake") -> None:
@@ -431,6 +436,99 @@ class TestLoginCommand:
 
 
 # ---- withdraw --------------------------------------------------------------
+
+
+class TestLoginPublicCreditPrompt:
+    """The interactive public-credit (System B) opt-in at the end of `login`.
+
+    The prompt is STATE-AWARE: it reads the account's standing choice, defaults to it,
+    and writes only when the answer CHANGES it — so a routine re-login never silently
+    re-anonymizes a contributor (the citation-footgun fix). The prompt is gated on an
+    interactive stdin, forced here via `_stdin_is_interactive` (CliRunner is never a TTY).
+    """
+
+    def _setup(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        db = _bootstrap_t0_identity(tmp_path)
+        db.close()
+        _generate_real_keystore(tmp_path)
+        _stub_device_flow(monkeypatch)
+        monkeypatch.setattr(cli_module, "_stdin_is_interactive", lambda: True)
+        return _write_config(tmp_path)
+
+    def test_preserves_standing_opt_in(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_client_factory
+    ) -> None:
+        """Re-login while already credited + keeping the choice writes NOTHING (preserve)."""
+        fake_client_factory["instance"].attribution_state = {
+            "account_id": "acct-fake",
+            "public_attribution": True,
+            "attribution_name": None,
+        }
+        cfg = self._setup(tmp_path, monkeypatch)
+        result = CliRunner().invoke(
+            cli, ["--config", str(cfg), "login"], env=_env(tmp_path), input="\n"
+        )
+        assert result.exit_code == 0, result.output
+        assert "currently credited" in result.output.lower()
+        assert "You'll be credited" in result.output
+        methods = [c[0] for c in fake_client_factory["instance"].calls]
+        assert "get_attribution" in methods
+        assert "set_attribution" not in methods  # unchanged -> no write -> no re-anonymize
+
+    def test_opt_in_when_anonymous(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_client_factory
+    ) -> None:
+        """A first-time 'yes' from the anonymous default records the opt-in."""
+        cfg = self._setup(tmp_path, monkeypatch)  # default state: public_attribution=False
+        result = CliRunner().invoke(
+            cli, ["--config", str(cfg), "login"], env=_env(tmp_path), input="y\n"
+        )
+        assert result.exit_code == 0, result.output
+        assert "You'll be credited" in result.output
+        assert (
+            "set_attribution",
+            {"account_id": "acct-fake", "public_attribution": True, "attribution_name": None},
+        ) in fake_client_factory["instance"].calls
+
+    def test_opt_out_when_credited(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_client_factory
+    ) -> None:
+        """An explicit 'no' while currently credited is the ONLY path that writes False."""
+        fake_client_factory["instance"].attribution_state = {
+            "account_id": "acct-fake",
+            "public_attribution": True,
+            "attribution_name": None,
+        }
+        cfg = self._setup(tmp_path, monkeypatch)
+        result = CliRunner().invoke(
+            cli, ["--config", str(cfg), "login"], env=_env(tmp_path), input="n\n"
+        )
+        assert result.exit_code == 0, result.output
+        assert "anonymous" in result.output.lower()
+        assert (
+            "set_attribution",
+            {"account_id": "acct-fake", "public_attribution": False, "attribution_name": None},
+        ) in fake_client_factory["instance"].calls
+
+    def test_read_failure_never_overwrites_opt_in(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_client_factory
+    ) -> None:
+        """If the standing choice can't be read, a default 'no' must NOT write False — the
+        existing opt-in is left intact rather than silently overwritten."""
+        inst = fake_client_factory["instance"]
+        inst.attribution_state = {
+            "account_id": "acct-fake",
+            "public_attribution": True,  # actually opted in...
+            "attribution_name": None,
+        }
+        inst.attribution_exc = CoordinatorError("coordinator unreachable")  # ...but read fails
+        cfg = self._setup(tmp_path, monkeypatch)
+        result = CliRunner().invoke(
+            cli, ["--config", str(cfg), "login"], env=_env(tmp_path), input="\n"
+        )
+        assert result.exit_code == 0, result.output
+        methods = [c[0] for c in inst.calls]
+        assert "set_attribution" not in methods  # no write -> existing opt-in preserved
 
 
 class TestWithdrawCommand:
