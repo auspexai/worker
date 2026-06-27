@@ -364,6 +364,11 @@ def _seatbelt_profile(config: SandboxConfig, runner: str) -> str:
         '(subpath "/usr")',
         '(subpath "/System")',
         '(subpath "/Library")',
+        # The runner's REAL python install (the venv's base) — resolved dynamically so
+        # this works wherever python lives: brew, python.org, pyenv. Plus Homebrew's
+        # prefix for any linked dylibs (openssl, libffi) that a C-extension pulls in.
+        f"(subpath {_seatbelt_quote(sys.base_prefix)})",
+        '(subpath "/opt/homebrew")',
         '(subpath "/private/var/db/dyld")',
         '(subpath "/private/etc")',
         '(literal "/dev/null")',

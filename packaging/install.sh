@@ -1002,6 +1002,19 @@ APPARMOR
             || warn "could not record [sandbox] policy in worker.toml"
     fi
 
+    # macOS STRICT: validate the Seatbelt sandbox actually runs the runner BEFORE the
+    # daemon picks up work (the analog of the Linux bwrap-deps check), so a strict
+    # volunteer learns at install time, not at first unit. Guarded for binaries predating
+    # `sandbox self-test` (< v0.2.46). Non-fatal — a failure surfaces in the footer.
+    if [ "$OS" = "Darwin" ] && [ "$sandbox_policy" = "strict" ] \
+        && [ -x "${INSTALL_PREFIX}/bin/auspexai-worker" ] \
+        && "${INSTALL_PREFIX}/bin/auspexai-worker" sandbox self-test --help >/dev/null 2>&1; then
+        info "Validating the macOS strict sandbox (Seatbelt) …"
+        if ! "${INSTALL_PREFIX}/bin/auspexai-worker" sandbox self-test; then
+            flavor_issue "macOS STRICT sandbox self-test FAILED (see above) — the worker refuses work under strict until it's resolved. Run permissive meanwhile: auspexai-worker sandbox set-policy permissive"
+        fi
+    fi
+
     # M3: record the auto-acquire choice (inference flavors only) — surgical
     # [executor] auto_acquire write via the CLI, touching only the flag, not the
     # execution policy. Guarded for binaries predating `executor auto-acquire`
