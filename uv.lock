@@ -35,7 +35,7 @@ wheels = [
 
 [[package]]
 name = "auspexai-tenant"
-version = "0.5.6"
+version = "0.6.13"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cbor2" },
@@ -45,9 +45,9 @@ dependencies = [
     { name = "httpx" },
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f9/f9/13d590abf84a6a29eb905348501fb76ddff69d9b8884d98b2dd70015aa84/auspexai_tenant-0.5.6.tar.gz", hash = "sha256:a62481a19e309f8fa8bcccd562318abefff0f7a05c18229d7abea686e3a4dd2b", size = 128266, upload-time = "2026-06-12T17:18:56.819Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f5/87/7271aaec2090621dd644a4d95489d42c22478a1597ad1ff6248ccfac11de/auspexai_tenant-0.6.13.tar.gz", hash = "sha256:6de345a6ef9442a6889fc102e0269884d0a3d7d1c4c4bd77538630572e55650a", size = 155459, upload-time = "2026-06-27T16:16:46.18Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/89/13/f5f00753e9e00002d58fc9eaf05bc47d84b595108cc2a91f4c73e8229012/auspexai_tenant-0.5.6-py3-none-any.whl", hash = "sha256:2a22f8b59aab4e8ef5a3a3ec9976c166dc51791cdb3e2a5390c1cf413c99f560", size = 100188, upload-time = "2026-06-12T17:18:55.337Z" },
+    { url = "https://files.pythonhosted.org/packages/f9/6f/9fb0a71003ae89663a2bb654ba303fb320d3d2f9eb20c212dc048122f083/auspexai_tenant-0.6.13-py3-none-any.whl", hash = "sha256:1c298c0bdd3c7db64dad88b130c61fb2b257f27b4300109505ab9c9bdd87d1c5", size = 121312, upload-time = "2026-06-27T16:16:44.844Z" },
 ]
 
 [[package]]
@@ -82,7 +82,7 @@ secret-service = [
 
 [package.metadata]
 requires-dist = [
-    { name = "auspexai-tenant", marker = "extra == 'dev'", specifier = "==0.5.6" },
+    { name = "auspexai-tenant", marker = "extra == 'dev'", specifier = "==0.6.13" },
     { name = "click", specifier = ">=8.1" },
     { name = "cryptography", specifier = ">=42" },
     { name = "fastapi", specifier = ">=0.115" },
