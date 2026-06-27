@@ -1396,6 +1396,77 @@ def sandbox_set_policy(ctx: click.Context, policy: str) -> None:
     click.echo("restart the daemon to apply — [sandbox] is read at daemon start, not hot-reloaded.")
 
 
+@sandbox.command(
+    "self-test",
+    help="Run a probe under the STRICT sandbox to verify it works (esp. the macOS Seatbelt profile).",
+)
+def sandbox_self_test() -> None:
+    """Build the STRICT sandbox profile for a throwaway workspace and run the venv python
+    under it — verifying the interpreter + native deps load and the workspace is writable.
+    On macOS this exercises the exact Seatbelt read-allowlist the daemon generates; it's
+    the iteration tool for the profile (no real unit needed). On failure, the macOS
+    unified log names the blocked path:
+        log show --last 1m --predicate 'sender == "Sandbox"' --info | tail -40
+    """
+    if sys.platform != "darwin":
+        result = probe_bubblewrap()
+        click.echo(
+            "bubblewrap probe OK" if result.ok else f"bubblewrap probe FAILED: {result.reason}"
+        )
+        sys.exit(0 if result.ok else 1)
+
+    import tempfile
+
+    from .sandbox import SandboxConfig
+    from .sandbox.wrapper import SANDBOX_EXEC_BIN, _seatbelt_profile
+
+    probe = probe_seatbelt()
+    if not probe.ok:
+        click.echo(f"✗ sandbox-exec (Seatbelt) not functional: {probe.reason}", err=True)
+        sys.exit(1)
+
+    py = sys.executable
+    with tempfile.TemporaryDirectory(prefix="auspexai-selftest-") as ws:
+        cfg = SandboxConfig(
+            use_bubblewrap=False,
+            policy=SandboxPolicy.STRICT,
+            runner_bin=py,
+            workspace_path=ws,
+            output_path=str(Path(ws) / "output.json"),
+            unit_id="self-test",
+            manifest_sha256="0" * 64,
+        )
+        profile = _seatbelt_profile(cfg, py)
+        script = (
+            "import cryptography, cbor2, httpx, click;"
+            f"open({json.dumps(str(Path(ws) / 'output.json'))}, 'w').write('ok');"
+            "print('PROFILE_OK')"
+        )
+        proc = subprocess.run(
+            [SANDBOX_EXEC_BIN, "-p", profile, py, "-c", script],
+            capture_output=True,
+            text=True,
+        )
+    if proc.returncode == 0 and "PROFILE_OK" in proc.stdout:
+        click.echo(
+            "✓ macOS STRICT (Seatbelt) profile works: interpreter + native deps load, "
+            "workspace writable, network denied."
+        )
+        return
+    click.echo(
+        "✗ STRICT Seatbelt profile FAILED — the read-allowlist likely needs widening.", err=True
+    )
+    tail = (proc.stderr or proc.stdout or "").strip()[-1000:]
+    if tail:
+        click.echo(tail, err=True)
+    click.echo(
+        "\n  Find the blocked path(s):\n"
+        "    log show --last 1m --predicate 'sender == \"Sandbox\"' --info | tail -40",
+        err=True,
+    )
+    sys.exit(1)
+
+
 @cli.group(help="Manage tenant allow/deny lists.")
 def tenant() -> None:
     pass
