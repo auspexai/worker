@@ -415,14 +415,25 @@ resolve_auto_acquire() {
 # ── Detect Python ────────────────────────────────────────────────────
 
 find_python() {
-    for candidate in python3.12 python3.11 python3; do
-        if command -v "$candidate" >/dev/null 2>&1; then
-            local ver
-            ver=$("$candidate" -c 'import sys; print(f"{sys.version_info.minor}")' 2>/dev/null) || continue
-            if [ "$ver" -ge "$MIN_PYTHON_MINOR" ] 2>/dev/null; then
-                echo "$candidate"
-                return
-            fi
+    # Newest-versioned first, then the generic `python3` (most installs symlink it to
+    # the latest — so a 3.13/3.14 install is found even when no pythonX.Y command exists
+    # for it), then any other python3.NN on PATH as a final catch-all. The first one
+    # that is >= 3.${MIN_PYTHON_MINOR} wins; an older one (e.g. macOS's system 3.9) is
+    # skipped rather than failing the install.
+    local candidate ver
+    local candidates="python3.14 python3.13 python3.12 python3.11 python3"
+    # Append any remaining python3.NN executables on PATH (deduped), so we don't depend
+    # on this list being exhaustive as new minors ship.
+    local extra
+    extra=$(ls -1 $(echo "$PATH" | tr ':' ' ') 2>/dev/null \
+        | grep -E '^python3\.[0-9]+$' | sort -u || true)
+    [ -n "$extra" ] && candidates="$candidates $extra"
+    for candidate in $candidates; do
+        command -v "$candidate" >/dev/null 2>&1 || continue
+        ver=$("$candidate" -c 'import sys; print(sys.version_info.minor)' 2>/dev/null) || continue
+        if [ "$ver" -ge "$MIN_PYTHON_MINOR" ] 2>/dev/null; then
+            echo "$candidate"
+            return
         fi
     done
     return 1
