@@ -503,6 +503,92 @@ fetch_release() {
     curl -fsSL "$api_url" 2>/dev/null || fail "could not fetch release info from GitHub"
 }
 
+# ── Supply-chain verification (cosign keyless signatures; best-effort) ─
+# Release artifacts are cosign-signed (keyless OIDC) and listed in SHA256SUMS.
+# We verify the cosign signature when cosign is obtainable — a BAD signature
+# ABORTS the install. If cosign cannot be obtained, we fall back to a sha256
+# check against the release SHA256SUMS with a loud "not verified" warning
+# rather than blocking the install.
+
+COSIGN_VERSION="v2.5.0"
+COSIGN_BIN=""
+
+_sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
+
+ensure_cosign() {
+    # Set COSIGN_BIN to a usable cosign and return 0, else return 1. We never
+    # run an UNVERIFIED bootstrapped cosign (a verifier you can't trust is
+    # pointless): the downloaded binary is checked against the cosign release's
+    # own published checksums before use.
+    [ -n "$COSIGN_BIN" ] && return 0
+    if command -v cosign >/dev/null 2>&1; then COSIGN_BIN="cosign"; return 0; fi
+    if [ "$OS" = "Darwin" ] && command -v brew >/dev/null 2>&1; then
+        brew install cosign >/dev/null 2>&1 && command -v cosign >/dev/null 2>&1 &&
+            { COSIGN_BIN="cosign"; return 0; }
+    fi
+    local os arch bin tmp want got
+    case "$OS" in Darwin) os="darwin" ;; *) os="linux" ;; esac
+    case "$(uname -m)" in
+        arm64 | aarch64) arch="arm64" ;;
+        x86_64 | amd64) arch="amd64" ;;
+        *) return 1 ;;
+    esac
+    bin="cosign-${os}-${arch}"
+    tmp="$(mktemp -d)"
+    curl -fsSL -o "$tmp/cosign" \
+        "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/${bin}" 2>/dev/null || return 1
+    curl -fsSL -o "$tmp/sums" \
+        "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign_checksums.txt" 2>/dev/null || return 1
+    want="$(grep " ${bin}\$" "$tmp/sums" 2>/dev/null | awk '{print $1}')"
+    got="$(_sha256 "$tmp/cosign")"
+    [ -n "$want" ] && [ "$want" = "$got" ] || return 1
+    chmod +x "$tmp/cosign" && COSIGN_BIN="$tmp/cosign" && return 0
+    return 1
+}
+
+# Verify a downloaded release artifact BEFORE installing. $1=local path, $2=URL.
+verify_artifact() {
+    local path="$1" url="$2"
+    if ensure_cosign; then
+        curl -fsSL -o "${path}.sig" "${url}.sig" 2>/dev/null || true
+        curl -fsSL -o "${path}.cert" "${url}.cert" 2>/dev/null || true
+        if [ -s "${path}.sig" ] && [ -s "${path}.cert" ]; then
+            info "Verifying signature (cosign) …"
+            if "$COSIGN_BIN" verify-blob \
+                --certificate-identity-regexp='^https://github\.com/auspexai/.+/\.github/workflows/.+@.+$' \
+                --certificate-oidc-issuer='https://token.actions.githubusercontent.com' \
+                --signature "${path}.sig" --certificate "${path}.cert" "$path" >/dev/null 2>&1; then
+                info "✓ signature verified — AuspexAI Maintainer OIDC identity"
+                return 0
+            fi
+            fail "SIGNATURE VERIFICATION FAILED for $(basename "$path") — refusing to install. The artifact may be tampered; do not proceed."
+        fi
+        warn "could not fetch the signature for $(basename "$path"); falling back to a checksum"
+    fi
+    _verify_sha256 "$path" "$url"
+}
+
+_verify_sha256() {
+    local path="$1" url="$2" base sums want got
+    base="$(basename "$path")"
+    sums="$(curl -fsSL "${url%/*}/SHA256SUMS" 2>/dev/null)" || {
+        warn "⚠ SIGNATURE NOT VERIFIED (cosign unavailable) and SHA256SUMS unreachable — proceeding on transport trust only."
+        return 0
+    }
+    want="$(printf '%s\n' "$sums" | grep " ${base}\$" | awk '{print $1}')"
+    got="$(_sha256 "$path")"
+    if [ -n "$want" ] && [ "$want" = "$got" ]; then
+        warn "⚠ signature NOT verified (cosign unavailable) — integrity confirmed against SHA256SUMS only. Install cosign for full verification."
+        return 0
+    fi
+    [ -n "$want" ] && fail "CHECKSUM MISMATCH for ${base} — refusing to install."
+    warn "⚠ SIGNATURE NOT VERIFIED and ${base} absent from SHA256SUMS — proceeding on transport trust only."
+}
+
 # ── Main ─────────────────────────────────────────────────────────────
 
 do_uninstall() {
@@ -751,6 +837,7 @@ main() {
         info "Found .deb for ${arch} — using package manager"
         info "Downloading ${deb_name} …"
         curl -fSL -o "${tmpdir}/${deb_name}" "$deb_url"
+        verify_artifact "${tmpdir}/${deb_name}" "$deb_url"
 
         info "Installing with apt …"
         sudo apt install -y "${tmpdir}/${deb_name}"
@@ -760,6 +847,7 @@ main() {
         info "No .deb for ${arch} — installing from wheel"
         info "Downloading ${whl_pattern} …"
         curl -fSL -o "${tmpdir}/${whl_pattern}" "$whl_url"
+        verify_artifact "${tmpdir}/${whl_pattern}" "$whl_url"
 
         # Ensure build deps for compiled wheels (cryptography, etc.). Linux only —
         # macOS installs prebuilt wheels from PyPI and ships venv with python.
