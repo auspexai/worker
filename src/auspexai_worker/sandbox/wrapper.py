@@ -349,53 +349,50 @@ def _seatbelt_quote(path: str) -> str:
     return '"' + path.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def _seatbelt_profile(config: SandboxConfig, runner: str) -> str:
-    """A Seatbelt (sandbox-exec) profile mirroring the Linux STRICT containment:
-    deny-by-default; read-only system + worker venv + executor/models; the per-unit
-    workspace as the SOLE writable path; NO network except the inference broker unix
-    socket. The keystore, $HOME documents, and other units live OUTSIDE the allowed
-    reads, so the executor can't reach them.
+def _seatbelt_profile(config: SandboxConfig) -> str:
+    """A Seatbelt (sandbox-exec) profile for macOS STRICT.
 
-    First-draft allowlist — macOS/dyld/python touch many paths, so widen the reads as
-    denials surface (the kernel logs each one:
-    `log stream --predicate 'sender == "Sandbox"'`)."""
-    venv_root = str(Path(runner).resolve().parents[1])
-    reads = [
-        '(subpath "/usr")',
-        '(subpath "/System")',
-        '(subpath "/Library")',
-        # The runner's REAL python install (the venv's base) — resolved dynamically so
-        # this works wherever python lives: brew, python.org, pyenv. Plus Homebrew's
-        # prefix for any linked dylibs (openssl, libffi) that a C-extension pulls in.
-        f"(subpath {_seatbelt_quote(sys.base_prefix)})",
-        '(subpath "/opt/homebrew")',
-        '(subpath "/private/var/db/dyld")',
-        '(subpath "/private/etc")',
-        '(literal "/dev/null")',
-        '(literal "/dev/zero")',
-        '(literal "/dev/random")',
-        '(literal "/dev/urandom")',
-        f"(subpath {_seatbelt_quote(venv_root)})",
-        f"(subpath {_seatbelt_quote(config.workspace_path)})",
+    The integrity-critical controls match the Linux strict sandbox: NO external network
+    (only the inference broker unix socket survives), writes confined to the per-unit
+    workspace, and the worker's signing key + common host secrets kept UNREADABLE — so
+    tenant code can't forge receipts, tamper the host, or exfiltrate over the network.
+
+    Reads are otherwise BROAD. A tight read-allowlist proved brittle across macOS python
+    layouts (framework dylibs, the dyld shared cache, Homebrew cellars differ per host
+    and silently SIGKILL the runner when one is missed), so v1 trades full read-isolation
+    for reliability while still protecting the integrity-critical assets. Tightening the
+    read surface back to an allowlist is a tracked refinement."""
+    home = os.path.expanduser("~")
+    # The signing key lives under the worker state dir — it MUST stay unreadable, or
+    # tenant code could read it and forge receipts. Plus the obvious host secret stores.
+    state_dir = os.environ.get("AUSPEXAI_WORKER_STATE_DIR") or os.path.join(
+        home, ".local", "state", "auspexai-worker"
+    )
+    protected = [
+        state_dir,
+        os.path.join(home, ".ssh"),
+        os.path.join(home, ".aws"),
+        os.path.join(home, ".gnupg"),
+        os.path.join(home, ".config", "gcloud"),
+        os.path.join(home, "Library", "Keychains"),
     ]
-    if config.executor_package_dir:
-        reads.append(f"(subpath {_seatbelt_quote(config.executor_package_dir)})")
-    if config.models_dir:
-        reads.append(f"(subpath {_seatbelt_quote(config.models_dir)})")
     lines = [
         "(version 1)",
         "(deny default)",
         "(allow process-exec*)",
         "(allow process-fork)",
-        "(allow signal (target self))",
-        "(allow sysctl-read)",
         "(allow mach-lookup)",
-        "(allow file-read-metadata)",
-        "(allow file-read* " + " ".join(reads) + ")",
-        f"(allow file-write* (subpath {_seatbelt_quote(config.workspace_path)}) "
-        '(literal "/dev/null"))',
-        "(deny network*)",
+        "(allow sysctl-read)",
+        "(allow file-read*)",
     ]
+    # Later, more-specific rules win in Seatbelt — so these denials override the broad
+    # read above for exactly the secret paths.
+    lines += [f"(deny file-read* (subpath {_seatbelt_quote(p)}))" for p in protected]
+    lines.append(
+        f"(allow file-write* (subpath {_seatbelt_quote(config.workspace_path)}) "
+        '(literal "/dev/null"))'
+    )
+    lines.append("(deny network*)")
     if config.inference_socket:
         lines.append(
             f"(allow network-outbound (literal {_seatbelt_quote(config.inference_socket)}))"
@@ -407,7 +404,7 @@ def _seatbelt_argv(config: SandboxConfig) -> list[str]:
     """macOS STRICT argv: `sandbox-exec -p <profile> <runner>`. Env is set on the
     subprocess by the daemon (passthrough-style on macOS), so it isn't in the argv."""
     runner = resolve_runner_bin(config.runner_bin)
-    return [SANDBOX_EXEC_BIN, "-p", _seatbelt_profile(config, runner), runner]
+    return [SANDBOX_EXEC_BIN, "-p", _seatbelt_profile(config), runner]
 
 
 def _env_argv(config: SandboxConfig) -> list[str]:

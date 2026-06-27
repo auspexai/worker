@@ -111,11 +111,11 @@ class TestSeatbelt:
         assert argv[-1].endswith("auspexai-worker-runner")
         profile = argv[2]
         assert "(deny default)" in profile
+        assert "(allow file-read*)" in profile  # broad read — reliable across macOS py layouts
+        assert "(deny file-read*" in profile  # ... but the keystore + host secrets are denied
         assert "(deny network*)" in profile  # external network cut
         assert "auspexai-worker/work/u-1" in profile  # workspace = sole writable path
         assert "broker.sock" in profile  # the broker socket is the only allowed net-out
-        assert "/Users/v/.local/share/auspexai-worker/pkg" in profile  # executor read-only
-        assert "/Users/v/.local/share/auspexai-worker/models" in profile  # models read-only
 
     def test_macos_permissive_is_passthrough(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("auspexai_worker.sandbox.wrapper.sys.platform", "darwin")

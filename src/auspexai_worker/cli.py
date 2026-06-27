@@ -1436,7 +1436,7 @@ def sandbox_self_test() -> None:
             unit_id="self-test",
             manifest_sha256="0" * 64,
         )
-        profile = _seatbelt_profile(cfg, py)
+        profile = _seatbelt_profile(cfg)
         # Import the worker's actual native/runtime deps (cryptography is a C
         # extension — a good test of dylib loading under the read-allowlist).
         script = (
