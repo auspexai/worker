@@ -78,6 +78,61 @@ def _strict_config(**kw) -> SandboxConfig:
     return SandboxConfig(**base)
 
 
+class TestSeatbelt:
+    """macOS STRICT — sandbox-exec (Seatbelt). build_argv emits a deny-default profile
+    mirroring the Linux strict containment: read-only system+venv+executor/models,
+    workspace-only writes, no network except the inference broker socket."""
+
+    def _cfg(self, **kw) -> SandboxConfig:
+        base = dict(
+            use_bubblewrap=False,  # always False on macOS
+            policy=SandboxPolicy.STRICT,
+            runner_bin=_RUNNER,
+            workspace_path="/Users/v/.local/share/auspexai-worker/work/u-1",
+            output_path="/Users/v/.local/share/auspexai-worker/work/u-1/output.json",
+            unit_id="u-1",
+            manifest_sha256="a" * 64,
+        )
+        base.update(kw)
+        return SandboxConfig(**base)
+
+    def test_macos_strict_uses_sandbox_exec(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("auspexai_worker.sandbox.wrapper.sys.platform", "darwin")
+        argv = build_argv(
+            self._cfg(
+                executor_command=["python", "exec.py"],
+                executor_package_dir="/Users/v/.local/share/auspexai-worker/pkg",
+                models_dir="/Users/v/.local/share/auspexai-worker/models",
+                inference_socket="/Users/v/.local/share/auspexai-worker/work/u-1/broker.sock",
+            )
+        )
+        assert argv[0] == "/usr/bin/sandbox-exec"
+        assert argv[1] == "-p"
+        assert argv[-1].endswith("auspexai-worker-runner")
+        profile = argv[2]
+        assert "(deny default)" in profile
+        assert "(deny network*)" in profile  # external network cut
+        assert "auspexai-worker/work/u-1" in profile  # workspace = sole writable path
+        assert "broker.sock" in profile  # the broker socket is the only allowed net-out
+        assert "/Users/v/.local/share/auspexai-worker/pkg" in profile  # executor read-only
+        assert "/Users/v/.local/share/auspexai-worker/models" in profile  # models read-only
+
+    def test_macos_permissive_is_passthrough(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("auspexai_worker.sandbox.wrapper.sys.platform", "darwin")
+        argv = build_argv(self._cfg(policy=SandboxPolicy.PERMISSIVE))
+        assert argv == [_RUNNER]  # not strict + use_bubblewrap False -> passthrough
+
+    def test_probe_seatbelt_reports_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import auspexai_worker.sandbox.wrapper as w
+        from auspexai_worker.sandbox import probe_seatbelt
+
+        monkeypatch.setattr(w, "SANDBOX_EXEC_BIN", "/no/such/sandbox-exec")
+        monkeypatch.setattr(w.shutil, "which", lambda _name: None)
+        result = probe_seatbelt()
+        assert result.ok is False
+        assert "not found" in (result.reason or "")
+
+
 class TestStrictPolicy:
     def test_strict_fs_argv_drops_host_fs_and_narrows(self) -> None:
         """§41(a): STRICT replaces --dev-bind / / with narrow read-only system +

@@ -61,7 +61,7 @@ from .oauth import (
     run_device_flow,
 )
 from .provisioning import AutoFetchResolver, ExecutePolicy, ProvisioningResolver
-from .sandbox import ResourceLimits, SandboxPolicy, probe_bubblewrap
+from .sandbox import ResourceLimits, SandboxPolicy, probe_bubblewrap, probe_seatbelt
 from .state import (
     AcceptedSensitiveRepository,
     AssignmentAuditRepository,
@@ -849,6 +849,24 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
                 "\n"
                 "       See Documentation/AuspexAI/v0.1.0/worker_daemon_design.md\n"
                 "       §15 Q-W10 for the full resolution discussion.",
+                err=True,
+            )
+            db.close()
+            sys.exit(2)
+
+    # macOS STRICT runs under Seatbelt (sandbox-exec); probe it the same way so a broken
+    # sandbox-exec fails CLOSED at startup, not per-unit. (use_bubblewrap is always False
+    # on macOS, so the bubblewrap probe above never fires there.)
+    if sys.platform == "darwin" and config.sandbox_policy == "strict":
+        sb = probe_seatbelt()
+        if not sb.ok:
+            click.echo(
+                "ERROR: macOS STRICT sandbox (sandbox-exec / Seatbelt) is not functional "
+                "on this host.\n"
+                f"       Probe failure: {sb.reason}\n"
+                "\n"
+                "       Run `auspexai-worker sandbox set-policy permissive` to run without\n"
+                "       strict isolation, or investigate sandbox-exec on this machine.",
                 err=True,
             )
             db.close()

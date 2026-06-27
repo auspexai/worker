@@ -18,9 +18,11 @@ from .wrapper import (
     SandboxConfig,
     SandboxNotAvailableError,
     SandboxPolicy,
+    SeatbeltProbeResult,
     build_argv,
     check_bubblewrap_available,
     probe_bubblewrap,
+    probe_seatbelt,
 )
 
 __all__ = [
@@ -29,8 +31,10 @@ __all__ = [
     "SandboxConfig",
     "SandboxNotAvailableError",
     "SandboxPolicy",
+    "SeatbeltProbeResult",
     "UnitCgroup",
     "build_argv",
     "check_bubblewrap_available",
     "probe_bubblewrap",
+    "probe_seatbelt",
 ]

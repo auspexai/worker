@@ -153,6 +153,41 @@ def probe_bubblewrap(bwrap_path: str = "bwrap") -> BubblewrapProbeResult:
     )
 
 
+SANDBOX_EXEC_BIN = "/usr/bin/sandbox-exec"
+
+
+@dataclass(frozen=True)
+class SeatbeltProbeResult:
+    """Outcome of `probe_seatbelt` — whether macOS `sandbox-exec` can launch a command
+    on this host. Mirrors BubblewrapProbeResult for the daemon's STRICT startup gate."""
+
+    ok: bool
+    reason: str | None = None
+
+
+def probe_seatbelt() -> SeatbeltProbeResult:
+    """Probe whether macOS `sandbox-exec` (Seatbelt) can launch a command — the mechanism
+    behind STRICT on macOS. Runs a permissive profile around `/usr/bin/true`; the per-unit
+    STRICT profile is built separately in `_seatbelt_profile`."""
+    if not Path(SANDBOX_EXEC_BIN).exists() and shutil.which("sandbox-exec") is None:
+        return SeatbeltProbeResult(ok=False, reason=f"{SANDBOX_EXEC_BIN} not found")
+    try:
+        result = subprocess.run(
+            [SANDBOX_EXEC_BIN, "-p", "(version 1)(allow default)", "/usr/bin/true"],
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        return SeatbeltProbeResult(ok=False, reason=f"sandbox-exec probe raised: {exc}")
+    if result.returncode == 0:
+        return SeatbeltProbeResult(ok=True)
+    stderr_tail = result.stderr.decode("utf-8", errors="replace").strip()[-400:]
+    return SeatbeltProbeResult(
+        ok=False, reason=f"sandbox-exec probe exit={result.returncode}: {stderr_tail}"
+    )
+
+
 def build_argv(config: SandboxConfig, *, seccomp_fd: int | None = None) -> list[str]:
     """Construct the argv used to spawn the runner.
 
@@ -166,6 +201,11 @@ def build_argv(config: SandboxConfig, *, seccomp_fd: int | None = None) -> list[
             passthrough mode.
     """
     env_args = _env_argv(config)
+    # macOS STRICT — Seatbelt (sandbox-exec). On macOS use_bubblewrap is always False, so
+    # the daemon sets env on the subprocess (passthrough-style); Seatbelt only wraps the
+    # argv with the per-unit profile (no bwrap, no seccomp — Seatbelt mediates directly).
+    if sys.platform == "darwin" and config.policy is SandboxPolicy.STRICT:
+        return _seatbelt_argv(config)
     if not config.use_bubblewrap:
         return [config.runner_bin]
     if not check_bubblewrap_available(config.bwrap_path):
@@ -302,6 +342,67 @@ def _strict_fs_argv(config: SandboxConfig, resolved_runner: str) -> list[str]:
         config.workspace_path,
         config.workspace_path,
     ]
+
+
+def _seatbelt_quote(path: str) -> str:
+    """Quote a path as a Seatbelt string literal (double-quoted; backslash-escaped)."""
+    return '"' + path.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _seatbelt_profile(config: SandboxConfig, runner: str) -> str:
+    """A Seatbelt (sandbox-exec) profile mirroring the Linux STRICT containment:
+    deny-by-default; read-only system + worker venv + executor/models; the per-unit
+    workspace as the SOLE writable path; NO network except the inference broker unix
+    socket. The keystore, $HOME documents, and other units live OUTSIDE the allowed
+    reads, so the executor can't reach them.
+
+    First-draft allowlist — macOS/dyld/python touch many paths, so widen the reads as
+    denials surface (the kernel logs each one:
+    `log stream --predicate 'sender == "Sandbox"'`)."""
+    venv_root = str(Path(runner).resolve().parents[1])
+    reads = [
+        '(subpath "/usr")',
+        '(subpath "/System")',
+        '(subpath "/Library")',
+        '(subpath "/private/var/db/dyld")',
+        '(subpath "/private/etc")',
+        '(literal "/dev/null")',
+        '(literal "/dev/zero")',
+        '(literal "/dev/random")',
+        '(literal "/dev/urandom")',
+        f"(subpath {_seatbelt_quote(venv_root)})",
+        f"(subpath {_seatbelt_quote(config.workspace_path)})",
+    ]
+    if config.executor_package_dir:
+        reads.append(f"(subpath {_seatbelt_quote(config.executor_package_dir)})")
+    if config.models_dir:
+        reads.append(f"(subpath {_seatbelt_quote(config.models_dir)})")
+    lines = [
+        "(version 1)",
+        "(deny default)",
+        "(allow process-exec*)",
+        "(allow process-fork)",
+        "(allow signal (target self))",
+        "(allow sysctl-read)",
+        "(allow mach-lookup)",
+        "(allow file-read-metadata)",
+        "(allow file-read* " + " ".join(reads) + ")",
+        f"(allow file-write* (subpath {_seatbelt_quote(config.workspace_path)}) "
+        '(literal "/dev/null"))',
+        "(deny network*)",
+    ]
+    if config.inference_socket:
+        lines.append(
+            f"(allow network-outbound (literal {_seatbelt_quote(config.inference_socket)}))"
+        )
+    return "\n".join(lines)
+
+
+def _seatbelt_argv(config: SandboxConfig) -> list[str]:
+    """macOS STRICT argv: `sandbox-exec -p <profile> <runner>`. Env is set on the
+    subprocess by the daemon (passthrough-style on macOS), so it isn't in the argv."""
+    runner = resolve_runner_bin(config.runner_bin)
+    return [SANDBOX_EXEC_BIN, "-p", _seatbelt_profile(config, runner), runner]
 
 
 def _env_argv(config: SandboxConfig) -> list[str]:
