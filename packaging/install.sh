@@ -28,6 +28,11 @@ APPARMOR_DIR="/etc/apparmor.d"
 GITHUB_REPO="auspexai/worker"
 MIN_PYTHON_MINOR=11
 
+# ONE installer, OS-aware internals (NOT a separate script per OS): Linux uses
+# apt/.deb + systemd; macOS uses pip + a launchd LaunchAgent. Everything branches
+# on this single value.
+OS="$(uname -s)"  # Linux | Darwin (macOS)
+
 # ── Helpers ──────────────────────────────────────────────────────────
 
 info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
@@ -45,6 +50,10 @@ need_cmd() {
 # with the package names. Non-fatal: a permissive worker doesn't need either.
 ensure_sandbox_deps() {
     local policy="$1"
+    # macOS has no bubblewrap/libseccomp; STRICT isolation there is a separate
+    # mechanism (sandbox-exec — coming). Nothing apt-installable here; the worker
+    # runs permissive on macOS until that lands.
+    [ "$OS" = "Darwin" ] && return 0
     local missing=()
     command -v bwrap >/dev/null 2>&1 || missing+=(bubblewrap)
     # libseccomp.so.2 ships in libseccomp2 (Debian/Ubuntu); detect via ldconfig.
@@ -512,6 +521,26 @@ do_uninstall() {
     echo "To remove everything: rm -rf ~/.local/state/auspexai-worker ~/.local/share/auspexai-worker"
 }
 
+# Start (and enable-at-boot) the worker service — launchd on macOS, systemd on
+# Linux; both fall back to a detached daemon if the service manager is unavailable.
+start_worker_service() {
+    if [ "$OS" = "Darwin" ]; then
+        local plist="$HOME/Library/LaunchAgents/network.auspexai.worker.plist"
+        launchctl unload "$plist" 2>/dev/null || true
+        if launchctl load "$plist" 2>/dev/null; then
+            info "Worker loaded via launchd (auto-starts on login)."
+        else
+            info "launchctl load failed; starting the daemon directly …"
+            nohup "${INSTALL_PREFIX}/bin/auspexai-worker" daemon </dev/null >/dev/null 2>&1 &
+            info "daemon started (pid $!); logs: auspexai-worker logs -f"
+        fi
+    elif ! systemctl --user enable --now auspexai-worker.service 2>/dev/null; then
+        info "systemd user service unavailable; starting the daemon directly …"
+        nohup "${INSTALL_PREFIX}/bin/auspexai-worker" daemon </dev/null >/dev/null 2>&1 &
+        info "daemon started (pid $!); logs at: auspexai-worker logs -f"
+    fi
+}
+
 main() {
     local requested_version=""
     local requested_flavor=""
@@ -592,6 +621,12 @@ main() {
     # §41: ask the volunteer how to isolate tenant code (consent moment).
     local sandbox_policy
     sandbox_policy=$(resolve_sandbox_policy)
+    # macOS strict isn't available yet (no bubblewrap; sandbox-exec is coming).
+    # Fall back to permissive so the worker doesn't fail-closed and strand the host.
+    if [ "$OS" = "Darwin" ] && [ "$sandbox_policy" = "strict" ]; then
+        warn "macOS strict sandbox (sandbox-exec) isn't available yet — running PERMISSIVE for now."
+        sandbox_policy="permissive"
+    fi
     info "Sandbox policy: ${sandbox_policy}"
 
     # M3: inference flavors can opt into on-demand model downloads (consent moment).
@@ -602,7 +637,7 @@ main() {
     # ── Find Python ──────────────────────────────────────────────────
 
     local python
-    python=$(find_python) || fail "Python >= 3.${MIN_PYTHON_MINOR} is required. Install python3.11 or python3.12 and retry."
+    python=$(find_python) || fail "Python >= 3.${MIN_PYTHON_MINOR} is required. Install it and retry ($([ "$OS" = "Darwin" ] && echo 'macOS: brew install python@3.12' || echo 'e.g. sudo apt install python3.12 python3.12-venv'))."
     info "Using $python ($($python --version 2>&1))"
 
     # ── Fetch release ────────────────────────────────────────────────
@@ -628,11 +663,14 @@ main() {
 
     local deb_url="" whl_url=""
 
-    deb_url=$(printf '%s' "$release_json" \
-        | grep -o '"browser_download_url" *: *"[^"]*"' \
-        | grep "$deb_name" \
-        | head -1 \
-        | sed 's/.*: *"//;s/"//') || true
+    # .deb is a Linux fast path only; on macOS we always take the pip/wheel route.
+    if [ "$OS" = "Linux" ]; then
+        deb_url=$(printf '%s' "$release_json" \
+            | grep -o '"browser_download_url" *: *"[^"]*"' \
+            | grep "$deb_name" \
+            | head -1 \
+            | sed 's/.*: *"//;s/"//') || true
+    fi
 
     whl_url=$(printf '%s' "$release_json" \
         | grep -o '"browser_download_url" *: *"[^"]*"' \
@@ -661,15 +699,18 @@ main() {
         info "Downloading ${whl_pattern} …"
         curl -fSL -o "${tmpdir}/${whl_pattern}" "$whl_url"
 
-        # Ensure build deps for compiled wheels (cryptography, etc.)
-        info "Checking build dependencies …"
-        local build_deps_needed=()
-        dpkg -s libffi-dev >/dev/null 2>&1 || build_deps_needed+=(libffi-dev)
-        dpkg -s libssl-dev >/dev/null 2>&1 || build_deps_needed+=(libssl-dev)
-        dpkg -s "${python}-venv" >/dev/null 2>&1 || build_deps_needed+=("${python}-venv")
-        if [ ${#build_deps_needed[@]} -gt 0 ]; then
-            info "Installing build dependencies: ${build_deps_needed[*]}"
-            sudo apt install -y "${build_deps_needed[@]}"
+        # Ensure build deps for compiled wheels (cryptography, etc.). Linux only —
+        # macOS installs prebuilt wheels from PyPI and ships venv with python.
+        if [ "$OS" = "Linux" ]; then
+            info "Checking build dependencies …"
+            local build_deps_needed=()
+            dpkg -s libffi-dev >/dev/null 2>&1 || build_deps_needed+=(libffi-dev)
+            dpkg -s libssl-dev >/dev/null 2>&1 || build_deps_needed+=(libssl-dev)
+            dpkg -s "${python}-venv" >/dev/null 2>&1 || build_deps_needed+=("${python}-venv")
+            if [ ${#build_deps_needed[@]} -gt 0 ]; then
+                info "Installing build dependencies: ${build_deps_needed[*]}"
+                sudo apt install -y "${build_deps_needed[@]}"
+            fi
         fi
 
         # Create or reuse venv
@@ -690,7 +731,31 @@ main() {
         info "Creating CLI symlink …"
         sudo ln -sf "${INSTALL_PREFIX}/bin/auspexai-worker" /usr/local/bin/auspexai-worker
 
-        # Install systemd user unit
+        # Install the service: a launchd LaunchAgent on macOS, a systemd user unit
+        # on Linux (one installer, OS-aware — same command on both).
+        if [ "$OS" = "Darwin" ]; then
+            info "Installing launchd agent …"
+            mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
+            cat > "$HOME/Library/LaunchAgents/network.auspexai.worker.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>network.auspexai.worker</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${INSTALL_PREFIX}/bin/auspexai-worker</string>
+    <string>daemon</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>${HOME}/Library/Logs/auspexai-worker.log</string>
+  <key>StandardErrorPath</key><string>${HOME}/Library/Logs/auspexai-worker.log</string>
+</dict>
+</plist>
+PLIST
+            info "launchd agent written; the worker will auto-start on login."
+        else
         info "Installing systemd user unit …"
         sudo mkdir -p "${SYSTEMD_UNIT_DIR}"
         sudo tee "${SYSTEMD_UNIT_DIR}/auspexai-worker.service" >/dev/null <<'UNIT'
@@ -716,6 +781,7 @@ Delegate=yes
 [Install]
 WantedBy=default.target
 UNIT
+        fi
 
         # Install AppArmor profile if AppArmor is enabled at kernel level
         if [ -x /sbin/apparmor_parser ] && [ -d "${APPARMOR_DIR}" ] && \
@@ -895,11 +961,7 @@ APPARMOR
                     info "Bootstrapping …"
                     "${INSTALL_PREFIX}/bin/auspexai-worker" bootstrap
                     info "Starting service …"
-                    if ! systemctl --user enable --now auspexai-worker.service 2>/dev/null; then
-                        info "systemd user service unavailable; starting daemon directly …"
-                        nohup "${INSTALL_PREFIX}/bin/auspexai-worker" daemon </dev/null >/dev/null 2>&1 &
-                        info "daemon started (pid $!); logs at: auspexai-worker logs -f"
-                    fi
+                    start_worker_service
                     ;;
             esac
         else
@@ -911,11 +973,7 @@ APPARMOR
                 n|N|no|NO) ;;
                 *)
                     info "Starting service …"
-                    if ! systemctl --user enable --now auspexai-worker.service 2>/dev/null; then
-                        info "systemd user service unavailable; starting daemon directly …"
-                        nohup "${INSTALL_PREFIX}/bin/auspexai-worker" daemon </dev/null >/dev/null 2>&1 &
-                        info "daemon started (pid $!); logs at: auspexai-worker logs -f"
-                    fi
+                    start_worker_service
                     ;;
             esac
         fi
