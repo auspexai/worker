@@ -71,8 +71,11 @@ class WorkerConfig:
     # §41(a): [sandbox] policy = permissive | strict. STRICT replaces the host-fs
     # --dev-bind / / with narrow read-only binds + namespace isolation, so real
     # tenant code can't reach the keystore / $HOME / cross-tenant data. Default
-    # permissive (the Phase-1 trust model); flip to strict per-worker.
-    sandbox_policy: str = "permissive"
+    # STRICT (2026-06-27): a volunteer's worker isolates from the host by default —
+    # it can't see the host filesystem or network. STRICT fails closed if its deps
+    # (bubblewrap + libseccomp) are missing; the installer provides them. A
+    # trusted-host operator may set permissive.
+    sandbox_policy: str = "strict"
     # Maximum wall-clock seconds a runner subprocess can take. None = no
     # timeout (Phase 1 synthetic-tenant work is bounded by trivial logic).
     runner_timeout_seconds: float | None = None
@@ -216,7 +219,7 @@ class WorkerConfig:
             "declared_gpu_amd": None,
             "declared_gpu_amd_model": None,
             "sandbox_use_bubblewrap": True,
-            "sandbox_policy": "permissive",
+            "sandbox_policy": "strict",
             "runner_timeout_seconds": None,
             "sandbox_resource_limits": True,
             "sandbox_memory_max_mb": 4096,

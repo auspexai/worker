@@ -23,6 +23,12 @@ Type=simple
 ExecStart=/opt/auspexai-worker/bin/auspexai-worker daemon
 Restart=on-failure
 RestartSec=10
+; Low-priority scheduling — the worker runs in the volunteer's SPARE capacity and
+; yields to their own foreground work, rather than competing at normal priority.
+; Nice + a low cgroup CPU weight + the idle I/O class get out of the way under load.
+Nice=19
+CPUWeight=20
+IOSchedulingClass=idle
 ; Hardening per §5.17 — applied at the daemon (trusted) tier. Phase 1
 ; permissive defaults; Phase 2 narrows further via config without
 ; altering the unit body.
