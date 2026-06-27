@@ -362,11 +362,15 @@ def _seatbelt_profile(config: SandboxConfig) -> str:
     and silently SIGKILL the runner when one is missed), so v1 trades full read-isolation
     for reliability while still protecting the integrity-critical assets. Tightening the
     read surface back to an allowlist is a tracked refinement."""
-    home = os.path.expanduser("~")
+    # Seatbelt matches on REAL paths: macOS /var, /tmp, /etc are symlinks into /private,
+    # so a rule written against the symlinked path never matches the resolved access and
+    # the op is denied. realpath() every path that goes into a path-specific rule.
+    home = os.path.realpath(os.path.expanduser("~"))
     # The signing key lives under the worker state dir — it MUST stay unreadable, or
     # tenant code could read it and forge receipts. Plus the obvious host secret stores.
-    state_dir = os.environ.get("AUSPEXAI_WORKER_STATE_DIR") or os.path.join(
-        home, ".local", "state", "auspexai-worker"
+    state_dir = os.path.realpath(
+        os.environ.get("AUSPEXAI_WORKER_STATE_DIR")
+        or os.path.join(home, ".local", "state", "auspexai-worker")
     )
     protected = [
         state_dir,
@@ -382,20 +386,23 @@ def _seatbelt_profile(config: SandboxConfig) -> str:
         "(allow process-exec*)",
         "(allow process-fork)",
         "(allow mach-lookup)",
+        # python/openssl probe these for hw crypto accel + page size; non-fatal if denied
+        # (software fallback) but allow them so the runner runs clean and fast.
+        "(allow sysctl-read)",
+        "(allow ipc-posix-shm-read-data)",
         "(allow file-read*)",
     ]
     # Later, more-specific rules win in Seatbelt — so these denials override the broad
     # read above for exactly the secret paths.
     lines += [f"(deny file-read* (subpath {_seatbelt_quote(p)}))" for p in protected]
+    workspace = os.path.realpath(config.workspace_path)
     lines.append(
-        f"(allow file-write* (subpath {_seatbelt_quote(config.workspace_path)}) "
-        '(literal "/dev/null"))'
+        f'(allow file-write* (subpath {_seatbelt_quote(workspace)}) (literal "/dev/null"))'
     )
     lines.append("(deny network*)")
     if config.inference_socket:
-        lines.append(
-            f"(allow network-outbound (literal {_seatbelt_quote(config.inference_socket)}))"
-        )
+        socket = os.path.realpath(config.inference_socket)
+        lines.append(f"(allow network-outbound (literal {_seatbelt_quote(socket)}))")
     return "\n".join(lines)
 
 
