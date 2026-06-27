@@ -44,6 +44,29 @@ class TestSandboxPolicy:
         with pytest.raises(ValueError, match="policy must be one of"):
             WorkerConfig.load(config_path=cfg_file, env={})
 
+    def test_non_linux_forces_passthrough_permissive(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """bubblewrap is Linux-only: on macOS/other, use_bubblewrap is forced off and the
+        policy pinned to permissive — even if the toml asks for strict bwrap — so the
+        worker never signs a strict containment it can't enforce."""
+        monkeypatch.setattr("auspexai_worker.config.sys.platform", "darwin")
+        cfg_file = tmp_path / "worker.toml"
+        _write(cfg_file, "[sandbox]\npolicy = 'strict'\nuse_bubblewrap = true\n")
+        cfg = WorkerConfig.load(config_path=cfg_file, env={})
+        assert cfg.sandbox_use_bubblewrap is False
+        assert cfg.sandbox_policy == "permissive"
+
+    def test_linux_honors_strict_bwrap(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("auspexai_worker.config.sys.platform", "linux")
+        cfg_file = tmp_path / "worker.toml"
+        _write(cfg_file, "[sandbox]\npolicy = 'strict'\nuse_bubblewrap = true\n")
+        cfg = WorkerConfig.load(config_path=cfg_file, env={})
+        assert cfg.sandbox_use_bubblewrap is True
+        assert cfg.sandbox_policy == "strict"
+
 
 class TestExecutorAutoAcquire:
     def test_defaults_off(self, tmp_path: Path) -> None:

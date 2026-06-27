@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -406,8 +407,19 @@ class WorkerConfig:
                 amd=_opt_bool(merged.get("declared_gpu_amd")),
                 amd_model=_opt_str(merged.get("declared_gpu_amd_model")),
             ),
-            sandbox_use_bubblewrap=bool(merged.get("sandbox_use_bubblewrap", True)),
-            sandbox_policy=_validate_sandbox_policy(merged.get("sandbox_policy", "permissive")),
+            # bubblewrap is Linux-only; on macOS/other it is forced OFF (passthrough),
+            # and since strict containment is impossible there the policy is pinned to
+            # permissive — the worker must never sign a strict containment it cannot
+            # actually enforce. (macOS strict via sandbox-exec is a separate, future
+            # capability.) On Linux both honor the config / the volunteer's choice.
+            sandbox_use_bubblewrap=(
+                bool(merged.get("sandbox_use_bubblewrap", True)) and sys.platform == "linux"
+            ),
+            sandbox_policy=(
+                _validate_sandbox_policy(merged.get("sandbox_policy", "permissive"))
+                if sys.platform == "linux"
+                else "permissive"
+            ),
             runner_timeout_seconds=_opt_float(merged.get("runner_timeout_seconds")),
             sandbox_resource_limits=bool(merged.get("sandbox_resource_limits", True)),
             sandbox_memory_max_mb=_opt_int(merged.get("sandbox_memory_max_mb")),
