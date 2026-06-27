@@ -382,7 +382,6 @@ def _seatbelt_profile(config: SandboxConfig) -> str:
         "(allow process-exec*)",
         "(allow process-fork)",
         "(allow mach-lookup)",
-        "(allow sysctl-read)",
         "(allow file-read*)",
     ]
     # Later, more-specific rules win in Seatbelt — so these denials override the broad
