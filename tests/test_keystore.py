@@ -14,6 +14,46 @@ from auspexai_worker.keystore import (
     default_keystore,
 )
 from auspexai_worker.keystore.base import pubkey_fingerprint, pubkey_hex
+from auspexai_worker.keystore.encrypted_file import _read_machine_id, _read_macos_host_uuid
+
+
+class TestHostId:
+    """The encrypted-file keystore binds to a host identifier: the Linux machine-id or
+    (macOS port) the hardware IOPlatformUUID via ioreg — readable by any user, no root,
+    no file to fake."""
+
+    _IOREG = (
+        '      "IOPlatformUUID" = "1A2B3C4D-5E6F-7A8B-9C0D-1E2F3A4B5C6D"\n'
+        '      "IOPlatformSerialNumber" = "C02ABCDEF"\n'
+    )
+
+    def test_macos_reads_ioplatform_uuid(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import subprocess as _sp
+
+        monkeypatch.setattr("auspexai_worker.keystore.encrypted_file.sys.platform", "darwin")
+        monkeypatch.setattr(
+            "auspexai_worker.keystore.encrypted_file.subprocess.run",
+            lambda *_a, **_k: _sp.CompletedProcess([], 0, stdout=self._IOREG, stderr=""),
+        )
+        assert _read_machine_id() == "1A2B3C4D-5E6F-7A8B-9C0D-1E2F3A4B5C6D"
+
+    def test_macos_unparseable_ioreg_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import subprocess as _sp
+
+        monkeypatch.setattr(
+            "auspexai_worker.keystore.encrypted_file.subprocess.run",
+            lambda *_a, **_k: _sp.CompletedProcess([], 0, stdout="no uuid here", stderr=""),
+        )
+        with pytest.raises(KeystoreError):
+            _read_macos_host_uuid()
+
+    def test_macos_ioreg_unavailable_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def boom(*_a, **_k):
+            raise FileNotFoundError("ioreg")
+
+        monkeypatch.setattr("auspexai_worker.keystore.encrypted_file.subprocess.run", boom)
+        with pytest.raises(KeystoreError):
+            _read_macos_host_uuid()
 
 
 class TestInMemoryKeystore:

@@ -21,7 +21,10 @@ File format: `magic(4) || version(1) || nonce(12) || ciphertext+tag`.
 from __future__ import annotations
 
 import os
+import re
 import secrets
+import subprocess
+import sys
 from pathlib import Path
 
 from cryptography.hazmat.primitives import hashes
@@ -38,17 +41,45 @@ _NONCE_LEN = 12
 _KDF_INFO = b"auspexai-worker-keystore-v0"
 
 
+def _read_macos_host_uuid() -> str:
+    """macOS host identifier: the hardware ``IOPlatformUUID`` — stable per machine,
+    the macOS analog of Linux's machine-id. Readable by any user via ``ioreg`` (no
+    root, no file to create), so it binds the keystore to this Mac without a sudo
+    step — the same host-fingerprint security property as the Linux path."""
+    try:
+        out = subprocess.run(
+            ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        ).stdout
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise KeystoreError(
+            f"could not read the macOS host UUID via `ioreg` ({exc}); the "
+            "encrypted-file keystore needs a host-specific identifier to bind to "
+            "this machine."
+        ) from exc
+    match = re.search(r'"IOPlatformUUID"\s*=\s*"([^"]+)"', out)
+    if not match or not match.group(1).strip():
+        raise KeystoreError(
+            "could not parse IOPlatformUUID from `ioreg` output; the encrypted-file "
+            "keystore needs a host-specific identifier to bind to this machine."
+        )
+    return match.group(1)
+
+
 def _read_machine_id() -> str:
-    """Read the host's machine-id. Linux only.
+    """Read the host's machine-id (Linux) or IOPlatformUUID (macOS) — the
+    host-specific entropy the encrypted-file keystore binds to.
 
     Raises:
-        KeystoreError: if neither standard path is present. Real Ubuntu /
-            Debian hosts always have one (created at first boot via
-            systemd-machine-id-setup). The failure surfaces on minimal
-            containers built without systemd ever running, and on some
-            stripped embedded distributions. The error message includes
-            the standard remediation.
+        KeystoreError: if no host identifier is available. On Linux this surfaces
+            only on minimal containers / dev images where systemd-machine-id-setup
+            hasn't run; the message includes the standard remediation.
     """
+    if sys.platform == "darwin":
+        return _read_macos_host_uuid()
     for path in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
         try:
             content = Path(path).read_text(encoding="ascii").strip()
