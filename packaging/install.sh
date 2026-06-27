@@ -156,7 +156,7 @@ install_ollama() {
     # 1) Install if absent. macOS: Homebrew (the ollama.com/install.sh is the LINUX
     #    installer — it half-installs the CLI then fails to launch a desktop app).
     if command -v ollama >/dev/null 2>&1; then
-        info "Ollama already installed ($(ollama --version 2>/dev/null || echo 'version unknown')) — skipping install"
+        info "Ollama already installed ($(ollama --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo 'version unknown')) — skipping install"
     else
         info "Installing Ollama …"
         if [ "$OS" = "Darwin" ]; then
@@ -182,7 +182,13 @@ install_ollama() {
     #    answers (covers an already-installed-but-stopped Ollama).
     if ! curl -fsS -m 3 http://127.0.0.1:11434/api/version >/dev/null 2>&1 && [ "$OS" = "Darwin" ]; then
         info "Starting Ollama …"
-        if ! brew services start ollama >/dev/null 2>&1; then
+        # Try, in order, whatever this Mac's Ollama supports: a brew-managed service,
+        # the desktop app, then a detached `ollama serve`.
+        if brew services start ollama >/dev/null 2>&1; then
+            :
+        elif open -a Ollama >/dev/null 2>&1; then
+            :
+        else
             nohup ollama serve >/dev/null 2>&1 &
         fi
     fi
