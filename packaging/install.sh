@@ -687,12 +687,8 @@ main() {
     # §41: ask the volunteer how to isolate tenant code (consent moment).
     local sandbox_policy
     sandbox_policy=$(resolve_sandbox_policy)
-    # macOS strict isn't available yet (no bubblewrap; sandbox-exec is coming).
-    # Fall back to permissive so the worker doesn't fail-closed and strand the host.
-    if [ "$OS" = "Darwin" ] && [ "$sandbox_policy" = "strict" ]; then
-        warn "macOS strict sandbox (sandbox-exec) isn't available yet — running PERMISSIVE for now."
-        sandbox_policy="permissive"
-    fi
+    # macOS strict is honored now (sandbox-exec / Seatbelt, worker >= v0.2.51) — the
+    # post-install self-test below validates it. Linux strict uses bubblewrap.
     info "Sandbox policy: ${sandbox_policy}"
 
     # M3: inference flavors can opt into on-demand model downloads (consent moment).
