@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 
 from auspexai_worker.capabilities import Capabilities
 from auspexai_worker.coordinator import CoordinatorClient, CoordinatorError
+from auspexai_worker.models import download_progress
 from auspexai_worker.state import WorkerSelfRepository
 
 logger = logging.getLogger(__name__)
@@ -102,9 +103,13 @@ class HeartbeatLoop:
         self._stats.ticks_attempted += 1
         try:
             capabilities = self._collect_capabilities().to_dict()
+            # D12 5c: in-flight model-download progress (bytes/total) so a queued
+            # researcher sees the pull advance. Empty → None (omit from the body).
+            downloads = download_progress.snapshot()
             status = self._coordinator.heartbeat(
                 worker_id=self._worker_id,
                 capabilities=capabilities,
+                model_downloads=downloads or None,
             )
             now = datetime.now(UTC)
             # Refresh the locally-cached trust_tier from the coordinator's

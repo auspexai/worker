@@ -350,12 +350,18 @@ class CoordinatorClient:
         *,
         worker_id: str,
         capabilities: dict[str, Any] | None = None,
+        model_downloads: dict[str, Any] | None = None,
     ) -> WorkerStatusResponse:
         """POST /api/v0/workers/{worker_id}/heartbeat. Worker-credentialed.
 
         When `capabilities` is None, the coordinator advances last_heartbeat_at
         without rewriting the stored capabilities. Pass a dict on every tick
         if you want capabilities to stay current.
+
+        `model_downloads` (D12 5c) carries in-flight model-pull progress —
+        `{model_id: {bytes_downloaded, total_bytes}}` — so the coordinator can
+        surface a download % to a queued researcher. Omitted when nothing is
+        downloading.
         """
         if self._signer is None:
             raise CoordinatorError(
@@ -364,6 +370,8 @@ class CoordinatorClient:
         body: dict[str, Any] = {}
         if capabilities is not None:
             body["capabilities"] = capabilities
+        if model_downloads is not None:
+            body["model_downloads"] = model_downloads
         response = self._signed_request(
             method="POST",
             path=f"/api/v0/workers/{worker_id}/heartbeat",

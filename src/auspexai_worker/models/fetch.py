@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Protocol
 
 from auspexai_worker.models.catalog import ModelCatalogEntry
+from auspexai_worker.models.download_progress import DownloadProgressPoller
 from auspexai_worker.models.recommend import WorkerResources
 from auspexai_worker.models.store import ModelStore
 
@@ -153,7 +154,8 @@ def pull_quant(quant, store: ModelStore, fetcher, *, disk_free_bytes: int | None
         shutil.rmtree(staging)
     staging.mkdir(parents=True)
     try:
-        fetcher.fetch_file(quant.repo, quant.filename, staging)
+        with DownloadProgressPoller(quant.model_id, staging, getattr(quant, "size_bytes", None)):
+            fetcher.fetch_file(quant.repo, quant.filename, staging)
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
         raise
@@ -161,6 +163,19 @@ def pull_quant(quant, store: ModelStore, fetcher, *, disk_free_bytes: int | None
         shutil.rmtree(dest)
     staging.rename(dest)
     return dest
+
+
+def _hf_total_bytes(hf_repo: str, hf_filename: str) -> int | None:
+    """Best-effort total size of an HF file, for a download % (D12 5c). None on
+    any failure — the poller still reports bytes-downloaded; only the % is lost.
+    Never raises into the pull path."""
+    try:
+        from huggingface_hub import get_hf_file_metadata, hf_hub_url
+
+        meta = get_hf_file_metadata(hf_hub_url(repo_id=hf_repo, filename=hf_filename))
+        return int(meta.size) if getattr(meta, "size", None) else None
+    except Exception:
+        return None
 
 
 def _free_bytes_for(path: Path) -> int:
@@ -255,7 +270,8 @@ def pull_from_coords(
             shutil.rmtree(staging)
         staging.mkdir(parents=True)
         try:
-            fetcher.fetch_file(hf_repo, hf_filename, staging)
+            with DownloadProgressPoller(model_id, staging, _hf_total_bytes(hf_repo, hf_filename)):
+                fetcher.fetch_file(hf_repo, hf_filename, staging)
         except Exception as exc:
             shutil.rmtree(staging, ignore_errors=True)
             raise ModelFetchError(
