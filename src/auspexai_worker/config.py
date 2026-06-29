@@ -133,6 +133,12 @@ class WorkerConfig:
     # None = Ollama default (~5m). "0" = unload-always (Sentinel's posture for
     # reload/wedging stability); "30m"/"24h" = pin warm (memory for latency).
     inference_keep_alive: str | None = None
+    # The `ollama` CLI path used for model creation. None ⇒ auto-resolve (PATH,
+    # then well-known install locations: Homebrew, the macOS app bundle, …). Set
+    # this only to override a non-standard install. The auto-resolve is what makes
+    # a macOS worker serve under launchd's minimal PATH without hand-editing the
+    # launch agent (otherwise `ollama create` fails "No such file or directory").
+    inference_ollama_bin: str | None = None
     # NB: per-tenant §5.14 consent (allow/deny lists) is owned by the DB-backed
     # TenantListRepository + the `auspexai-worker tenant` CLI, enforced at the
     # poller's accept-time gate — NOT duplicated here as config.
@@ -333,6 +339,8 @@ class WorkerConfig:
                 merged["inference_ollama_url"] = inference_block["ollama_url"]
             if "keep_alive" in inference_block:
                 merged["inference_keep_alive"] = inference_block["keep_alive"]
+            if "ollama_bin" in inference_block:
+                merged["inference_ollama_bin"] = inference_block["ollama_bin"]
             dashboard_block = data.get("dashboard") or {}
             if "enabled" in dashboard_block:
                 merged["dashboard_enabled"] = dashboard_block["enabled"]

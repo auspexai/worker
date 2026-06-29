@@ -16,6 +16,8 @@ near-mechanically per the W-S design).
 from __future__ import annotations
 
 import logging
+import os
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, Protocol
@@ -31,6 +33,43 @@ DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
 # just the per-HTTP-call ceiling under it.
 CHAT_TIMEOUT_SECONDS = 600.0
 CREATE_TIMEOUT_SECONDS = 600.0
+
+# Well-known `ollama` CLI install locations, searched when the binary is not on
+# PATH. macOS launchd (and the strict sandbox) hand the worker daemon a minimal
+# PATH (/usr/bin:/bin:/usr/sbin:/sbin) that omits Homebrew + the desktop-app
+# bundle — so a bare `ollama` is `[Errno 2] No such file or directory` at
+# create-time even though the HTTP server (which create-time provenance and the
+# capability probe both reach) is perfectly healthy. That exact split stranded
+# the first macOS worker: it advertised the model off the HTTP probe, then
+# refused every matched unit because `ollama create` couldn't find the binary.
+_OLLAMA_FALLBACK_PATHS: tuple[str, ...] = (
+    "/opt/homebrew/bin/ollama",  # macOS Apple-Silicon Homebrew
+    "/usr/local/bin/ollama",  # macOS Intel Homebrew / Linux install.sh
+    "/Applications/Ollama.app/Contents/Resources/ollama",  # macOS desktop-app bundle
+    "/usr/bin/ollama",  # Linux distro packages
+    os.path.expanduser("~/.local/bin/ollama"),  # user-local install
+)
+
+
+def resolve_ollama_bin(explicit: str | None = None) -> str:
+    """Resolve the `ollama` CLI to a concrete path for the create-time subprocess.
+
+    Order: an explicit operator override (`[inference] ollama_bin`) wins as-is;
+    otherwise PATH (`shutil.which`); otherwise the well-known install locations
+    above. Falls back to the bare name `"ollama"` so a genuinely-absent install
+    still produces a legible error. This is what lets a macOS worker whose
+    `ollama` lives in /opt/homebrew/bin work under launchd's minimal PATH without
+    the operator hand-editing their launch agent.
+    """
+    if explicit:
+        return explicit
+    found = shutil.which("ollama")
+    if found:
+        return found
+    for candidate in _OLLAMA_FALLBACK_PATHS:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return "ollama"
 
 
 class BackendError(Exception):
@@ -65,13 +104,15 @@ class OllamaBackend:
         self,
         base_url: str = DEFAULT_OLLAMA_URL,
         *,
-        ollama_bin: str = "ollama",
+        ollama_bin: str | None = None,
         cli_runner=subprocess.run,
         transport: httpx.BaseTransport | None = None,
         keep_alive: str | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
-        self._ollama_bin = ollama_bin
+        # Resolve to a concrete path so create-time works under a minimal PATH
+        # (macOS launchd). An explicit override is honored as-is; None auto-resolves.
+        self._ollama_bin = resolve_ollama_bin(ollama_bin)
         self._cli_runner = cli_runner
         self._transport = transport
         # §9 #46 serving policy: how long Ollama keeps the model loaded after
@@ -110,6 +151,22 @@ class OllamaBackend:
             return True
         except BackendError:
             return False
+
+    def cli_available(self) -> bool:
+        """Whether the `ollama` CLI (needed by create_model) actually resolves.
+
+        Distinct from is_healthy() (the HTTP server): a worker can have a healthy
+        server but an unresolvable CLI — the macOS launchd PATH gap. The daemon
+        checks this at start so it can refuse to advertise inference rather than
+        accept-then-refuse every matched unit."""
+        if os.path.isabs(self._ollama_bin):
+            return os.path.isfile(self._ollama_bin) and os.access(self._ollama_bin, os.X_OK)
+        return shutil.which(self._ollama_bin) is not None
+
+    @property
+    def ollama_bin(self) -> str:
+        """The resolved CLI path (for startup diagnostics)."""
+        return self._ollama_bin
 
     def version(self) -> str | None:
         """The serving Ollama's version (GET /api/version), or None when

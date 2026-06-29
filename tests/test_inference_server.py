@@ -11,7 +11,7 @@ from typing import Any
 import httpx
 import pytest
 
-from auspexai_worker.inference.backend import BackendError, OllamaBackend
+from auspexai_worker.inference.backend import BackendError, OllamaBackend, resolve_ollama_bin
 from auspexai_worker.inference.server import ModelServeError, ModelServer, backend_handle
 from auspexai_worker.models.store import ModelStore
 
@@ -163,9 +163,49 @@ def test_ollama_create_model_via_cli(tmp_path: Path):
         assert Path(argv[4]).read_text().startswith("FROM ")
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
-    backend = OllamaBackend(cli_runner=fake_run)
+    # Pin the bin explicitly so the command structure is host-independent
+    # (auto-resolve would pick an absolute path on a host with ollama installed).
+    backend = OllamaBackend(cli_runner=fake_run, ollama_bin="ollama")
     backend.create_model("auspex-m", "FROM /store/m/w.gguf\nPARAMETER temperature 0\n")
     assert calls[0][:3] == ["ollama", "create", "auspex-m"]
+
+
+def test_resolve_ollama_bin_explicit_override_wins(monkeypatch):
+    # An explicit path is honored as-is — never re-searched.
+    monkeypatch.setattr("shutil.which", lambda _: "/somewhere/else/ollama")
+    assert resolve_ollama_bin("/custom/ollama") == "/custom/ollama"
+
+
+def test_resolve_ollama_bin_prefers_path(monkeypatch):
+    monkeypatch.setattr(
+        "shutil.which", lambda name: "/usr/local/bin/ollama" if name == "ollama" else None
+    )
+    assert resolve_ollama_bin(None) == "/usr/local/bin/ollama"
+
+
+def test_resolve_ollama_bin_falls_back_to_known_location(monkeypatch):
+    # PATH miss (the macOS launchd case) → search well-known install locations.
+    monkeypatch.setattr("shutil.which", lambda _: None)
+    brew = "/opt/homebrew/bin/ollama"
+    monkeypatch.setattr("os.path.isfile", lambda p: p == brew)
+    monkeypatch.setattr("os.access", lambda p, _mode: p == brew)
+    assert resolve_ollama_bin(None) == brew
+
+
+def test_resolve_ollama_bin_last_resort_bare_name(monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda _: None)
+    monkeypatch.setattr("os.path.isfile", lambda _p: False)
+    assert resolve_ollama_bin(None) == "ollama"
+
+
+def test_cli_available_reflects_resolution(monkeypatch):
+    brew = "/opt/homebrew/bin/ollama"
+    monkeypatch.setattr("shutil.which", lambda _: None)
+    monkeypatch.setattr("os.path.isfile", lambda p: p == brew)
+    monkeypatch.setattr("os.access", lambda p, _mode: p == brew)
+    assert OllamaBackend(ollama_bin=brew).cli_available() is True
+    # An unresolvable bare name (PATH miss) → not available.
+    assert OllamaBackend(ollama_bin="ollama").cli_available() is False
 
 
 def test_ollama_create_model_failure_raises():

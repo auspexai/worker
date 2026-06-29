@@ -928,12 +928,27 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
             from .inference import ModelServer, OllamaBackend, open_unit_session
 
             _inference_backend = OllamaBackend(
-                config.inference_ollama_url, keep_alive=config.inference_keep_alive
+                config.inference_ollama_url,
+                ollama_bin=config.inference_ollama_bin,
+                keep_alive=config.inference_keep_alive,
             )
             model_server = ModelServer(ModelStore(config.models_store_path), _inference_backend)
             # §9 #46 determinism provenance: probe the serving Ollama's version
             # ONCE at daemon start (no per-tick HTTP); declared in heartbeats.
             _ollama_version = _inference_backend.version()
+            # Dog-food guard: the HTTP server can be healthy while the `ollama`
+            # CLI (which create_model shells out to) is unresolvable — the macOS
+            # launchd minimal-PATH gap. Without this the worker advertises models
+            # off the HTTP probe and then refuses EVERY matched unit. Surface it
+            # loudly at start, with the remediation, instead of silently looping.
+            if _inference_backend.is_healthy() and not _inference_backend.cli_available():
+                logging.getLogger(__name__).error(
+                    "inference: Ollama HTTP server is reachable but the `ollama` CLI "
+                    "could not be found (searched PATH + standard install locations). "
+                    "Model creation will fail and every inference unit will be refused. "
+                    "Set [inference] ollama_bin to your ollama binary's absolute path "
+                    "(e.g. /opt/homebrew/bin/ollama on Apple Silicon)."
+                )
 
             def open_inference_session(model_id: str, socket_dir):
                 served = model_server.serve(model_id)
