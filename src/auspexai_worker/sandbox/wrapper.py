@@ -396,6 +396,13 @@ def _seatbelt_profile(config: SandboxConfig) -> str:
     # read above for exactly the secret paths.
     lines += [f"(deny file-read* (subpath {_seatbelt_quote(p)}))" for p in protected]
     workspace = os.path.realpath(config.workspace_path)
+    # The per-unit workspace lives UNDER the protected state_dir
+    # (.local/state/auspexai-worker/runs/<unit>), so the deny above SHADOWS it —
+    # the executor could not read its own --input (EPERM on exec_input.json).
+    # Re-allow reads AND writes for exactly the workspace: it comes after the
+    # deny and is a deeper subpath, so last-match-wins grants the workspace while
+    # the rest of state_dir (the signing key) stays unreadable.
+    lines.append(f"(allow file-read* (subpath {_seatbelt_quote(workspace)}))")
     lines.append(
         f'(allow file-write* (subpath {_seatbelt_quote(workspace)}) (literal "/dev/null"))'
     )

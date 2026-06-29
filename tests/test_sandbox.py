@@ -117,6 +117,35 @@ class TestSeatbelt:
         assert "auspexai-worker/work/u-1" in profile  # workspace = sole writable path
         assert "broker.sock" in profile  # the broker socket is the only allowed net-out
 
+    def test_macos_strict_workspace_under_state_dir_is_readable(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """Regression: the per-unit workspace lives UNDER the protected state_dir
+        (.local/state/auspexai-worker/runs/<unit>). The keystore deny must NOT
+        shadow the executor reading its own --input — last-match-wins requires the
+        workspace read-allow to come AFTER the state_dir deny (the EPERM bug)."""
+        import os
+
+        monkeypatch.setattr("auspexai_worker.sandbox.wrapper.sys.platform", "darwin")
+        state_dir = os.path.realpath(str(tmp_path / "state" / "auspexai-worker"))
+        workspace = os.path.join(state_dir, "runs", "u-1")
+        os.makedirs(workspace, exist_ok=True)
+        monkeypatch.setenv("AUSPEXAI_WORKER_STATE_DIR", state_dir)
+
+        profile = build_argv(
+            self._cfg(workspace_path=workspace, output_path=os.path.join(workspace, "output.json"))
+        )[2]
+        lines = profile.splitlines()
+        deny_i = next(
+            i for i, ln in enumerate(lines) if ln.startswith("(deny file-read*") and state_dir in ln
+        )
+        allow_i = next(
+            i
+            for i, ln in enumerate(lines)
+            if ln.startswith("(allow file-read* (subpath") and workspace in ln
+        )
+        assert deny_i < allow_i  # workspace read re-permitted AFTER the keystore deny
+
     def test_macos_permissive_is_passthrough(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("auspexai_worker.sandbox.wrapper.sys.platform", "darwin")
         argv = build_argv(self._cfg(policy=SandboxPolicy.PERMISSIVE))
