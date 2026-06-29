@@ -80,3 +80,40 @@ class TestRunnerErrors:
         body = json.loads(output_path.read_text())
         assert body["exit_code"] != 0
         assert "error" in body["payload"]
+
+
+class TestExecutorProgramResolution:
+    """The runner resolves the executor's program so it runs under macOS
+    launchd's minimal PATH (the `python` FileNotFoundError class of bug)."""
+
+    def test_bare_python_resolves_to_runner_interpreter(self) -> None:
+        from auspexai_worker.runner.main import _resolve_program
+
+        # macOS has no bare `python`; map both bare names to the runner's own
+        # interpreter, which is always present and carries the SDK.
+        assert _resolve_program("python") == sys.executable
+        assert _resolve_program("python3") == sys.executable
+
+    def test_absolute_path_passes_through(self) -> None:
+        from auspexai_worker.runner.main import _resolve_program
+
+        assert _resolve_program("/opt/custom/python") == "/opt/custom/python"
+
+    def test_other_bare_name_resolved_via_augmented_path(self, monkeypatch) -> None:
+        from auspexai_worker.runner.main import _resolve_program
+
+        monkeypatch.setattr("shutil.which", lambda name, path=None: "/opt/homebrew/bin/deno")
+        assert _resolve_program("deno") == "/opt/homebrew/bin/deno"
+
+    def test_unresolvable_name_falls_back_unchanged(self, monkeypatch) -> None:
+        from auspexai_worker.runner.main import _resolve_program
+
+        monkeypatch.setattr("shutil.which", lambda name, path=None: None)
+        assert _resolve_program("nope") == "nope"
+
+    def test_augmented_path_includes_interpreter_dir(self) -> None:
+        from auspexai_worker.runner.main import _augmented_path
+
+        parts = _augmented_path().split(":")
+        assert str(Path(sys.executable).parent) in parts
+        assert "/opt/homebrew/bin" in parts

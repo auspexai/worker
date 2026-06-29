@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -56,6 +57,37 @@ from .executor import SyntheticExecutor
 # Default advisory timeout (seconds) handed to the executor via --timeout. The
 # daemon still enforces the hard wall-clock kill on the runner subprocess.
 DEFAULT_EXECUTOR_TIMEOUT = 600
+
+
+def _augmented_path() -> str:
+    """A PATH that resolves bare commands under a minimal launchd environment
+    (macOS hands the daemon /usr/bin:/bin:/usr/sbin:/sbin): the running
+    interpreter's own dir + the standard bin dirs, ahead of the inherited PATH."""
+    extra = [
+        os.path.dirname(sys.executable),
+        "/opt/homebrew/bin",  # macOS Apple-Silicon Homebrew
+        "/usr/local/bin",  # macOS Intel Homebrew / Linux
+        "/usr/bin",
+        "/bin",
+    ]
+    return os.pathsep.join([*extra, os.environ.get("PATH", "")])
+
+
+def _resolve_program(program: str) -> str:
+    """Resolve the executor command's program so it runs under a minimal PATH.
+
+    A bare `python`/`python3` becomes the runner's OWN interpreter
+    (`sys.executable`) — it is always present, the right version, and carries the
+    SDK the executor imports; macOS has no bare `python`, only `python3` off the
+    launchd PATH (the symptom: runner FileNotFoundError 'python'). On Linux the
+    daemon's python and a bare `python` are the same interpreter, so this is a
+    no-op there. Other bare names resolve via the augmented PATH; absolute paths
+    pass through untouched."""
+    if os.path.isabs(program):
+        return program
+    if program in ("python", "python3"):
+        return sys.executable
+    return shutil.which(program, path=_augmented_path()) or program
 
 
 def main() -> int:
@@ -158,8 +190,11 @@ def _run_real_executor(envelope: dict[str, Any], output_path: str) -> int:
         models_path.mkdir(exist_ok=True)
 
     timeout = os.environ.get("AUSPEXAI_EXECUTOR_TIMEOUT")
+    # Resolve the program so it runs under macOS launchd's minimal PATH (a bare
+    # `python` -> the runner's own interpreter; see _resolve_program).
     argv = [
-        *command,
+        _resolve_program(command[0]),
+        *command[1:],
         "--input",
         str(input_path),
         "--output",
@@ -170,12 +205,17 @@ def _run_real_executor(envelope: dict[str, Any], output_path: str) -> int:
         timeout or str(DEFAULT_EXECUTOR_TIMEOUT),
     ]
 
+    # Hand the executor an augmented PATH too, so any further bare-command lookups
+    # it makes resolve under launchd's minimal environment.
+    exec_env = dict(os.environ)
+    exec_env["PATH"] = _augmented_path()
     proc = subprocess.run(
         argv,
         cwd=package_dir,
         capture_output=True,
         text=True,
         check=False,
+        env=exec_env,
     )
     if proc.returncode != 0:
         # Tenant-code (1) / harness-IO (2) failure — surface stderr + fail so
