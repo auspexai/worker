@@ -6,10 +6,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from datetime import UTC, datetime
+
 from click.testing import CliRunner
 
 import auspexai_worker.service as svc
 from auspexai_worker.cli import cli
+from auspexai_worker.state import Database, MigrationRunner, WorkerSelfRepository
 
 
 def _env(tmp_path: Path) -> dict[str, str]:
@@ -21,8 +24,29 @@ def _env(tmp_path: Path) -> dict[str, str]:
 
 def _config(tmp_path: Path, body: str = "") -> Path:
     p = tmp_path / "worker.toml"
-    p.write_text(body, encoding="utf-8")
+    # GUARD (the 2026-07-03 lesson): the default coordinator_url is the PUBLIC
+    # network — an un-mocked enroll from a test reaches production (it happened;
+    # 12 phantom T0 workers, retired same day). Every setup test pins an
+    # unroutable coordinator so any accidental network call fails fast instead.
+    p.write_text('[coordinator]\nurl = "http://127.0.0.1:9"\n' + body, encoding="utf-8")
     return p
+
+
+def _pre_enroll(tmp_path: Path) -> None:
+    """Seed an enrollment row so `setup` takes the already-enrolled branch —
+    the bootstrap flow itself is covered by test_bootstrap.py with a mocked
+    transport; these tests must never enroll for real."""
+    state = tmp_path / "state"
+    state.mkdir(parents=True, exist_ok=True)
+    db = Database(state / "worker.db")
+    MigrationRunner(db).apply_all()
+    WorkerSelfRepository(db).insert(
+        worker_id="wkr-setup-test",
+        trust_tier=0,
+        pubkey_hex="a" * 64,
+        enrolled_at=datetime(2026, 7, 3, tzinfo=UTC),
+    )
+    db.close()
 
 
 # ── service unit rendering ────────────────────────────────────────────────────
@@ -100,6 +124,7 @@ def test_setup_lean_noninteractive_records_and_installs_service(tmp_path: Path, 
         lambda start=True, platform=None: installed.update(start=start) or ["service ok"],
     )
     cfg = _config(tmp_path)
+    _pre_enroll(tmp_path)
     r = CliRunner().invoke(
         cli,
         [
@@ -121,9 +146,9 @@ def test_setup_lean_noninteractive_records_and_installs_service(tmp_path: Path, 
     assert 'flavor = "lean"' in body
     assert 'backend = "none"' in body
     assert 'policy = "permissive"' in body
-    # --yes drove the whole chain: enrolled (bootstrap), then the service
-    # install (only-after-enroll ordering), then the completion footer.
-    assert "enrolled:" in r.output
+    # --yes drove the whole chain: the pre-seeded enrollment is detected, then
+    # the service install (only-after-enroll ordering), then the footer.
+    assert "Already enrolled" in r.output
     assert installed.get("start") is True
     assert "Setup complete" in r.output
 
@@ -140,6 +165,7 @@ def test_setup_inference_flags_skip_prompts_and_warn_on_missing_ollama(tmp_path:
         lambda *a, **k: type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
     )
     cfg = _config(tmp_path)
+    _pre_enroll(tmp_path)
     r = CliRunner().invoke(
         cli,
         [
