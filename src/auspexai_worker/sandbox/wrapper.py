@@ -359,9 +359,14 @@ def _seatbelt_profile(config: SandboxConfig) -> str:
 
     Reads are otherwise BROAD. A tight read-allowlist proved brittle across macOS python
     layouts (framework dylibs, the dyld shared cache, Homebrew cellars differ per host
-    and silently SIGKILL the runner when one is missed), so v1 trades full read-isolation
-    for reliability while still protecting the integrity-critical assets. Tightening the
-    read surface back to an allowlist is a tracked refinement."""
+    and silently SIGKILL the runner when one is missed — the v1 lesson), so the profile
+    stays deny-list-shaped: broad reads MINUS an explicit protected set. B8 v2 (2026-07-03)
+    broadens that protected set with the privacy-sensitive surface — user content dirs,
+    mail/messages/browser data, and common credential dotfiles, plus the RESEARCHER
+    tenant key (a host that is both worker and researcher must not expose it to tenant
+    code). Deny-additions cannot recreate the v1 brittleness: nothing the runner or a
+    legitimate executor needs lives in these paths, and `sandbox self-test` guards the
+    launch path on install."""
     # Seatbelt matches on REAL paths: macOS /var, /tmp, /etc are symlinks into /private,
     # so a rule written against the symlinked path never matches the resolved access and
     # the op is denied. realpath() every path that goes into a path-specific rule.
@@ -374,11 +379,35 @@ def _seatbelt_profile(config: SandboxConfig) -> str:
     )
     protected = [
         state_dir,
+        # integrity/credential stores (v1 set)
         os.path.join(home, ".ssh"),
         os.path.join(home, ".aws"),
         os.path.join(home, ".gnupg"),
         os.path.join(home, ".config", "gcloud"),
         os.path.join(home, "Library", "Keychains"),
+        # B8 v2 — the researcher's tenant signing key (worker+researcher hosts)
+        os.path.join(home, ".config", "auspexai-tenant"),
+        # B8 v2 — further credential stores
+        os.path.join(home, ".kube"),
+        os.path.join(home, ".docker"),
+        # B8 v2 — user content (privacy, not integrity)
+        os.path.join(home, "Documents"),
+        os.path.join(home, "Desktop"),
+        os.path.join(home, "Downloads"),
+        os.path.join(home, "Pictures"),
+        os.path.join(home, "Movies"),
+        os.path.join(home, "Music"),
+        # B8 v2 — mail / messages / browser data
+        os.path.join(home, "Library", "Mail"),
+        os.path.join(home, "Library", "Messages"),
+        os.path.join(home, "Library", "Safari"),
+        os.path.join(home, "Library", "Cookies"),
+    ]
+    # Credential FILES (literal matches, not subpaths).
+    protected_files = [
+        os.path.join(home, ".netrc"),
+        os.path.join(home, ".npmrc"),
+        os.path.join(home, ".pypirc"),
     ]
     lines = [
         "(version 1)",
@@ -395,6 +424,7 @@ def _seatbelt_profile(config: SandboxConfig) -> str:
     # Later, more-specific rules win in Seatbelt — so these denials override the broad
     # read above for exactly the secret paths.
     lines += [f"(deny file-read* (subpath {_seatbelt_quote(p)}))" for p in protected]
+    lines += [f"(deny file-read* (literal {_seatbelt_quote(p)}))" for p in protected_files]
     workspace = os.path.realpath(config.workspace_path)
     # The per-unit workspace lives UNDER the protected state_dir
     # (.local/state/auspexai-worker/runs/<unit>), so the deny above SHADOWS it —

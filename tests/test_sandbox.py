@@ -146,6 +146,37 @@ class TestSeatbelt:
         )
         assert deny_i < allow_i  # workspace read re-permitted AFTER the keystore deny
 
+    def test_macos_strict_v2_privacy_deny_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """B8 v2: the deny-list covers the privacy surface — user content dirs,
+        mail/messages/browser data, credential dotfiles, and the RESEARCHER
+        tenant key (a worker+researcher host must not expose it to tenant
+        code). Deny-additions, never allowlist-tightening (the v1 lesson)."""
+        monkeypatch.setattr("auspexai_worker.sandbox.wrapper.sys.platform", "darwin")
+        profile = build_argv(self._cfg())[2]
+        for fragment in (
+            ".config/auspexai-tenant",
+            ".kube",
+            ".docker",
+            "Documents",
+            "Desktop",
+            "Downloads",
+            "Library/Mail",
+            "Library/Messages",
+            "Library/Safari",
+            "Library/Cookies",
+        ):
+            assert any(
+                ln.startswith("(deny file-read* (subpath") and fragment in ln
+                for ln in profile.splitlines()
+            ), fragment
+        for fragment in (".netrc", ".npmrc", ".pypirc"):
+            assert any(
+                ln.startswith("(deny file-read* (literal") and fragment in ln
+                for ln in profile.splitlines()
+            ), fragment
+        # The broad read + workspace grant survive (nothing the runner needs is denied).
+        assert "(allow file-read*)" in profile
+
     def test_macos_permissive_is_passthrough(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("auspexai_worker.sandbox.wrapper.sys.platform", "darwin")
         argv = build_argv(self._cfg(policy=SandboxPolicy.PERMISSIVE))
