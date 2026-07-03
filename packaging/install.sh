@@ -1077,101 +1077,128 @@ APPARMOR
         apply_flavor "$flavor"
     fi
 
-    # §41: record the volunteer's sandbox-policy choice — surgical worker.toml
-    # edit via the worker CLI, like the flavor. Guarded for binaries that
-    # predate `sandbox set-policy` (< v0.2.16).
+    # ── Guided setup — PRODUCT-owned (onboarding inc 8) ──────────────────
+    # `auspexai-worker setup` owns the guided flow (sandbox record + strict
+    # self-test + auto-acquire + enrollment + service + models); the installer
+    # passes its already-collected answers so nothing is asked twice. This is
+    # the curl ≡ pip parity seam: a pip user runs bare `auspexai-worker setup`
+    # and gets the identical flow (mirrors the researcher installer's
+    # `auspexai-dashboard service install` delegation).
     if [ -x "${INSTALL_PREFIX}/bin/auspexai-worker" ] \
-        && "${INSTALL_PREFIX}/bin/auspexai-worker" sandbox set-policy --help >/dev/null 2>&1; then
-        "${INSTALL_PREFIX}/bin/auspexai-worker" sandbox set-policy "$sandbox_policy" >/dev/null \
-            || warn "could not record [sandbox] policy in worker.toml"
-    fi
-
-    # macOS STRICT: validate the Seatbelt sandbox actually runs the runner BEFORE the
-    # daemon picks up work (the analog of the Linux bwrap-deps check), so a strict
-    # volunteer learns at install time, not at first unit. Guarded for binaries predating
-    # `sandbox self-test` (< v0.2.46). Non-fatal — a failure surfaces in the footer.
-    if [ "$OS" = "Darwin" ] && [ "$sandbox_policy" = "strict" ] \
-        && [ -x "${INSTALL_PREFIX}/bin/auspexai-worker" ] \
-        && "${INSTALL_PREFIX}/bin/auspexai-worker" sandbox self-test --help >/dev/null 2>&1; then
-        info "Validating the macOS strict sandbox (Seatbelt) …"
-        if ! "${INSTALL_PREFIX}/bin/auspexai-worker" sandbox self-test; then
-            flavor_issue "macOS STRICT sandbox self-test FAILED (see above) — the worker refuses work under strict until it's resolved. Run permissive meanwhile: auspexai-worker sandbox set-policy permissive"
+        && "${INSTALL_PREFIX}/bin/auspexai-worker" setup --help >/dev/null 2>&1; then
+        setup_args="--flavor $flavor --sandbox $sandbox_policy"
+        if [ -n "$auto_acquire" ]; then
+            setup_args="$setup_args --auto-acquire $([ "$auto_acquire" = "true" ] && echo on || echo off)"
         fi
-    fi
-
-    # M3: record the auto-acquire choice (inference flavors only) — surgical
-    # [executor] auto_acquire write via the CLI, touching only the flag, not the
-    # execution policy. Guarded for binaries predating `executor auto-acquire`
-    # (< v0.2.21); on older ones the volunteer can set it from the dashboard.
-    if [ -n "$auto_acquire" ] && [ -x "${INSTALL_PREFIX}/bin/auspexai-worker" ] \
-        && "${INSTALL_PREFIX}/bin/auspexai-worker" executor auto-acquire --help >/dev/null 2>&1; then
-        if "${INSTALL_PREFIX}/bin/auspexai-worker" executor auto-acquire \
-            "$([ "$auto_acquire" = "true" ] && echo on || echo off)" >/dev/null; then
-            info "Auto-acquire models: $([ "$auto_acquire" = "true" ] && echo "on (downloads on demand)" || echo "off (set-up models only)")"
+        if (exec </dev/tty) 2>/dev/null; then
+            # shellcheck disable=SC2086 — word-splitting the args is intended
+            "${INSTALL_PREFIX}/bin/auspexai-worker" setup $setup_args </dev/tty \
+                || flavor_issue "guided setup reported a problem — re-run anytime: auspexai-worker setup"
         else
-            warn "could not record [executor] auto_acquire in worker.toml"
+            # No tty: run setup non-interactively (enroll + service; models skipped).
+            # shellcheck disable=SC2086
+            "${INSTALL_PREFIX}/bin/auspexai-worker" setup $setup_args --yes --skip-models \
+                || flavor_issue "guided setup reported a problem — re-run anytime: auspexai-worker setup"
         fi
-    fi
+    else
+        # Legacy binary (< v0.2.58, e.g. a --version install): the pre-inc-8
+        # inline flow, unchanged.
+        # §41: record the volunteer's sandbox-policy choice — surgical worker.toml
+        # edit via the worker CLI, like the flavor. Guarded for binaries that
+        # predate `sandbox set-policy` (< v0.2.16).
+        if [ -x "${INSTALL_PREFIX}/bin/auspexai-worker" ] \
+            && "${INSTALL_PREFIX}/bin/auspexai-worker" sandbox set-policy --help >/dev/null 2>&1; then
+            "${INSTALL_PREFIX}/bin/auspexai-worker" sandbox set-policy "$sandbox_policy" >/dev/null \
+                || warn "could not record [sandbox] policy in worker.toml"
+        fi
 
-    # ── Bootstrap + start ───────────────────────────────────────────
+        # macOS STRICT: validate the Seatbelt sandbox actually runs the runner BEFORE the
+        # daemon picks up work (the analog of the Linux bwrap-deps check), so a strict
+        # volunteer learns at install time, not at first unit. Guarded for binaries predating
+        # `sandbox self-test` (< v0.2.46). Non-fatal — a failure surfaces in the footer.
+        if [ "$OS" = "Darwin" ] && [ "$sandbox_policy" = "strict" ] \
+            && [ -x "${INSTALL_PREFIX}/bin/auspexai-worker" ] \
+            && "${INSTALL_PREFIX}/bin/auspexai-worker" sandbox self-test --help >/dev/null 2>&1; then
+            info "Validating the macOS strict sandbox (Seatbelt) …"
+            if ! "${INSTALL_PREFIX}/bin/auspexai-worker" sandbox self-test; then
+                flavor_issue "macOS STRICT sandbox self-test FAILED (see above) — the worker refuses work under strict until it's resolved. Run permissive meanwhile: auspexai-worker sandbox set-policy permissive"
+            fi
+        fi
 
-    if [ -x "${INSTALL_PREFIX}/bin/auspexai-worker" ]; then
-        # Check if already enrolled
-        local enrolled
-        enrolled=$("${INSTALL_PREFIX}/bin/auspexai-worker" status 2>&1 | grep -c "worker-id:" || true)
+        # M3: record the auto-acquire choice (inference flavors only) — surgical
+        # [executor] auto_acquire write via the CLI, touching only the flag, not the
+        # execution policy. Guarded for binaries predating `executor auto-acquire`
+        # (< v0.2.21); on older ones the volunteer can set it from the dashboard.
+        if [ -n "$auto_acquire" ] && [ -x "${INSTALL_PREFIX}/bin/auspexai-worker" ] \
+            && "${INSTALL_PREFIX}/bin/auspexai-worker" executor auto-acquire --help >/dev/null 2>&1; then
+            if "${INSTALL_PREFIX}/bin/auspexai-worker" executor auto-acquire \
+                "$([ "$auto_acquire" = "true" ] && echo on || echo off)" >/dev/null; then
+                info "Auto-acquire models: $([ "$auto_acquire" = "true" ] && echo "on (downloads on demand)" || echo "off (set-up models only)")"
+            else
+                warn "could not record [executor] auto_acquire in worker.toml"
+            fi
+        fi
 
-        if [ "$enrolled" = "0" ]; then
+        # ── Bootstrap + start ───────────────────────────────────────────
+
+        if [ -x "${INSTALL_PREFIX}/bin/auspexai-worker" ]; then
+            # Check if already enrolled
+            local enrolled
+            enrolled=$("${INSTALL_PREFIX}/bin/auspexai-worker" status 2>&1 | grep -c "worker-id:" || true)
+
+            if [ "$enrolled" = "0" ]; then
+                echo ""
+                printf 'Bootstrap now? This generates a keypair and enrolls with the coordinator. [Y/n] '
+                read -r reply </dev/tty
+                case "$reply" in
+                    n|N|no|NO) ;;
+                    *)
+                        info "Bootstrapping …"
+                        "${INSTALL_PREFIX}/bin/auspexai-worker" bootstrap
+                        info "Starting service …"
+                        start_worker_service
+                        ;;
+                esac
+            else
+                info "Already enrolled — skipping bootstrap"
+                echo ""
+                printf 'Start the service now? [Y/n] '
+                read -r reply </dev/tty
+                case "$reply" in
+                    n|N|no|NO) ;;
+                    *)
+                        info "Starting service …"
+                        start_worker_service
+                        ;;
+                esac
+            fi
+        fi
+
+        # ── Offer model setup (BYOM onramp, W-M) ─────────────────────────
+        # Opt-in (default N) — never surprise a volunteer with multi-GB downloads.
+        # The base install is lean; pulling models needs the huggingface_hub extra,
+        # installed here only if the volunteer opts in.
+        if [ -x "${INSTALL_PREFIX}/bin/auspexai-worker" ]; then
             echo ""
-            printf 'Bootstrap now? This generates a keypair and enrolls with the coordinator. [Y/n] '
+            printf 'Set up inference models now? Downloads models that fit your hardware so this worker can run real experiments. [y/N] '
             read -r reply </dev/tty
             case "$reply" in
-                n|N|no|NO) ;;
-                *)
-                    info "Bootstrapping …"
-                    "${INSTALL_PREFIX}/bin/auspexai-worker" bootstrap
-                    info "Starting service …"
-                    start_worker_service
+                y|Y|yes|YES)
+                    if [ -x "${INSTALL_PREFIX}/bin/pip" ]; then
+                        info "Installing model-download support (huggingface_hub) …"
+                        $SUDO "${INSTALL_PREFIX}/bin/pip" install -q huggingface_hub \
+                            || warn "could not install huggingface_hub; \`model pull\` will be unavailable"
+                    else
+                        warn "pip not found in ${INSTALL_PREFIX}; install huggingface_hub manually for \`model pull\`"
+                    fi
+                    "${INSTALL_PREFIX}/bin/auspexai-worker" model setup </dev/tty || true
                     ;;
-            esac
-        else
-            info "Already enrolled — skipping bootstrap"
-            echo ""
-            printf 'Start the service now? [Y/n] '
-            read -r reply </dev/tty
-            case "$reply" in
-                n|N|no|NO) ;;
                 *)
-                    info "Starting service …"
-                    start_worker_service
+                    echo "    Skipped. Run \`auspexai-worker model recommend\` to see what fits,"
+                    echo "    then \`auspexai-worker model setup\` anytime."
                     ;;
             esac
         fi
-    fi
-
-    # ── Offer model setup (BYOM onramp, W-M) ─────────────────────────
-    # Opt-in (default N) — never surprise a volunteer with multi-GB downloads.
-    # The base install is lean; pulling models needs the huggingface_hub extra,
-    # installed here only if the volunteer opts in.
-    if [ -x "${INSTALL_PREFIX}/bin/auspexai-worker" ]; then
-        echo ""
-        printf 'Set up inference models now? Downloads models that fit your hardware so this worker can run real experiments. [y/N] '
-        read -r reply </dev/tty
-        case "$reply" in
-            y|Y|yes|YES)
-                if [ -x "${INSTALL_PREFIX}/bin/pip" ]; then
-                    info "Installing model-download support (huggingface_hub) …"
-                    $SUDO "${INSTALL_PREFIX}/bin/pip" install -q huggingface_hub \
-                        || warn "could not install huggingface_hub; \`model pull\` will be unavailable"
-                else
-                    warn "pip not found in ${INSTALL_PREFIX}; install huggingface_hub manually for \`model pull\`"
-                fi
-                "${INSTALL_PREFIX}/bin/auspexai-worker" model setup </dev/tty || true
-                ;;
-            *)
-                echo "    Skipped. Run \`auspexai-worker model recommend\` to see what fits,"
-                echo "    then \`auspexai-worker model setup\` anytime."
-                ;;
-        esac
     fi
 
     if [ "$OS" = "Darwin" ] && [ -d "/opt/auspexai-worker" ]; then

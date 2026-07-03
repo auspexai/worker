@@ -1491,6 +1491,228 @@ def sandbox_self_test() -> None:
     sys.exit(1)
 
 
+# ----------------------------------------------------------------------------
+# service + setup — "installer provisions, product onboards" (onboarding inc 8)
+# ----------------------------------------------------------------------------
+
+# Flavor metadata — the single product-side source the installer's bash tables
+# mirror (name → description, venv pip extras, [inference] backend, whether the
+# flavor needs a local Ollama).
+_FLAVORS: dict[str, tuple[str, str | None, str, bool]] = {
+    "lean": ("minimal worker — synthetic + staged work only (default)", None, "none", False),
+    "inference": (
+        "serves local models to experiments — needs Ollama + model tooling",
+        "huggingface_hub>=0.20",
+        "ollama",
+        True,
+    ),
+    "full": (
+        "everything: inference serving + all optional extras",
+        "huggingface_hub>=0.20",
+        "ollama",
+        True,
+    ),
+}
+
+
+@cli.group(help="Manage the persistent worker service (launchd / systemd --user).")
+def service() -> None:
+    """The same command the curl installer uses — a pip-installed worker reaches
+    the identical persistent setup ("installer provisions, product onboards")."""
+
+
+@service.command("install")
+@click.option("--start/--no-start", default=True, show_default=True, help="Start after install.")
+def service_install(start: bool) -> None:
+    """Write this environment's service unit and start it."""
+    from auspexai_worker import service as svc
+
+    for line in svc.install(start=start):
+        click.echo(line)
+
+
+@service.command("uninstall")
+def service_uninstall() -> None:
+    """Stop the service and remove the unit this tool manages."""
+    from auspexai_worker import service as svc
+
+    for line in svc.uninstall():
+        click.echo(line)
+
+
+@service.command("restart")
+def service_restart() -> None:
+    from auspexai_worker import service as svc
+
+    for line in svc.restart():
+        click.echo(line)
+
+
+@service.command("status")
+def service_status() -> None:
+    from auspexai_worker import service as svc
+
+    click.echo(svc.status())
+
+
+@cli.command("setup")
+@click.option(
+    "--flavor",
+    "flavor_name",
+    type=click.Choice(sorted(_FLAVORS)),
+    default=None,
+    help="Install flavor (skips the menu — the installer passes its choice).",
+)
+@click.option(
+    "--sandbox",
+    "sandbox_policy_opt",
+    type=click.Choice(["permissive", "strict"]),
+    default=None,
+    help="Tenant-code sandbox policy (skips the prompt).",
+)
+@click.option(
+    "--auto-acquire",
+    "auto_acquire_opt",
+    type=click.Choice(["on", "off"]),
+    default=None,
+    help="Pull missing required models on assignment (inference flavors).",
+)
+@click.option("--yes", "assume_yes", is_flag=True, help="Answer yes to enroll/service prompts.")
+@click.option("--skip-models", is_flag=True, help="Skip the model-setup offer.")
+@click.pass_context
+def setup(
+    ctx: click.Context,
+    flavor_name: str | None,
+    sandbox_policy_opt: str | None,
+    auto_acquire_opt: str | None,
+    assume_yes: bool,
+    skip_models: bool,
+) -> None:
+    """Guided worker setup — flavor, sandbox, enrollment, service, models.
+
+    The product-owned onboarding flow (inc 8): the curl installer calls THIS
+    after provisioning, and a plain `pip install auspexai-worker` user runs it
+    directly — one identical guided path for both onramps. Idempotent: re-run
+    anytime to change a choice. System packages (Ollama) are detected and
+    advised, never installed here — that stays the installer's job."""
+    import shutil as _shutil
+    import subprocess as _subprocess
+
+    # ── 1. flavor ────────────────────────────────────────────────────────────
+    recorded = getattr(ctx.obj["config"], "flavor", None)
+    if flavor_name is None:
+        click.echo("Install flavor:")
+        for i, (name, meta) in enumerate(sorted(_FLAVORS.items()), 1):
+            marker = "  (current)" if name == recorded else ""
+            click.echo(f"  {i}) {name:<10} {meta[0]}{marker}")
+        flavor_name = click.prompt(
+            "Flavor",
+            default=recorded or "lean",
+            type=click.Choice(sorted(_FLAVORS)),
+            show_choices=False,
+        )
+    desc, pip_extra, backend, needs_ollama = _FLAVORS[flavor_name]
+    click.echo(f"Applying flavor: {flavor_name} — {desc}")
+    if pip_extra:
+        click.echo(f"Installing flavor extras: {pip_extra} …")
+        proc = _subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-q", pip_extra],
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            click.echo(f"WARNING: could not install {pip_extra}: {proc.stderr.strip()}", err=True)
+    if needs_ollama and _shutil.which("ollama") is None:
+        click.echo(
+            "WARNING: this flavor serves models via Ollama, which isn't installed. "
+            "Install it (https://ollama.com/download, or re-run the curl installer "
+            "with this flavor) — serving stays unavailable until it's present.",
+            err=True,
+        )
+    ctx.invoke(inference_set_backend, backend=backend)
+    ctx.invoke(flavor_set, name=flavor_name)
+
+    # ── 2. sandbox (the consent moment for running other people's code) ──────
+    if sandbox_policy_opt is None:
+        current = getattr(ctx.obj["config"], "sandbox_policy", "permissive")
+        click.echo("")
+        click.echo("Sandbox policy for tenant code:")
+        click.echo("  permissive) standard process isolation (default)")
+        click.echo("  strict)     narrow filesystem, no network, namespace-isolated")
+        sandbox_policy_opt = click.prompt(
+            "Policy",
+            default=current or "permissive",
+            type=click.Choice(["permissive", "strict"]),
+            show_choices=False,
+        )
+    ctx.invoke(sandbox_set_policy, policy=sandbox_policy_opt)
+    if sandbox_policy_opt == "strict" and sys.platform == "darwin":
+        click.echo("Validating the macOS strict sandbox (Seatbelt) …")
+        try:
+            ctx.invoke(sandbox_self_test)
+        except SystemExit as exc:  # self-test exits non-zero on failure
+            if exc.code not in (0, None):
+                click.echo(
+                    "WARNING: strict self-test FAILED — the worker refuses work under "
+                    "strict until resolved. Meanwhile: auspexai-worker sandbox "
+                    "set-policy permissive",
+                    err=True,
+                )
+
+    # ── 3. auto-acquire (inference flavors) ──────────────────────────────────
+    if backend != "none":
+        if auto_acquire_opt is None:
+            auto_acquire_opt = (
+                "on"
+                if assume_yes
+                or click.confirm(
+                    "Auto-acquire models? (pull a missing required model on assignment)",
+                    default=True,
+                )
+                else "off"
+            )
+        ctx.invoke(executor_auto_acquire, setting=auto_acquire_opt)
+
+    # ── 4. enroll ─────────────────────────────────────────────────────────────
+    config: WorkerConfig = ctx.obj["config"]
+    db, repo = initialize_state(config)
+    try:
+        enrolled = repo.get() is not None
+    finally:
+        db.close()
+    if enrolled:
+        click.echo("Already enrolled — skipping bootstrap.")
+    elif assume_yes or click.confirm(
+        "Bootstrap now? Generates a keypair and enrolls with the coordinator.", default=True
+    ):
+        ctx.invoke(bootstrap, start=False)
+        enrolled = True
+
+    # ── 5. service ────────────────────────────────────────────────────────────
+    if enrolled and (
+        assume_yes or click.confirm("Install + start the worker service?", default=True)
+    ):
+        from auspexai_worker import service as svc
+
+        for line in svc.install(start=True):
+            click.echo(line)
+
+    # ── 6. models (opt-in — never surprise a volunteer with multi-GB pulls) ──
+    if backend != "none" and not skip_models:
+        if click.confirm(
+            "Set up inference models now? (downloads models that fit this host)",
+            default=False,
+        ):
+            ctx.invoke(model_setup, limit=10, yes=False)
+        else:
+            click.echo(
+                "Skipped. Run `auspexai-worker model recommend` to see what fits, "
+                "then `auspexai-worker model setup` anytime."
+            )
+    click.echo("")
+    click.echo("Setup complete. Check anytime: auspexai-worker status")
+
+
 @cli.group(help="Manage tenant allow/deny lists.")
 def tenant() -> None:
     pass
