@@ -889,7 +889,16 @@ main() {
 
         # Install the service: a launchd LaunchAgent on macOS, a systemd user unit
         # on Linux (one installer, OS-aware — same command on both).
-        if [ "$OS" = "Darwin" ]; then
+        #
+        # SINGLE-OWNER RULE (inc 8 + the 2026-07-03 mayhem incident): when the
+        # installed binary carries `service install` (>= v0.2.58), the PRODUCT
+        # owns the unit — `setup` writes + starts it later in this script, and
+        # writing a second copy here created the exact shadow-unit seam that
+        # crash-looped both production hosts. The write below stays ONLY for
+        # legacy binaries (the --version fallback path).
+        if "${INSTALL_PREFIX}/bin/auspexai-worker" service --help >/dev/null 2>&1; then
+            info "Service unit is product-owned (auspexai-worker service install) — skipping installer-side unit write."
+        elif [ "$OS" = "Darwin" ]; then
             info "Installing launchd agent …"
             mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
             cat > "$HOME/Library/LaunchAgents/network.auspexai.worker.plist" <<PLIST

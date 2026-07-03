@@ -4,9 +4,8 @@ to, reachable identically from a plain pip install."""
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from datetime import UTC, datetime
+from pathlib import Path
 
 from click.testing import CliRunner
 
@@ -59,14 +58,16 @@ def test_launchd_plist_renders_current_binary():
     assert svc.LAUNCHD_LABEL in plist
 
 
-def test_systemd_unit_renders_hardened_body():
+def test_systemd_unit_renders_the_proven_fleet_set():
     unit = svc.render_systemd_unit(binary="/x/bin/auspexai-worker")
     assert "ExecStart=/x/bin/auspexai-worker daemon" in unit
-    # The §41(a) delegation + the hardening the packaging template carries.
+    # The PROVEN minimal set (2026-07-03 incident: the full §5.17 hardening
+    # 218/CAPABILITIES'd on production user managers — see render docstring).
     assert "Delegate=yes" in unit
-    assert "SystemCallFilter=@system-service @mount" in unit
     assert "Nice=19" in unit
-    assert "ProtectControlGroups=no" in unit
+    assert "PrivateTmp=true" in unit
+    for forbidden in ("SystemCallFilter", "ProtectHome", "ProtectSystem", "ProtectKernel"):
+        assert forbidden not in unit, forbidden
 
 
 def test_service_install_linux_writes_user_unit(tmp_path: Path, monkeypatch):

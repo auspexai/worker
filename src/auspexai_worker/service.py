@@ -64,6 +64,17 @@ def render_launchd_plist(binary: str | None = None) -> str:
 
 
 def render_systemd_unit(binary: str | None = None) -> str:
+    """The systemd user unit — the PROVEN fleet directive set, deliberately
+    minimal. LIVE INCIDENT 2026-07-03: the first render used the packaging
+    template's full §5.17 hardening (ProtectHome/ProtectSystem/ProtectKernel*/
+    SystemCallFilter/…) and the daemon died with 218/CAPABILITIES on both
+    production Ubuntu hosts' user managers — those directives need privileges/
+    user namespaces a user manager cannot always grant. The set below is what
+    has run the fleet for weeks (PrivateTmp + NoNewPrivileges + the §41(a)
+    Delegate) plus the unprivileged low-priority scheduling; daemon-tier
+    hardening beyond it belongs to the system-level unit, not here. The
+    TENANT-CODE sandbox (bwrap + seccomp) is unaffected — it wraps the runner,
+    not the daemon."""
     exe = binary or worker_bin()
     return f"""; AuspexAI worker — systemd user unit (written by `auspexai-worker service install`).
 [Unit]
@@ -77,26 +88,13 @@ Type=simple
 ExecStart={exe} daemon
 Restart=on-failure
 RestartSec=10
-; Low-priority: the worker runs in the volunteer's SPARE capacity.
+; Low-priority (unprivileged): the worker runs in the volunteer's SPARE capacity.
 Nice=19
-CPUWeight=20
 IOSchedulingClass=idle
-; §5.17 hardening (Phase-1 permissive tier).
 PrivateTmp=true
-ProtectHome=read-only
-ProtectSystem=strict
 NoNewPrivileges=true
-ProtectKernelTunables=true
-ProtectKernelModules=true
-; §41(a): per-unit cgroup caps need a writable, delegated control-group tree.
-ProtectControlGroups=no
-RestrictRealtime=true
-; @mount on top of @system-service: the daemon spawns bubblewrap (mount/unshare/
-; pivot_root); the untrusted runner is re-locked by the in-sandbox seccomp filter.
-SystemCallFilter=@system-service @mount
-SystemCallErrorNumber=EPERM
+; §41(a): delegate a cgroup-v2 subtree so the daemon can cap the runner.
 Delegate=yes
-ReadWritePaths=%S/auspexai-worker %h/.local/state/auspexai-worker %h/.local/share/auspexai-worker
 
 [Install]
 WantedBy=default.target
