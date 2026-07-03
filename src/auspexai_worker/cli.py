@@ -950,10 +950,17 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
                     "(e.g. /opt/homebrew/bin/ollama on Apple Silicon)."
                 )
 
-            def open_inference_session(model_id: str, socket_dir):
+            def open_inference_session(model_id: str, socket_dir, policy=None):
+                # v0.2 M1: `policy` is the unit's manifest-declared generation
+                # policy (dispatch parses + validates it; None ⇒ greedy). The
+                # served handle stays policy-neutral — the broker applies the
+                # policy per-request.
                 served = model_server.serve(model_id)
                 return open_unit_session(
-                    served=served, backend=_inference_backend, socket_dir=socket_dir
+                    served=served,
+                    backend=_inference_backend,
+                    socket_dir=socket_dir,
+                    policy=policy,
                 )
 
         dispatcher = RunnerDispatcher(

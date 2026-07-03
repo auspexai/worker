@@ -240,3 +240,80 @@ def test_sanitize_options_whitelist():
         sanitize_options({"seed": True})  # bools are not seeds
     with pytest.raises(ValueError):
         sanitize_options("not-a-dict")
+
+
+# ── v0.2 M1: the manifest-declared generation policy (memo §3a/b) ────────────
+
+
+def _sampling_policy(**kw):
+    from auspexai_worker.inference.policy import GenerationPolicy
+
+    defaults = {"temperature": 0.8, "seed": 42, "top_p": 0.9, "top_k": 40}
+    defaults.update(kw)
+    return GenerationPolicy(**defaults)
+
+
+def test_sanitize_sampling_honors_declared_policy():
+    out = sanitize_options(None, policy=_sampling_policy())
+    # Declared values applied per-request; unrequested knobs injected.
+    assert out == {"temperature": 0.8, "seed": 42, "top_p": 0.9, "top_k": 40}
+
+
+def test_sanitize_sampling_allows_less_never_more():
+    pol = _sampling_policy()
+    assert sanitize_options({"temperature": 0.5}, policy=pol)["temperature"] == 0.5
+    assert sanitize_options({"temperature": 0}, policy=pol)["temperature"] == 0
+    with pytest.raises(ValueError, match="exceeds the manifest-declared"):
+        sanitize_options({"temperature": 0.9}, policy=pol)
+
+
+def test_sanitize_sampling_knobs_must_match_declared():
+    pol = _sampling_policy()
+    assert sanitize_options({"top_p": 0.9}, policy=pol)["top_p"] == 0.9  # exact match OK
+    with pytest.raises(ValueError, match="differs from the manifest-declared"):
+        sanitize_options({"top_p": 0.5}, policy=pol)
+    with pytest.raises(ValueError, match="not permitted"):
+        sanitize_options({"min_p": 0.1}, policy=pol)  # undeclared knob
+
+
+def test_sanitize_sampling_seed_defaults_to_declared_pin():
+    out = sanitize_options(None, policy=_sampling_policy(seed=1234, top_p=None, top_k=None))
+    assert out["seed"] == 1234
+    # An executor may still derive an explicit deterministic seed-stream.
+    out = sanitize_options({"seed": 99}, policy=_sampling_policy())
+    assert out["seed"] == 99
+
+
+def test_sanitize_greedy_policy_is_pre_m1_path():
+    from auspexai_worker.inference.policy import GenerationPolicy
+
+    greedy = GenerationPolicy()
+    assert sanitize_options(None, policy=greedy) == sanitize_options(None)
+    with pytest.raises(ValueError):
+        sanitize_options({"temperature": 0.7}, policy=greedy)
+    with pytest.raises(ValueError):
+        sanitize_options({"top_p": 0.9}, policy=greedy)  # knobs need a sampling policy
+
+
+def test_session_threads_policy_to_backend(tmp_path: Path):
+    backend = FakeBackend()
+    sess = open_unit_session(
+        served=_served(tmp_path),
+        backend=backend,
+        socket_dir=tmp_path,
+        policy=_sampling_policy(),
+    )
+    try:
+        reply = _request(
+            sess.socket_path,
+            {
+                "op": "generate",
+                "model": "tiny-model-q4",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+        assert reply["ok"] is True
+        _handle, _messages, options = backend.chats[0]
+        assert options == {"temperature": 0.8, "seed": 42, "top_p": 0.9, "top_k": 40}
+    finally:
+        sess.close()

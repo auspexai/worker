@@ -46,6 +46,7 @@ from auspexai_worker.coordinator import (
     WorkerPubkeyMismatchError,
 )
 from auspexai_worker.health import ThermalMonitor, ThermalState
+from auspexai_worker.inference.policy import GenerationPolicy, GenerationPolicyError
 from auspexai_worker.provisioning import (
     ExecutePolicy,
     ExecutionMode,
@@ -145,11 +146,12 @@ class RunnerDispatcher:
         # (back-compat for tests + callers that don't wire hot-reload).
         live_executor: Callable[[], tuple[ExecutePolicy, bool]] | None = None,
         # W-S (§9 #43): opens the per-unit inference-broker session for a
-        # real-executor unit — `(model_id, socket_dir) -> session` where the
-        # session exposes `.socket_path` and `.close()`. None (default — and
-        # whenever `[inference] backend = "none"`) means no broker socket and
-        # no serving: the entire W-S surface stays dormant.
-        open_inference_session: Callable[[str, object], object] | None = None,
+        # real-executor unit — `(model_id, socket_dir, policy) -> session` where
+        # the session exposes `.socket_path` and `.close()` and `policy` is the
+        # unit's manifest-declared GenerationPolicy (v0.2 M1; None ⇒ greedy).
+        # None (default — and whenever `[inference] backend = "none"`) means no
+        # broker socket and no serving: the entire W-S surface stays dormant.
+        open_inference_session: Callable[[str, object, object], object] | None = None,
         # M1 (v0_2): this worker's serving version (e.g. "ollama/0.17.7"), so a
         # unit pinning a different serving_version_pin is refused. None ⇒ the
         # pin gate fails closed (a pinned unit is refused).
@@ -292,9 +294,27 @@ class RunnerDispatcher:
             and has_models
         ):
             model_id = models_dir.name
+            # v0.2 M1: parse the unit's declared generation policy from the
+            # hash-pinned manifest (the provisioning trust root). A block this
+            # worker cannot honor AS DECLARED is a refusal (retryable), never a
+            # silent downgrade to greedy — declared must equal actual.
+            try:
+                generation_policy = GenerationPolicy.from_manifest(
+                    resolved.manifest if resolved is not None else None
+                )
+            except GenerationPolicyError as exc:
+                logger.warning(
+                    "declining unit %s: generation policy unhonorable: %s",
+                    unit.unit_id,
+                    exc,
+                )
+                return DispatchOutcome(
+                    kind=DispatchOutcomeKind.EXECUTOR_REFUSED,
+                    reason=f"generation_policy_unhonorable: {exc}",
+                )
             try:
                 self._inference_session = self._open_inference_session(
-                    model_id, workspace.workspace_dir
+                    model_id, workspace.workspace_dir, generation_policy
                 )
             except Exception as exc:
                 logger.warning(

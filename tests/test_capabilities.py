@@ -211,3 +211,11 @@ class TestFlavorAndOllamaVersion:
         payload = caps.to_dict()
         assert payload["flavor"] == "inference"
         assert payload["ollama_version"] == "0.6.5"
+
+
+class TestWorkerFeatures:
+    """v0.2 M1: the build's software-feature declaration for mixed-fleet routing."""
+
+    def test_generation_policy_always_declared(self, tmp_path: Path) -> None:
+        payload = collect(sysroot=tmp_path).to_dict()
+        assert "generation_policy" in payload["worker_features"]

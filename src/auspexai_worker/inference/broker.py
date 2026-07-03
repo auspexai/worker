@@ -22,12 +22,25 @@ mirrored by the tenant-sdk / stdlib `InferenceClient`):
   codes: bad_request | unauthorized_model | params_rejected | caps_exceeded
          | backend_error
 
-Determinism enforcement (§4): the broker accepts ONLY a whitelist of
-options — `seed`/`num_predict`/`num_ctx` (ints, capped) and `temperature`
-if exactly 0 — and FORCES temperature 0 + the pinned seed default on the
-backend call. A tenant cannot request sampling. The manifest-driven
-`inference_determinism` profile (build step 5) will replace the defaults;
-the enforcement seam is already here.
+Generation-policy enforcement (§4 / v0.2 M1): the broker enforces what the
+SIGNED MANIFEST declared, never a free-for-all
+(inference_determinism_scoping_memo.md §3b):
+
+  - greedy (the default — temperature 0 or no `inference_determinism`
+    block): only `seed`/`num_predict`/`num_ctx` (ints, capped) and
+    `temperature` if exactly 0 are accepted; temperature 0 + the pinned
+    seed default are FORCED on every backend call. Byte-for-byte the
+    pre-M1 behavior.
+  - seeded-sampling (declared temperature > 0 + pinned seed): the
+    executor may request `temperature` up to the DECLARED value and the
+    whitelist knobs `top_p`/`top_k`/`min_p` at exactly their DECLARED
+    values (declared-but-unrequested knobs are injected; an undeclared
+    knob is rejected). Every request still carries an explicit seed
+    (default = the declared pin), so no request is ever unseeded.
+
+Policy is applied PER-REQUEST — the served backend handle stays
+policy-neutral (no Modelfile pin), so experiments sharing a served model
+can never collide on baked-in params.
 """
 
 from __future__ import annotations
@@ -40,6 +53,7 @@ from pathlib import Path
 from typing import Any
 
 from auspexai_worker.inference.backend import BackendError, InferenceBackend
+from auspexai_worker.inference.policy import GenerationPolicy
 from auspexai_worker.inference.server import DEFAULT_SEED, ServedModel
 
 logger = logging.getLogger(__name__)
@@ -57,29 +71,70 @@ MAX_NUM_PREDICT = 4096
 _MAX_SOCKET_PATH = 100
 
 _ALLOWED_OPTION_KEYS = frozenset({"seed", "num_predict", "num_ctx", "temperature"})
+# v0.2 M1 (memo Q2): the seeded-sampling whitelist — requestable ONLY when the
+# signed manifest declares the knob (see sanitize_options).
+_SAMPLING_OPTION_KEYS = frozenset({"top_p", "top_k", "min_p"})
 
 
 def _error(code: str, detail: str) -> dict[str, Any]:
     return {"ok": False, "error": code, "detail": detail}
 
 
-def sanitize_options(raw: Any, *, default_seed: int = DEFAULT_SEED) -> dict[str, Any]:
-    """Validate + pin generation options against the determinism profile.
+def sanitize_options(
+    raw: Any,
+    *,
+    policy: GenerationPolicy | None = None,
+    default_seed: int = DEFAULT_SEED,
+) -> dict[str, Any]:
+    """Validate + pin generation options against the DECLARED generation policy
+    (v0.2 M1 §3b — enforce the declaration, not a constant).
 
     Returns the options to send to the backend. Raises ValueError (mapped to
-    `params_rejected`) on anything outside the deterministic whitelist.
+    `params_rejected`) on anything outside what the signed manifest declared.
+    `policy=None` (or a greedy policy) is byte-for-byte the pre-M1 hard-0 path.
     """
+    if policy is None:
+        policy = GenerationPolicy()
     if raw is None:
         raw = {}
     if not isinstance(raw, dict):
         raise ValueError("options must be an object")
-    unknown = set(raw) - _ALLOWED_OPTION_KEYS
+    declared_knobs = policy.knobs() if policy.is_sampling else {}
+    allowed = _ALLOWED_OPTION_KEYS | set(declared_knobs)
+    unknown = set(raw) - allowed
     if unknown:
-        raise ValueError(f"options not permitted (non-deterministic or unknown): {sorted(unknown)}")
+        raise ValueError(f"options not permitted (undeclared or unknown): {sorted(unknown)}")
     out: dict[str, Any] = {}
-    if "temperature" in raw and raw["temperature"] not in (0, 0.0):
-        raise ValueError("temperature must be 0 (greedy decoding is required for consensus)")
-    out["temperature"] = 0
+    if policy.is_sampling:
+        # The executor may request LESS sampling than declared, never more.
+        temp = raw.get("temperature", policy.temperature)
+        if isinstance(temp, bool) or not isinstance(temp, (int, float)) or temp < 0:
+            raise ValueError("temperature must be a number >= 0")
+        if float(temp) > policy.temperature:
+            raise ValueError(
+                f"temperature {temp} exceeds the manifest-declared {policy.temperature}"
+            )
+        out["temperature"] = float(temp)
+        # Declared knobs apply at exactly their declared values (injected when
+        # unrequested); a differing request is rejected — the envelope is the
+        # declaration, not a negotiation.
+        for key, declared in declared_knobs.items():
+            requested = raw.get(key, declared)
+            if requested != declared:
+                raise ValueError(
+                    f"{key} {requested!r} differs from the manifest-declared {declared!r}"
+                )
+            out[key] = declared
+    else:
+        if "temperature" in raw and raw["temperature"] not in (0, 0.0):
+            raise ValueError("temperature must be 0 (this experiment declared greedy decoding)")
+        out["temperature"] = 0
+    # Every request carries an explicit seed — no request is ever unseeded.
+    # Sampling: default = the declared pin (from_manifest guarantees it exists).
+    # Greedy: the worker default, as before. An executor may pass explicit seeds
+    # (a deterministic seed-stream derived in content-addressed executor code).
+    if policy.is_sampling:
+        default_seed = policy.seed  # type: ignore[assignment]  # required under sampling
     seed = raw.get("seed", default_seed)
     if not isinstance(seed, int) or isinstance(seed, bool):
         raise ValueError("seed must be an integer")
@@ -120,11 +175,14 @@ class UnitInferenceSession:
         served: ServedModel,
         backend: InferenceBackend,
         socket_path: Path,
+        policy: GenerationPolicy | None = None,
         max_requests: int = DEFAULT_MAX_REQUESTS,
         max_line_bytes: int = DEFAULT_MAX_LINE_BYTES,
     ) -> None:
         self._served = served
         self._backend = backend
+        # v0.2 M1: the unit's manifest-declared generation policy; None ⇒ greedy.
+        self._policy = policy
         self.socket_path = socket_path
         self._max_requests = max_requests
         self._max_line_bytes = max_line_bytes
@@ -242,7 +300,7 @@ class UnitInferenceSession:
         except ValueError as exc:
             return _error("bad_request", str(exc))
         try:
-            options = sanitize_options(request.get("options"))
+            options = sanitize_options(request.get("options"), policy=self._policy)
         except ValueError as exc:
             return _error("params_rejected", str(exc))
 
@@ -271,12 +329,14 @@ def open_unit_session(
     served: ServedModel,
     backend: InferenceBackend,
     socket_dir: Path,
+    policy: GenerationPolicy | None = None,
     max_requests: int = DEFAULT_MAX_REQUESTS,
 ) -> UnitInferenceSession:
     """Open the per-unit broker socket at `<socket_dir>/inference.sock`.
 
     `socket_dir` is normally the unit workspace — already bind-mounted into
     the sandbox, so the socket file is visible there with no extra mount.
+    `policy` is the unit's manifest-declared generation policy (None ⇒ greedy).
     Raises ValueError when the resulting path would exceed the AF_UNIX
     limit (dispatch maps that to a refusal).
     """
@@ -286,5 +346,9 @@ def open_unit_session(
             f"socket path too long for AF_UNIX ({len(str(socket_path))} chars): {socket_path}"
         )
     return UnitInferenceSession(
-        served=served, backend=backend, socket_path=socket_path, max_requests=max_requests
+        served=served,
+        backend=backend,
+        socket_path=socket_path,
+        policy=policy,
+        max_requests=max_requests,
     )

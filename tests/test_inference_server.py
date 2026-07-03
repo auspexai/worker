@@ -45,7 +45,7 @@ def _store_with_model(tmp_path: Path, model_id: str = "tiny-q4") -> tuple[ModelS
     return ModelStore(tmp_path / "models"), content
 
 
-def test_serve_creates_pinned_modelfile_warms_and_caches(tmp_path: Path):
+def test_serve_creates_policy_neutral_modelfile_warms_and_caches(tmp_path: Path):
     store, content = _store_with_model(tmp_path)
     backend = FakeBackend()
     server = ModelServer(store, backend, seed=123, num_ctx=2048)
@@ -57,12 +57,15 @@ def test_serve_creates_pinned_modelfile_warms_and_caches(tmp_path: Path):
     # Supply-chain provenance: the digest IS the file's sha256.
     assert served.gguf_sha256 == hashlib.sha256(content).hexdigest()
 
-    # Modelfile references the BYOM file in place + pins determinism (§4).
+    # Modelfile references the BYOM file in place and is POLICY-NEUTRAL
+    # (v0.2 M1 §3b): the served handle is shared across experiments, so no
+    # temperature/seed is baked in — the broker sets them per-request from
+    # the unit's declared policy. Only num_ctx (a resource default) is pinned.
     handle, modelfile = backend.created[0]
     assert handle == "auspex-tiny-q4"
     assert f"FROM {served.gguf_path}" in modelfile
-    assert "PARAMETER temperature 0" in modelfile
-    assert "PARAMETER seed 123" in modelfile
+    assert "PARAMETER temperature" not in modelfile
+    assert "PARAMETER seed" not in modelfile
     assert "PARAMETER num_ctx 2048" in modelfile
 
     # Warmed: one throwaway generation.

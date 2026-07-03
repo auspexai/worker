@@ -24,6 +24,12 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+# v0.2 M1: the software features this worker BUILD supports (a static property
+# of the code, not the host). The scheduler matches an experiment's derived
+# `features` requirement against this list, so mixed-version fleets route
+# feature-gated work only to workers that can honor it.
+WORKER_FEATURES = ("generation_policy",)
+
 
 @dataclass(frozen=True)
 class GpuObservation:
@@ -151,6 +157,13 @@ class Capabilities:
     # version affects inference outputs, so consensus debugging wants it
     # visible fleet-wide. Omitted when not serving / probe failed.
     ollama_version: str | None = None
+    # v0.2 M1: software features THIS worker build supports, for mixed-fleet
+    # routing (a volunteer fleet never rolls atomically). `generation_policy` =
+    # the broker honors a manifest-declared seeded-sampling policy; the
+    # scheduler routes a sampling experiment only to declaring workers — a
+    # pre-M1 worker would burn its units with params_rejected at request time.
+    # A declared FEATURE, not a heuristic (declarative-enforcement hygiene).
+    worker_features: list[str] = field(default_factory=lambda: list(WORKER_FEATURES))
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-serializable shape.

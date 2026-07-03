@@ -7,8 +7,12 @@ the executor's authorized model. Given a `model_id`, the server:
   1. locates the single sha256-verified GGUF in `ModelStore.path_for(model_id)`,
   2. registers it in the backend under the deterministic handle
      `auspex-<model_id>` via a Modelfile that references the file IN PLACE
-     (BYOM stays the content-addressed source of truth) and pins the
-     determinism parameters (temperature 0 + seed + num_ctx — §4),
+     (BYOM stays the content-addressed source of truth). The Modelfile pins
+     only num_ctx (a resource default) — generation params (temperature /
+     seed / sampling knobs) are POLICY-NEUTRAL at the served handle and
+     applied per-request by the broker from the unit's declared policy
+     (v0.2 M1 §3b), so experiments sharing a served model never collide
+     on baked-in params,
   3. warms it (one throwaway generation) so the first real unit isn't cold,
   4. records the GGUF's sha256 so `op:"info"` can return supply-chain
      provenance (the same digest the W-M fetch verified) for the executor
@@ -32,10 +36,10 @@ from auspexai_worker.models.store import ModelStore
 
 logger = logging.getLogger(__name__)
 
-# Worker-enforced determinism defaults (§4) until the manifest
-# `inference_determinism` block lands (W-S build step 5): greedy decoding,
-# fixed seed, fixed context. Every replica gets identical params because
-# they're pinned in the Modelfile, not chosen per request.
+# Worker-enforced defaults (§4). DEFAULT_SEED is the broker's greedy-mode seed
+# default (v0.2 M1: a sampling unit's seed comes from its manifest-declared
+# policy instead). Every replica gets identical params because the broker sets
+# them explicitly ON EVERY REQUEST — the served handle itself is policy-neutral.
 DEFAULT_SEED = 0
 DEFAULT_NUM_CTX = 4096
 
@@ -162,11 +166,11 @@ class ModelServer:
         return ggufs[0]
 
     def _modelfile(self, gguf: Path) -> str:
-        """The determinism-pinned Modelfile (§2.1 step 2). References the BYOM
-        file in place — no copy, no second store."""
-        return (
-            f"FROM {gguf}\n"
-            f"PARAMETER temperature 0\n"
-            f"PARAMETER seed {self._seed}\n"
-            f"PARAMETER num_ctx {self._num_ctx}\n"
-        )
+        """The policy-neutral Modelfile (§2.1 step 2). References the BYOM file
+        in place — no copy, no second store. Deliberately carries NO
+        temperature/seed pin (v0.2 M1 §3b): the served handle is shared across
+        experiments, so generation params baked here would collide across
+        differing declared policies — the broker sets them per-request instead
+        (and always did; request options override Modelfile params, so dropping
+        the pin does not change greedy behavior)."""
+        return f"FROM {gguf}\nPARAMETER num_ctx {self._num_ctx}\n"

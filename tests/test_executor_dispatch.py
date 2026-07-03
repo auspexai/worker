@@ -139,7 +139,12 @@ def db(tmp_path: Path) -> Database:
 
 
 def _provision(
-    root: Path, executor_src: str, *, tenant: str = "synth-doubler", models: list | None = None
+    root: Path,
+    executor_src: str,
+    *,
+    tenant: str = "synth-doubler",
+    models: list | None = None,
+    manifest_extra: dict | None = None,
 ) -> str:
     """Stage a tenant package and return its manifest_sha256."""
     manifest = {
@@ -147,6 +152,7 @@ def _provision(
         "experiment_id": f"{tenant}-v1",
         "executor": {"command": [sys.executable, "executor.py"]},
         "models": models if models is not None else [],
+        **(manifest_extra or {}),
     }
     sha = hash_manifest(manifest)
     pkg = root / sha
@@ -541,8 +547,10 @@ def test_inference_broker_e2e_through_dispatch(tmp_path: Path, db: Database):
     )
 
     opened: list = []
+    policies: list = []
 
-    def provider(model_id: str, socket_dir):
+    def provider(model_id: str, socket_dir, policy=None):
+        policies.append(policy)
         served = ServedModel(
             model_id=model_id,
             handle=f"auspex-{model_id}",
@@ -550,7 +558,7 @@ def test_inference_broker_e2e_through_dispatch(tmp_path: Path, db: Database):
             gguf_path=store / model_id / "weights.gguf",
         )
         session = open_unit_session(
-            served=served, backend=_FakeChatBackend(), socket_dir=socket_dir
+            served=served, backend=_FakeChatBackend(), socket_dir=socket_dir, policy=policy
         )
         opened.append(session)
         return session
@@ -579,6 +587,10 @@ def test_inference_broker_e2e_through_dispatch(tmp_path: Path, db: Database):
     # The session was opened in the unit workspace and closed after the unit.
     assert len(opened) == 1
     assert not opened[0].socket_path.exists()
+    # v0.2 M1: dispatch parsed + threaded the unit's generation policy (this
+    # manifest declares none ⇒ the greedy default).
+    assert len(policies) == 1
+    assert policies[0] is not None and not policies[0].is_sampling
 
 
 def test_inference_serving_failure_refuses_not_echoes(tmp_path: Path, db: Database):
@@ -593,7 +605,7 @@ def test_inference_serving_failure_refuses_not_echoes(tmp_path: Path, db: Databa
         models=[{"id": "tiny-q4", "local_weights_required": True}],
     )
 
-    def provider(model_id: str, socket_dir):
+    def provider(model_id: str, socket_dir, policy=None):
         raise RuntimeError("ollama is down")
 
     captured: dict = {}
@@ -613,4 +625,47 @@ def test_inference_serving_failure_refuses_not_echoes(tmp_path: Path, db: Databa
 
     assert outcome.kind == DispatchOutcomeKind.EXECUTOR_REFUSED
     assert "inference serving unavailable" in outcome.reason
+    assert "body" not in captured  # nothing submitted, nothing echoed
+
+
+def test_unhonorable_generation_policy_refuses_not_downgrades(tmp_path: Path, db: Database):
+    """v0.2 M1: a manifest whose inference_determinism this worker cannot honor
+    AS DECLARED (sampling without a pinned seed) is a refusal BEFORE serving —
+    never a silent downgrade to greedy (declared must equal actual)."""
+    privkey, pub = _make_key()
+    prov = tmp_path / "tenants"
+    store = tmp_path / "models"
+    (store / "tiny-q4").mkdir(parents=True)
+    (store / "tiny-q4" / "weights.gguf").write_bytes(b"fake gguf")
+    sha = _provision(
+        prov,
+        EXECUTOR_USES_INFERENCE,
+        models=[{"id": "tiny-q4", "local_weights_required": True}],
+        manifest_extra={"inference_determinism": {"temperature": 0.8}},  # no seed
+    )
+
+    served_attempts: list = []
+
+    def provider(model_id: str, socket_dir, policy=None):  # pragma: no cover
+        served_attempts.append(model_id)
+        raise AssertionError("must refuse before serving")
+
+    captured: dict = {}
+    with _client(captured, privkey, pub) as client:
+        disp = _dispatcher(
+            client,
+            db,
+            tmp_path / "runs",
+            policy=ExecutePolicy.PROVISIONED,
+            provisioning_dir=prov,
+            privkey=privkey,
+            pub=pub,
+            model_store_dir=store,
+            open_inference_session=provider,
+        )
+        outcome = disp.run_unit(_envelope(sha))
+
+    assert outcome.kind == DispatchOutcomeKind.EXECUTOR_REFUSED
+    assert "generation_policy_unhonorable" in outcome.reason
+    assert served_attempts == []
     assert "body" not in captured  # nothing submitted, nothing echoed
