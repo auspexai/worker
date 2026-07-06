@@ -836,7 +836,7 @@ main() {
         # ── Fast path: .deb ──────────────────────────────────────────
         info "Found .deb for ${arch} — using package manager"
         info "Downloading ${deb_name} …"
-        curl -fSL -o "${tmpdir}/${deb_name}" "$deb_url"
+        curl -fL --progress-bar -o "${tmpdir}/${deb_name}" "$deb_url"
         verify_artifact "${tmpdir}/${deb_name}" "$deb_url"
 
         info "Installing with apt …"
@@ -846,7 +846,7 @@ main() {
         # ── Fallback: pip into /opt venv ─────────────────────────────
         info "No .deb for ${arch} — installing from wheel"
         info "Downloading ${whl_pattern} …"
-        curl -fSL -o "${tmpdir}/${whl_pattern}" "$whl_url"
+        curl -fL --progress-bar -o "${tmpdir}/${whl_pattern}" "$whl_url"
         verify_artifact "${tmpdir}/${whl_pattern}" "$whl_url"
 
         # Ensure build deps for compiled wheels (cryptography, etc.). Linux only —
