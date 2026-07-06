@@ -46,12 +46,12 @@ dev = [
     # lets one test validate the contract itself). Pinned to the released tag;
     # bump deliberately when the SDK releases. Dev-only: the worker RUNTIME
     # never depends on tenant-sdk.
-    "auspexai-tenant==0.6.13",  # deliberate seam-test pin (PyPI; direct URLs are unpublishable)
+    "auspexai-tenant==0.6.46",  # deliberate seam-test pin (PyPI; direct URLs are unpublishable)
     # Test env pinned to current fastapi/starlette. starlette 1.x's TestClient
     # emits a DeprecationWarning that filterwarnings=error would escalate to a
     # collection error — handled by a targeted ignore in [tool.pytest.ini_options]
     # below rather than holding the dependency back.
-    "fastapi==0.138.1",
+    "fastapi==0.139.0",
     "starlette<1.4",
 ]
 # Optional libsecret/Secret Service backend. Skipped on headless CI / containers
