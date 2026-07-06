@@ -72,6 +72,7 @@ class SandboxConfig:
     executor_package_dir: str | None = None
     models_dir: str | None = None
     executor_timeout_seconds: float | None = None
+    capture_raw: bool = False  # D20: manifest [capture] raw → executor emits raw_response
     # W-S (§9 #43): the per-unit inference broker socket. A unix socket is a
     # filesystem object, so it crosses --unshare-net — the executor reaches
     # the worker-served model with the external network still cut. The socket
@@ -473,6 +474,8 @@ def _env_argv(config: SandboxConfig) -> list[str]:
             args += ["--setenv", "AUSPEXAI_EXECUTOR_DIR", config.executor_package_dir]
         if config.models_dir:
             args += ["--setenv", "AUSPEXAI_MODELS_DIR", config.models_dir]
+        if config.capture_raw:
+            args += ["--setenv", "AUSPEXAI_CAPTURE_RAW", "1"]
         if config.executor_timeout_seconds is not None:
             args += [
                 "--setenv",

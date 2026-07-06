@@ -331,6 +331,10 @@ class RunnerDispatcher:
             inference_model = model_id
             served_weights = {model_id: self._inference_session.served_gguf_sha256}
 
+        _capture_raw = bool(
+            resolved is not None
+            and (getattr(resolved, "manifest", None) or {}).get("capture", {}).get("raw")
+        )
         sandbox_config = SandboxConfig(
             use_bubblewrap=self._use_bubblewrap,
             policy=self._sandbox_policy,
@@ -345,6 +349,7 @@ class RunnerDispatcher:
             executor_timeout_seconds=self._runner_timeout_seconds,
             inference_socket=inference_socket,
             inference_model=inference_model,
+            capture_raw=_capture_raw,
         )
         # §41(a): STRICT requires a seccomp filter (the "escape via syscall"
         # gate). Build it fail-closed — if libseccomp/pyseccomp can't produce
@@ -432,6 +437,8 @@ class RunnerDispatcher:
                     env["AUSPEXAI_INFERENCE_SOCKET"] = inference_socket
                 if inference_model is not None:
                     env["AUSPEXAI_INFERENCE_MODEL"] = inference_model
+                if _capture_raw:
+                    env["AUSPEXAI_CAPTURE_RAW"] = "1"
         else:
             # bwrap mode: env is injected via --setenv (in argv); strip any
             # inherited executor vars so a real-executor unit never leaks into
