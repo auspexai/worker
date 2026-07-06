@@ -190,3 +190,12 @@ def test_setup_inference_flags_skip_prompts_and_warn_on_missing_ollama(tmp_path:
     assert 'backend = "ollama"' in body
     assert "auto_acquire = true" in body
     assert "Ollama" in r.output  # the missing-system-dep advisory (never installs)
+
+
+def test_logprobs_whitelisted_determinism_safe():
+    # D2: logprobs are output diagnostics — always requestable, determinism-safe.
+    from auspexai_worker.inference.broker import sanitize_options
+
+    out = sanitize_options({"logprobs": True, "top_logprobs": 3})
+    assert out["logprobs"] is True and out["top_logprobs"] == 3
+    assert out["temperature"] == 0  # greedy unaffected

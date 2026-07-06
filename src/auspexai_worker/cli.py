@@ -436,6 +436,44 @@ _catalog_opt = click.option(
 )
 
 
+@model.command("doctor", help="Diagnose the local model store: presence, size, empty/partial dirs.")
+@click.pass_context
+def model_doctor(ctx: click.Context) -> None:
+    """E8: a health check on the BYOM store — flags empty or suspiciously-small
+    model directories (a partial/interrupted pull), reports total footprint, and
+    confirms the store path is readable. Exits non-zero if any problem is found
+    so it's scriptable in a cron/self-test."""
+    import sys as _sys
+
+    store = ModelStore(ctx.obj["config"].models_store_path)
+    click.echo(f"store: {store.root}")
+    if not store.root.exists():
+        click.echo("  store directory does not exist yet (no models pulled) — OK")
+        return
+    models = store.list()
+    if not models:
+        click.echo("  empty store (no models) — OK; `model recommend` to see what fits")
+        return
+    problems = 0
+    total = 0
+    for m in models:
+        total += m.size_bytes
+        gb = m.size_bytes / 1e9
+        # A GGUF under ~50 MB is almost certainly a truncated/partial download.
+        has_gguf = any(m.path.rglob("*.gguf"))
+        if m.size_bytes < 50_000_000 or not has_gguf:
+            problems += 1
+            why = "no .gguf file" if not has_gguf else f"suspiciously small ({gb:.3f} GB)"
+            click.echo(f"  ⚠ {m.id}: {why} — likely a partial pull; re-run `model pull {m.id}`")
+        else:
+            click.echo(f"  ✓ {m.id}  {gb:.2f} GB")
+    click.echo(f"total: {total / 1e9:.2f} GB across {len(models)} model(s)")
+    if problems:
+        click.echo(f"{problems} problem(s) found.", err=True)
+        _sys.exit(1)
+    click.echo("store healthy.")
+
+
 @model.command("list", help="List models in the local store (your declared inventory).")
 @click.pass_context
 def model_list(ctx: click.Context) -> None:

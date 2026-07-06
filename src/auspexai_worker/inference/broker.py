@@ -71,6 +71,13 @@ MAX_NUM_PREDICT = 4096
 _MAX_SOCKET_PATH = 100
 
 _ALLOWED_OPTION_KEYS = frozenset({"seed", "num_predict", "num_ctx", "temperature"})
+# D2 (logprobs broker-whitelist): token log-probabilities are OUTPUT diagnostics —
+# they do not alter generation and are determinism-neutral (safe under greedy AND
+# seeded sampling), so they're always requestable. §7 still governs the RETURN:
+# the executor may only emit logprobs if the feature_schema declares that field,
+# else the result is rejected at ingest. The broker just stops the request itself
+# from being stripped as "unknown".
+_DIAGNOSTIC_OPTION_KEYS = frozenset({"logprobs", "top_logprobs"})
 # v0.2 M1 (memo Q2): the seeded-sampling whitelist — requestable ONLY when the
 # signed manifest declares the knob (see sanitize_options).
 _SAMPLING_OPTION_KEYS = frozenset({"top_p", "top_k", "min_p"})
@@ -100,7 +107,7 @@ def sanitize_options(
     if not isinstance(raw, dict):
         raise ValueError("options must be an object")
     declared_knobs = policy.knobs() if policy.is_sampling else {}
-    allowed = _ALLOWED_OPTION_KEYS | set(declared_knobs)
+    allowed = _ALLOWED_OPTION_KEYS | _DIAGNOSTIC_OPTION_KEYS | set(declared_knobs)
     unknown = set(raw) - allowed
     if unknown:
         raise ValueError(f"options not permitted (undeclared or unknown): {sorted(unknown)}")
@@ -149,6 +156,17 @@ def sanitize_options(
         if not isinstance(nc, int) or isinstance(nc, bool) or nc < 1:
             raise ValueError("num_ctx must be a positive integer")
         out["num_ctx"] = nc
+    # D2: pass diagnostic requests through verbatim (output-only, determinism-safe).
+    if "logprobs" in raw:
+        lp = raw["logprobs"]
+        if not isinstance(lp, bool) and not (isinstance(lp, int) and not isinstance(lp, bool)):
+            raise ValueError("logprobs must be a bool or int")
+        out["logprobs"] = lp
+    if "top_logprobs" in raw:
+        tlp = raw["top_logprobs"]
+        if not isinstance(tlp, int) or isinstance(tlp, bool) or tlp < 0:
+            raise ValueError("top_logprobs must be a non-negative integer")
+        out["top_logprobs"] = tlp
     return out
 
 
