@@ -258,6 +258,51 @@ def test_cli_model_setup_shows_installed_inventory(tmp_path: Path):
     assert "not re-downloaded" in r.output
 
 
+def test_cli_model_setup_uses_network_catalog(tmp_path: Path, monkeypatch):
+    """`model setup` sources its menu from the coordinator catalog (budget-filtered)
+    and pulls the selected repos — not the raw HF firehose."""
+    from click.testing import CliRunner
+
+    from auspexai_worker import cli as cli_module
+    from auspexai_worker.cli import cli
+    from auspexai_worker.coordinator import SupportedModel
+
+    def _fake_supported(_config):
+        return [
+            SupportedModel(
+                model_id="qwen2.5-0.5b-instruct-q4",
+                display_name="Qwen2.5 0.5B",
+                approx_ram_gb=1.5,
+                status="available",
+                hf_repo="Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+                param_b=0.5,
+            ),
+            SupportedModel(
+                model_id="way-too-big",
+                display_name="Huge",
+                approx_ram_gb=9_999.0,  # never fits a real host budget
+                status="too_big",
+                hf_repo="Org/Huge-GGUF",
+                param_b=999.0,
+            ),
+        ]
+
+    pulled: list[str] = []
+
+    def _fake_pull(repo, store, acc, disk_free, *, quant=None):
+        pulled.append(repo)
+        return True
+
+    monkeypatch.setattr(cli_module, "_network_supported_models", _fake_supported)
+    monkeypatch.setattr(cli_module, "_resolve_and_pull", _fake_pull)
+    env = {"AUSPEXAI_WORKER_DATA_DIR": str(tmp_path / "data")}
+    r = CliRunner().invoke(cli, ["model", "setup", "--yes"], env=env)
+    assert r.exit_code == 0, r.output
+    assert "from the network catalog" in r.output
+    assert pulled == ["Qwen/Qwen2.5-0.5B-Instruct-GGUF"]  # fitting pulled; too-big filtered out
+    assert "installed 1/1" in r.output
+
+
 def test_pull_quant_installs_single_gguf(tmp_path: Path):
     from auspexai_worker.models.fetch import pull_quant
     from auspexai_worker.models.hf_browse import ModelQuant

@@ -575,33 +575,28 @@ def model_recommend(ctx: click.Context, limit: int) -> None:
     click.echo("\nInstall one with:  auspexai-worker model pull <repo> --quant <Q>")
 
 
-@model.command("pull", help="Download a HuggingFace GGUF model into the local store.")
-@click.argument("repo")
-@click.option(
-    "--quant", default=None, help="Quant to pull (e.g. Q4_K_M); default = largest that fits."
-)
-@click.pass_context
-def model_pull(ctx: click.Context, repo: str, quant: str | None) -> None:
-    config = ctx.obj["config"]
-    store = ModelStore(config.models_store_path)
-    acc = detect_accelerator()
-    disk_free = survey_resources(store.root).disk_free_bytes
+def _resolve_and_pull(
+    repo: str, store: ModelStore, acc: object, disk_free: int, *, quant: str | None = None
+) -> bool:
+    """Resolve a repo's GGUF quant (explicit, or the largest that fits) and pull it
+    into the store. Returns True on success, False on any failure (printing the
+    reason) so a caller pulling a SET can continue past one bad model."""
     try:
         quants = HfHubBrowser().quants(repo)
     except Exception as exc:
         click.echo(f"could not query HuggingFace for {repo!r}: {exc}", err=True)
-        sys.exit(1)
+        return False
     if not quants:
         click.echo(f"no GGUF files found in {repo!r}", err=True)
-        sys.exit(1)
+        return False
     if quant:
         chosen = next((q for q in quants if q.quant.lower() == quant.lower()), None)
         if chosen is None:
             avail = ", ".join(sorted({q.quant for q in quants}))
             click.echo(f"quant {quant!r} not in {repo!r}; available: {avail}", err=True)
-            sys.exit(1)
+            return False
     else:
-        usable = usable_budget_gb(acc.memory_budget_gb, unified=acc.unified)
+        usable = usable_budget_gb(acc.memory_budget_gb, unified=acc.unified)  # type: ignore[attr-defined]
         fitting = [q for q in quants if quant_fits(q, usable, disk_free)]
         chosen = (
             max(fitting, key=lambda q: q.size_bytes)
@@ -613,8 +608,71 @@ def model_pull(ctx: click.Context, repo: str, quant: str | None) -> None:
         dest = pull_quant(chosen, store, HfHubFetcher(), disk_free_bytes=disk_free)
     except ModelFetchError as exc:
         click.echo(f"pull failed: {exc}", err=True)
-        sys.exit(1)
+        return False
     click.echo(f"installed {chosen.model_id} -> {dest}")
+    return True
+
+
+@model.command("pull", help="Download a HuggingFace GGUF model into the local store.")
+@click.argument("repo")
+@click.option(
+    "--quant", default=None, help="Quant to pull (e.g. Q4_K_M); default = largest that fits."
+)
+@click.pass_context
+def model_pull(ctx: click.Context, repo: str, quant: str | None) -> None:
+    config = ctx.obj["config"]
+    store = ModelStore(config.models_store_path)
+    acc = detect_accelerator()
+    disk_free = survey_resources(store.root).disk_free_bytes
+    if not _resolve_and_pull(repo, store, acc, disk_free, quant=quant):
+        sys.exit(1)
+
+
+def _setup_from_network_catalog(
+    supported: list[SupportedModel], store: ModelStore, acc: object, disk_free: int, *, yes: bool
+) -> None:
+    """`model setup` via the coordinator catalog: present the fitting, not-yet-
+    installed models, let the volunteer pick, and pull each (largest fitting quant
+    per repo, resolved from HF at pull time). A disk refresh between pulls plus the
+    per-pull disk check keep a selected SET from overrunning the disk; each failure
+    prints its reason (never a silent drop)."""
+    usable = usable_budget_gb(acc.memory_budget_gb, unified=acc.unified)  # type: ignore[attr-defined]
+    candidates = [
+        m
+        for m in supported
+        if m.hf_repo
+        and m.approx_ram_gb is not None
+        and (usable is None or m.approx_ram_gb <= usable)
+        and not store.has(m.model_id)
+    ]
+    if not candidates:
+        click.echo("No new model in the network catalog fits this host.")
+        return
+    click.echo("Models from the network catalog that fit this host:\n")
+    for i, m in enumerate(candidates, 1):
+        click.echo(f"  {i:2}. {m.hf_repo:46} ~{m.approx_ram_gb:5.1f} GB RAM  {m.display_name}")
+    if yes:
+        picked = candidates
+    elif not sys.stdin.isatty():
+        click.echo(
+            "\nNon-interactive shell; re-run with --yes, or `auspexai-worker model pull <repo>`."
+        )
+        return
+    else:
+        sel = click.prompt(
+            "\nSelect models to download (comma-separated numbers, 'all', or 'none')",
+            default="none",
+        )
+        picked = [candidates[i] for i in parse_selection(sel, len(candidates))]
+    if not picked:
+        click.echo("Nothing selected.")
+        return
+    installed = 0
+    for m in picked:
+        disk_free = survey_resources(store.root).disk_free_bytes  # refresh: a set can exhaust disk
+        if _resolve_and_pull(m.hf_repo, store, acc, disk_free):
+            installed += 1
+    click.echo(f"\ninstalled {installed}/{len(picked)} selected model(s).")
 
 
 @model.command("setup", help="Interactively pick + download HF models that fit this host.")
@@ -630,6 +688,18 @@ def model_setup(ctx: click.Context, limit: int, yes: bool) -> None:
     disk_free = survey_resources(store.root).disk_free_bytes
     click.echo(f"host: {acc.label}  ·  {disk_free / 1e9:.0f} GB disk free\n")
     _echo_installed_summary(store)
+
+    # Preferred: the coordinator's curated network catalog — clean, fresh, filtered
+    # to reputable publishers — the same source `model recommend` uses. Available
+    # only to an enrolled, signing worker.
+    supported = _network_supported_models(config)
+    if supported is not None:
+        _setup_from_network_catalog(supported, store, acc, disk_free, yes=yes)
+        return
+
+    # Offline fallback: evaluate models direct from HuggingFace (no coordinator
+    # reachable / worker not enrolled). This replaces the retired seed catalog.
+    click.echo("(network catalog unavailable — using the direct-HuggingFace fallback)\n")
     try:
         candidates = [
             r
