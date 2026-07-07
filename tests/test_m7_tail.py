@@ -23,6 +23,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from auspexai_worker.coordinator import CoordinatorClient
 from auspexai_worker.coordinator.client import (
     CanonicalReceiptResponse,
+    ReceiptWillNotIssueError,
     UnauthorizedError,
 )
 from auspexai_worker.daemon.dispatch import RunnerDispatcher
@@ -353,3 +354,91 @@ def test_canonical_receipt_response_dataclass_shape() -> None:
         signing_key_pubkey_hex="aa" * 32,
     )
     assert resp.cose_signed_blob == b"x"
+
+
+# ---- D22-B: terminal 410 (receipt_will_not_issue) ---------------------
+
+
+class TestReceiptWillNotIssue:
+    def test_410_raises_with_reason(self) -> None:
+        privkey, pub = _make_key()
+        signer = Rfc9421Signer(privkey, pubkey_hex=pub)
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                410,
+                json={
+                    "detail": {
+                        "error": {
+                            "code": "receipt_will_not_issue",
+                            "message": "no consensus receipt",
+                            "details": {"reason": "diverged_from_consensus", "terminal": True},
+                        }
+                    }
+                },
+            )
+
+        client = _coord_client(handler, signer)
+        with pytest.raises(ReceiptWillNotIssueError) as ei:
+            client.get_canonical_receipt(worker_id="wkr-tail", result_id="res-div")
+        assert ei.value.reason == "diverged_from_consensus"
+
+    def test_set_no_receipt_drops_row_from_pending(self, db: Database) -> None:
+        repo = SubmittedResultRepository(db)
+        _seed_placeholder_row(repo, result_id="res-1")
+        _seed_placeholder_row(repo, result_id="res-2")
+
+        assert repo.set_no_receipt(result_id="res-1", reason="non_consensus") is True
+        pending = repo.list_pending_canonical()
+        assert {p.result_id for p in pending} == {"res-2"}  # res-1 drained
+
+        rows = {r.result_id: r for r in repo.list_receipts()}
+        assert rows["res-1"].receipt_status == "no_receipt"
+        assert rows["res-1"].receipt_note == "non_consensus"
+        # Never overwrites a fetched canonical.
+        repo.set_canonical(
+            result_id="res-2",
+            canonical_blob=b"x",
+            canonical_format="cose-sign1-cbor-receipt-v0.1",
+            fetched_at=datetime.now(UTC),
+        )
+        assert repo.set_no_receipt(result_id="res-2", reason="x") is False
+
+    def test_fetch_pending_marks_no_receipt_on_410_and_stops_polling(
+        self, tmp_path: Path, db: Database
+    ) -> None:
+        repo = SubmittedResultRepository(db)
+        _seed_placeholder_row(repo, result_id="res-A")
+
+        privkey, pub = _make_key()
+        signer = Rfc9421Signer(privkey, pubkey_hex=pub)
+        calls = {"n": 0}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            return httpx.Response(
+                410,
+                json={
+                    "detail": {
+                        "error": {
+                            "code": "receipt_will_not_issue",
+                            "message": "no",
+                            "details": {"reason": "experiment_aborted"},
+                        }
+                    }
+                },
+            )
+
+        client = _coord_client(handler, signer)
+        dispatcher = _make_dispatcher(
+            db=db, privkey=privkey, pub=pub, client=client, workspace_dir=tmp_path
+        )
+        promoted = dispatcher.fetch_pending_canonical()
+        assert promoted == 0
+        assert repo.list_pending_canonical() == []  # drained — no re-poll
+        row = {r.result_id: r for r in repo.list_receipts()}["res-A"]
+        assert row.receipt_status == "no_receipt"
+        assert row.receipt_note == "experiment_aborted"
+        # A second tick makes NO further coordinator calls (the row is gone).
+        assert dispatcher.fetch_pending_canonical() == 0
+        assert calls["n"] == 1

@@ -38,6 +38,7 @@ from auspexai_worker.coordinator import (
     AssignmentResponse,
     CoordinatorClient,
     CoordinatorError,
+    ReceiptWillNotIssueError,
     ResultAlreadySubmittedError,
     ResultSubmissionResponse,
     UnauthorizedError,
@@ -889,10 +890,14 @@ class RunnerDispatcher:
 
         For each `receipt_status='placeholder'` row, ask the coord for the
         canonical bytes via `get_canonical_receipt`. On 200 → `set_canonical`
-        promotes the row to `canonical`. On 404 → leave as placeholder (the
-        unit's quorum may have disagreed, or M7c issuance hasn't fired yet;
-        we'll try again next tick). Transport errors are logged but don't
-        propagate — the fetch loop is best-effort, never blocking.
+        promotes the row to `canonical`. On 404 → leave as placeholder (issuance
+        hasn't fired yet; we'll try again next tick). On 410 (D22-B,
+        ReceiptWillNotIssueError) → TERMINAL: no receipt will ever issue (the
+        unit reached consensus without selecting this replica — a VALID
+        non-consensus observation, not a failure — or the experiment went
+        terminal); mark the row `no_receipt` so it leaves the placeholder set
+        and is never re-polled. Transport errors are logged but don't propagate
+        — the fetch loop is best-effort, never blocking.
 
         Returns the count of rows promoted to canonical this tick.
         """
@@ -909,6 +914,24 @@ class RunnerDispatcher:
                     worker_id=self._worker_id,
                     result_id=row.result_id,
                 )
+            except ReceiptWillNotIssueError as e:
+                # 410 TERMINAL — stop polling: record the non-pejorative reason
+                # and drop the row out of the placeholder set. The result stays
+                # valid + exportable; there is simply no consensus receipt.
+                try:
+                    self._submitted.set_no_receipt(result_id=row.result_id, reason=e.reason)
+                    logger.info(
+                        "result %s will get no canonical receipt (%s) — marked "
+                        "no_receipt, will not re-poll",
+                        row.result_id,
+                        e.reason or "non_consensus",
+                    )
+                except Exception:
+                    logger.exception(
+                        "fetch_pending_canonical: set_no_receipt failed for %s",
+                        row.result_id,
+                    )
+                continue
             except Exception:
                 logger.debug(
                     "fetch_pending_canonical: coord call failed for %s; leaving as placeholder",

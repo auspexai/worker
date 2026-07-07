@@ -336,6 +336,7 @@ class SubmittedResult:
     canonical_blob: bytes | None
     canonical_format: str | None
     canonical_fetched_at: datetime | None
+    receipt_note: str | None = None  # D22-B: reason when receipt_status='no_receipt'
 
 
 # All columns selected by every receipt-reading method, kept in one place so
@@ -344,7 +345,8 @@ _SUBMITTED_RESULTS_COLUMNS = (
     "id, unit_id, assignment_id, result_id, exit_code, completed_at, "
     "submitted_at, coord_unit_status_after, coord_completions_so_far, "
     "coord_replication_target, payload_json, "
-    "receipt_status, canonical_blob, canonical_format, canonical_fetched_at"
+    "receipt_status, canonical_blob, canonical_format, canonical_fetched_at, "
+    "receipt_note"
 )
 
 
@@ -516,6 +518,26 @@ class SubmittedResultRepository:
             )
         return cur.rowcount > 0
 
+    def set_no_receipt(self, *, result_id: str, reason: str | None) -> bool:
+        """D22-B: record the TERMINAL 'no canonical receipt will ever issue'
+        outcome (coordinator 410 receipt_will_not_issue). The unit reached
+        consensus without selecting this replica — a VALID non-consensus
+        observation, NOT a failure (distinct from receipt_status='failed', which
+        is a transport/decode error) — or the experiment went terminal before
+        consensus. Setting receipt_status='no_receipt' drops the row out of
+        list_pending_canonical so the M7-tail loop stops polling it. Only moves
+        a still-'placeholder' row (never overwrites a fetched 'canonical').
+        Returns True if a row was updated."""
+        with self._db.transaction() as conn:
+            cur = conn.execute(
+                "UPDATE submitted_results SET "
+                "receipt_status = 'no_receipt', "
+                "receipt_note = ? "
+                "WHERE result_id = ? AND receipt_status = 'placeholder'",
+                (reason, result_id),
+            )
+        return cur.rowcount > 0
+
 
 def _row_to_submitted_result(row) -> SubmittedResult:
     canonical_fetched_at_raw = row["canonical_fetched_at"]
@@ -537,7 +559,17 @@ def _row_to_submitted_result(row) -> SubmittedResult:
         canonical_fetched_at=(
             _parse_ts(canonical_fetched_at_raw) if canonical_fetched_at_raw else None
         ),
+        receipt_note=_row_get(row, "receipt_note"),
     )
+
+
+def _row_get(row, key: str):
+    """Tolerant column read — a row selected before the 0011 receipt_note
+    migration (or by a query that doesn't include the column) yields None."""
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return None
 
 
 def _parse_ts(raw: str) -> datetime:

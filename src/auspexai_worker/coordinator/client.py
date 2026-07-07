@@ -90,6 +90,21 @@ class WorkerPausedError(CoordinatorError):
         self.pause_reason = pause_reason
 
 
+class ReceiptWillNotIssueError(CoordinatorError):
+    """410 receipt_will_not_issue (D22-B) — no canonical receipt was, or ever
+    will be, issued for this (worker, result). The unit reached consensus
+    without selecting this replica (a VALID non-consensus observation — NOT a
+    failure) or the experiment went terminal before consensus. TERMINAL: the
+    M7-tail backfill loop must stop polling this result (vs a 404, which is
+    transient — retry). Carries the coordinator's non-pejorative `reason` so
+    the worker can record/show why there is no consensus receipt; the result
+    itself stays valid, recorded, and exportable."""
+
+    def __init__(self, message: str, *, reason: str | None = None) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
 class AssignmentNotFoundError(CoordinatorError):
     """404 assignment_not_found — no assignment exists for this (unit, worker)."""
 
@@ -890,10 +905,12 @@ class CoordinatorClient:
         populate this worker's local `submitted_results.canonical_blob`
         cache.
 
-        Returns None on 404 (`receipt_not_issued` — most often because the
-        unit's quorum disagreed; the worker should leave the row as
-        placeholder and stop retrying after a reasonable bound). Raises on
-        unexpected statuses.
+        Returns None on 404 (`receipt_not_issued` — TRANSIENT: consensus /
+        issuance may not have fired yet; leave as placeholder and retry). Raises
+        ReceiptWillNotIssueError on 410 (`receipt_will_not_issue` — TERMINAL: no
+        receipt will ever issue, e.g. non-consensus / experiment terminal; the
+        caller records it and stops polling). Raises on other unexpected
+        statuses.
         """
         if self._signer is None:
             raise CoordinatorError(
@@ -920,7 +937,14 @@ class CoordinatorClient:
                 signing_key_pubkey_hex=str(payload.get("signing_key_pubkey_hex", "")),
             )
         if response.status_code == 404:
-            return None
+            return None  # transient: receipt not issued YET — keep polling
+        if response.status_code == 410:
+            # D22-B: TERMINAL — no receipt will ever issue (non-consensus /
+            # experiment terminal). The caller stops polling this result.
+            raise ReceiptWillNotIssueError(
+                _error_message(response),
+                reason=_error_details(response).get("reason"),
+            )
         if response.status_code == 403:
             raise UnauthorizedError(_error_message(response))
         if response.status_code == 401:

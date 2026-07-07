@@ -1886,6 +1886,13 @@ def receipts_show(ctx: click.Context, identifier: str) -> None:
         click.echo(f"completed_at:   {match.completed_at}")
         click.echo(f"exit_code:      {match.exit_code}")
         click.echo(f"receipt_status: {match.receipt_status}")
+        if match.receipt_status == "no_receipt":
+            # D22-B: a valid non-consensus / experiment-terminal result — no
+            # consensus receipt will issue, but the result stays valid data.
+            click.echo(
+                f"no receipt:     {match.receipt_note or 'non_consensus'} "
+                f"(valid observation — no consensus receipt; not a failure)"
+            )
         if match.canonical_format is not None:
             blob_bytes = len(match.canonical_blob) if match.canonical_blob else 0
             fetched = (
