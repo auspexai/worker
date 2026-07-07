@@ -736,13 +736,30 @@ main() {
     need_cmd curl
     need_cmd sudo
 
+    # ── Fetch release FIRST, so the upgrade prompt can name the TARGET ──
+    # (Otherwise the prompt only shows the installed version, which reads as
+    # "it's about to install the old one" — it isn't.)
+    info "Fetching release info from GitHub …"
+    local release_json
+    release_json=$(fetch_release "$requested_version")
+    local tag
+    tag=$(printf '%s' "$release_json" | grep -o '"tag_name" *: *"[^"]*"' | head -1 | sed 's/.*: *"//;s/"//')
+    [ -n "$tag" ] || fail "could not parse tag_name from release JSON"
+    local version="${tag#v}"
+    info "Latest release: ${tag}"
+
     # ── Check for existing install ───────────────────────────────────
 
     if [ -x "${INSTALL_PREFIX}/bin/auspexai-worker" ]; then
         local current
         current=$("${INSTALL_PREFIX}/bin/auspexai-worker" --version 2>/dev/null || echo "unknown")
-        warn "existing install detected at ${INSTALL_PREFIX} (${current})"
-        printf '    Continue and upgrade? [y/N] '
+        if [ "$current" = "$version" ]; then
+            warn "already on the latest version (${current}) at ${INSTALL_PREFIX}"
+            printf '    Reinstall anyway? [y/N] '
+        else
+            warn "installed ${current} at ${INSTALL_PREFIX} — will upgrade to ${tag}"
+            printf '    Continue and upgrade? [y/N] '
+        fi
         read -r reply </dev/tty
         case "$reply" in
             y|Y|yes|YES) ;;
@@ -788,17 +805,7 @@ main() {
     python=$(find_python) || fail "Python >= 3.${MIN_PYTHON_MINOR} is required. Install it and retry ($([ "$OS" = "Darwin" ] && echo 'macOS: brew install python@3.12' || echo 'e.g. sudo apt install python3.12 python3.12-venv'))."
     info "Using $python ($($python --version 2>&1))"
 
-    # ── Fetch release ────────────────────────────────────────────────
-
-    info "Fetching release info from GitHub …"
-    local release_json
-    release_json=$(fetch_release "$requested_version")
-
-    local tag
-    tag=$(printf '%s' "$release_json" | grep -o '"tag_name" *: *"[^"]*"' | head -1 | sed 's/.*: *"//;s/"//')
-    [ -n "$tag" ] || fail "could not parse tag_name from release JSON"
-    local version="${tag#v}"
-    info "Release: ${tag}"
+    # (release already fetched above — ${tag}/${version}/${release_json} in scope)
 
     # ── Collect asset URLs ───────────────────────────────────────────
 
