@@ -212,22 +212,55 @@ class Capabilities:
 
 
 def detect_ram_total_gb(*, meminfo_path: Path | None = None) -> float | None:
-    """Parse `/proc/meminfo` for `MemTotal`. Returns GB (binary, /1024^2 KiB).
+    """Total physical RAM in GB (binary), cross-platform.
 
-    Returns None on non-Linux or unreadable meminfo.
+    Linux reads `/proc/meminfo` `MemTotal`; other Unixes fall back to
+    `os.sysconf` (where SC_PHYS_PAGES is defined) and then, on Darwin/BSD,
+    `sysctl hw.memsize`. Returns None if nothing resolves — the coordinator's
+    supported-models overlay treats None as 'unknown capacity', never 'too
+    small', so a null is always safe.
+
+    When `meminfo_path` is passed explicitly (test mode) ONLY the meminfo parse
+    runs — no host fallbacks — so a bogus/empty path deterministically yields None.
     """
     path = meminfo_path or Path("/proc/meminfo")
     try:
         content = path.read_text(encoding="ascii", errors="replace")
-    except (FileNotFoundError, PermissionError):
-        return None
-    for line in content.splitlines():
-        if line.startswith("MemTotal:"):
-            parts = line.split()
-            # Standard form: "MemTotal:   12345678 kB"
-            if len(parts) >= 2 and parts[1].isdigit():
-                kb = int(parts[1])
-                return round(kb / (1024 * 1024), 2)
+        for line in content.splitlines():
+            if line.startswith("MemTotal:"):
+                parts = line.split()
+                # Standard form: "MemTotal:   12345678 kB"
+                if len(parts) >= 2 and parts[1].isdigit():
+                    return round(int(parts[1]) / (1024 * 1024), 2)
+    except (FileNotFoundError, PermissionError, OSError):
+        pass
+
+    if meminfo_path is not None:
+        return None  # explicit path given — don't fall back to the real host
+
+    # Non-Linux fallbacks. Each is best-effort; ANY failure returns None (the
+    # prior behavior), so this can never regress a host that already reported.
+    try:
+        if "SC_PHYS_PAGES" in os.sysconf_names and "SC_PAGE_SIZE" in os.sysconf_names:
+            total = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+            if total > 0:
+                return round(total / (1024**3), 2)
+    except (ValueError, OSError):
+        pass
+    try:
+        import subprocess
+
+        out = subprocess.run(
+            ["sysctl", "-n", "hw.memsize"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=True,
+        ).stdout.strip()
+        if out.isdigit() and int(out) > 0:
+            return round(int(out) / (1024**3), 2)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
     return None
 
 
