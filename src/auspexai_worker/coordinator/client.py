@@ -283,6 +283,23 @@ class PrestageDirective:
 
 
 @dataclass(frozen=True)
+class SupportedModel:
+    """One entry from GET /api/v0/models/supported — the coordinator-owned
+    provisionable-model catalog (the fleet's live inventory unioned with the
+    curated provisionable set). `model recommend` filters these by this host's
+    memory budget. `approx_ram_gb` / `param_b` are None for entries outside the
+    curated (sized) set; `hf_repo` is provenance when the entry came from the
+    coordinator's HuggingFace poll."""
+
+    model_id: str
+    display_name: str
+    approx_ram_gb: float | None
+    status: str  # 'available' | 'runnable' | 'too_big' | 'unknown'
+    hf_repo: str | None
+    param_b: float | None
+
+
+@dataclass(frozen=True)
 class AssignmentResponse:
     """Coordinator's response to GET /workers/{id}/assignments.
 
@@ -544,6 +561,35 @@ class CoordinatorClient:
             raise WorkerNotFoundError(_error_message(response))
         raise CoordinatorError(
             f"get_prestage: unexpected status {response.status_code}: {response.text[:500]}"
+        )
+
+    # ---- /models/supported (signed) — the network's provisionable catalog ----
+
+    def get_supported_models(self) -> list[SupportedModel]:
+        """GET /api/v0/models/supported. Worker-credentialed.
+
+        Returns the coordinator-owned provisionable-model catalog — the network's
+        live fleet inventory unioned with the curated provisionable set. This is
+        the source `model recommend` intersects with the host's memory budget,
+        replacing the worker's retired static catalog.
+        """
+        if self._signer is None:
+            raise CoordinatorError(
+                "get_supported_models requires a signer; CoordinatorClient "
+                "was constructed without one"
+            )
+        response = self._signed_request(
+            method="GET",
+            path="/api/v0/models/supported",
+            json_body=None,
+        )
+        if response.status_code == 200:
+            items = response.json().get("models") or []
+            return [_parse_supported_model(i) for i in items if isinstance(i, dict)]
+        if response.status_code in (401, 403):
+            raise UnauthorizedError(_error_message(response))
+        raise CoordinatorError(
+            f"get_supported_models: unexpected status {response.status_code}: {response.text[:500]}"
         )
 
     # ---- /packages/by-manifest/{manifest_sha256} (signed) — #40a auto-fetch
@@ -1065,6 +1111,20 @@ def _parse_refuse(payload: dict[str, Any]) -> RefuseResponse:
         )
     except KeyError as exc:
         raise CoordinatorError(f"refuse response missing field: {exc}") from exc
+
+
+def _parse_supported_model(payload: dict[str, Any]) -> SupportedModel:
+    def _opt_float(raw: object) -> float | None:
+        return float(raw) if isinstance(raw, (int, float)) else None
+
+    return SupportedModel(
+        model_id=str(payload.get("model_id", "")),
+        display_name=str(payload.get("display_name", "")),
+        approx_ram_gb=_opt_float(payload.get("approx_ram_gb")),
+        status=str(payload.get("status", "")),
+        hf_repo=payload["hf_repo"] if isinstance(payload.get("hf_repo"), str) else None,
+        param_b=_opt_float(payload.get("param_b")),
+    )
 
 
 def _parse_worker_status(payload: dict[str, Any]) -> WorkerStatusResponse:

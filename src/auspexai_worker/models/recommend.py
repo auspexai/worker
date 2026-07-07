@@ -1,26 +1,22 @@
-"""Resource survey + model recommendation (W-M).
+"""Resource survey + selection parsing (W-M).
 
-`recommend` intersects the catalog (what the network wants) with the worker's
-resources (what it can run) — the supply-side half of closing #32's empty-pool
-problem: "these in-demand models would actually run on your hardware."
+The network's provisionable-model catalog now lives on the coordinator
+(`GET /api/v0/models/supported`); `model recommend` intersects that catalog with
+this host's resources. What remains here are the local, catalog-free utilities:
+the resource survey and the interactive-selection parser.
 
 Resource survey uses stdlib + the worker's existing capability detection (no
 psutil): disk via `shutil.disk_usage`, RAM via `detect_ram_total_gb`, VRAM from
 the volunteer's GPU declaration (the volunteer is the source of truth, §capabilities).
-VRAM is a soft signal — a model that wants a GPU can still run (slowly) on CPU, so
-insufficient/absent VRAM is reported as a note, not a hard fail; disk + RAM are
-hard gates.
 """
 
 from __future__ import annotations
 
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from auspexai_worker.capabilities import detect_ram_total_gb
-from auspexai_worker.models.catalog import ModelCatalog, ModelCatalogEntry
-from auspexai_worker.models.store import ModelStore
 
 
 @dataclass(frozen=True)
@@ -54,65 +50,6 @@ def survey_resources(store_root: Path, *, declared_vram_gb: float | None = None)
         ram_gb=detect_ram_total_gb(),
         vram_gb=vram,
     )
-
-
-@dataclass(frozen=True)
-class Recommendation:
-    entry: ModelCatalogEntry
-    fits: bool  # hard gates (disk, RAM) satisfied
-    installed: bool  # already in the store
-    blockers: list[str] = field(default_factory=list)  # why it doesn't fit
-    notes: list[str] = field(default_factory=list)  # soft signals (e.g. VRAM/CPU)
-    in_demand: bool = False
-
-
-def _gb(b: float) -> str:
-    return f"{b / 1e9:.1f} GB"
-
-
-def recommend(
-    catalog: ModelCatalog,
-    store: ModelStore,
-    resources: WorkerResources,
-    *,
-    demand: tuple[str, ...] = (),
-) -> list[Recommendation]:
-    out: list[Recommendation] = []
-    for entry in catalog:
-        blockers: list[str] = []
-        notes: list[str] = []
-        if entry.disk_bytes and entry.disk_bytes > resources.disk_free_bytes:
-            blockers.append(
-                f"needs {_gb(entry.disk_bytes)} disk, only {_gb(resources.disk_free_bytes)} free"
-            )
-        if (
-            entry.min_ram_gb
-            and resources.ram_gb is not None
-            and entry.min_ram_gb > resources.ram_gb
-        ):
-            blockers.append(
-                f"needs {entry.min_ram_gb:.0f} GB RAM, host has {resources.ram_gb:.1f} GB"
-            )
-        if entry.vram_load_gb:
-            if resources.vram_gb is None:
-                notes.append("no GPU declared; would run on CPU (slow)")
-            elif entry.vram_load_gb > resources.vram_gb:
-                notes.append(
-                    f"wants ~{entry.vram_load_gb:.0f} GB VRAM, host declares "
-                    f"{resources.vram_gb:.1f} GB; would offload/CPU"
-                )
-        out.append(
-            Recommendation(
-                entry=entry,
-                fits=not blockers,
-                installed=store.has(entry.id),
-                blockers=blockers,
-                notes=notes,
-                in_demand=entry.id in demand,
-            )
-        )
-    # in-demand first, then fitting, then smaller download.
-    return sorted(out, key=lambda r: (not r.in_demand, not r.fits, r.entry.disk_bytes))
 
 
 def parse_selection(raw: str, count: int) -> list[int]:

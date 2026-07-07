@@ -41,6 +41,7 @@ from .coordinator import (
     InvalidAccessTokenError,
     PubkeyAlreadyEnrolledError,
     PubkeyAlreadyTenantError,
+    SupportedModel,
     UnsupportedIdpError,
     WorkerNotFoundError,
 )
@@ -48,8 +49,7 @@ from .daemon import AssignmentPoller, HeartbeatLoop, PrestageLoop
 from .daemon.dispatch import RunnerDispatcher
 from .health import ThermalMonitor
 from .keystore import KeystoreError
-from .models import ModelCatalog, ModelStore, recommend, survey_resources
-from .models.catalog import FileCatalogSource
+from .models import ModelStore, survey_resources
 from .models.fetch import HfHubFetcher, ModelFetchError, StoreModelAcquirer, pull_quant
 from .models.hf_browse import HfHubBrowser, quant_fits, runnable_models, usable_budget_gb
 from .models.recommend import parse_selection
@@ -422,20 +422,6 @@ def model() -> None:
 _DISK_SAFETY_MARGIN_BYTES = 5_000_000_000
 
 
-def _load_catalog(catalog_path: str | None) -> ModelCatalog:
-    source = FileCatalogSource(Path(catalog_path)) if catalog_path else None
-    return ModelCatalog.load(source)
-
-
-_catalog_opt = click.option(
-    "--catalog",
-    "catalog_path",
-    type=click.Path(dir_okay=False, path_type=str),
-    default=None,
-    help="Override the model catalog with a local JSON file.",
-)
-
-
 @model.command("doctor", help="Diagnose the local model store: presence, size, empty/partial dirs.")
 @click.pass_context
 def model_doctor(ctx: click.Context) -> None:
@@ -505,28 +491,68 @@ def _echo_installed_summary(store: ModelStore) -> None:
     click.echo("")
 
 
-def _recommend_fallback(catalog_path: str | None, store: ModelStore) -> None:
-    """Offline degraded view: the bundled catalog (HuggingFace unavailable)."""
-    catalog = _load_catalog(catalog_path)
-    resources = survey_resources(store.root)
-    for r in recommend(catalog, store, resources):
-        tag = "installed" if r.installed else ("fits" if r.fits else "too big")
-        click.echo(f"[{tag:9}] {r.entry.id:24} {r.entry.disk_bytes / 1e9:5.1f} GB  {r.entry.note}")
-        for b in r.blockers:
-            click.echo(f"            ✗ {b}")
+def _network_supported_models(config: WorkerConfig) -> list[SupportedModel] | None:
+    """Fetch the coordinator's provisionable-model catalog for this worker, or
+    None when the worker can't consult it — not enrolled, no matching signer, or
+    the coordinator is unreachable. A None result is the signal to fall back to
+    the direct-HuggingFace path."""
+    db, repo = initialize_state(config)
+    try:
+        worker = repo.get()
+    finally:
+        db.close()
+    if worker is None:
+        return None  # not enrolled — no worker credential to sign with
+    try:
+        signer = build_signer(open_keystore(config))
+    except (KeystoreError, OSError):
+        return None
+    if signer.pubkey_hex != worker.pubkey_hex:
+        return None  # keystore regenerated / wrong backend — can't authenticate
+    try:
+        with CoordinatorClient(base_url=config.coordinator_url, signer=signer) as client:
+            return client.get_supported_models()
+    except CoordinatorError:
+        return None
 
 
-@model.command("recommend", help="Recommend HuggingFace models that fit this host.")
-@click.option("--limit", default=30, help="How many popular HF models to consider.")
-@_catalog_opt
+@model.command("recommend", help="Recommend models the network wants that fit this host.")
+@click.option(
+    "--limit", default=30, help="How many popular HF models to consider (direct-HF fallback)."
+)
 @click.pass_context
-def model_recommend(ctx: click.Context, limit: int, catalog_path: str | None) -> None:
+def model_recommend(ctx: click.Context, limit: int) -> None:
     config = ctx.obj["config"]
     store = ModelStore(config.models_store_path)
     acc = detect_accelerator()
     disk_free = survey_resources(store.root).disk_free_bytes
     click.echo(f"host: {acc.label}  ·  {disk_free / 1e9:.0f} GB disk free\n")
     _echo_installed_summary(store)
+
+    # Preferred source: the coordinator-owned network catalog (the provisionable
+    # set the network wants). Available only to an enrolled, signing worker.
+    supported = _network_supported_models(config)
+    if supported is not None:
+        usable = usable_budget_gb(acc.memory_budget_gb, unified=acc.unified)
+        fitting = [
+            m
+            for m in supported
+            if m.approx_ram_gb is not None and (usable is None or m.approx_ram_gb <= usable)
+        ]
+        if not fitting:
+            click.echo("No model in the network catalog fits this host's memory budget.")
+            return
+        click.echo(f"{len(fitting)} model(s) from the network catalog fit this host:\n")
+        for m in fitting:
+            installed = "installed" if store.has(m.model_id) else "fits"
+            repo = f"  {m.hf_repo}" if m.hf_repo else ""
+            click.echo(f"[{installed:9}] {m.model_id:32} ~{m.approx_ram_gb:5.1f} GB RAM{repo}")
+        click.echo("\nInstall one with:  auspexai-worker model pull <repo> --quant <Q>")
+        return
+
+    # Offline fallback: evaluate models direct from HuggingFace (no coordinator
+    # reachable / worker not enrolled). This replaces the retired seed catalog.
+    click.echo("(network catalog unavailable — using the direct-HuggingFace fallback)\n")
     try:
         runnable = runnable_models(
             HfHubBrowser(),
@@ -538,8 +564,6 @@ def model_recommend(ctx: click.Context, limit: int, catalog_path: str | None) ->
         )
     except Exception as exc:
         click.echo(f"(HuggingFace unavailable: {exc})")
-        click.echo("Bundled offline fallback:\n")
-        _recommend_fallback(catalog_path, store)
         return
     if not runnable:
         click.echo("No HuggingFace GGUF text-generation models fit this host's budget.")
