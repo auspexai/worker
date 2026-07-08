@@ -13,6 +13,7 @@ from auspexai_worker.sandbox import (
     SandboxPolicy,
     build_argv,
     check_bubblewrap_available,
+    enforced_policy,
     probe_bubblewrap,
 )
 from auspexai_worker.sandbox.wrapper import _strict_fs_argv, resolve_runner_bin
@@ -62,6 +63,14 @@ class TestBubblewrap:
 
 
 _RUNNER = "/opt/auspexai-worker/bin/auspexai-worker-runner"
+
+
+def _setenv_value(args: list[str], key: str) -> str | None:
+    """Return the value of the first `--setenv <key> <value>` triple in a bwrap argv."""
+    for i, a in enumerate(args):
+        if a == "--setenv" and i + 2 < len(args) and args[i + 1] == key:
+            return args[i + 2]
+    return None
 
 
 def _strict_config(**kw) -> SandboxConfig:
@@ -202,8 +211,13 @@ class TestStrictPolicy:
         assert "--ro-bind" in args and "/usr" in args
         assert "/opt/auspexai-worker" in args  # the worker venv (runner + python)
         assert "--tmpfs" in args
-        i = args.index("--setenv")
-        assert args[i : i + 3] == ["--setenv", "HOME", "/tmp"]
+        # AUD-31: STRICT clears the env and --clearenv MUST precede every --setenv
+        # (so nothing set before it, e.g. HF_TOKEN, survives).
+        assert "--clearenv" in args
+        assert args.index("--clearenv") < args.index("--setenv")
+        # HOME=/tmp is still set (just no longer the first --setenv); PATH is fixed.
+        assert _setenv_value(args, "HOME") == "/tmp"
+        assert _setenv_value(args, "PATH") == "/usr/bin:/bin:/usr/sbin:/sbin"
         # the per-unit workspace IS bound (writable output path).
         assert "--bind" in args
         assert "/var/lib/auspexai-worker/work/u-1" in args
@@ -231,6 +245,20 @@ class TestStrictPolicy:
         joined = " ".join(argv)
         assert "/root" not in joined
         assert ".config/auspexai-worker" not in joined
+
+    def test_strict_build_argv_refuses_traversal_models_dir(self) -> None:
+        """AUD-24 defense-in-depth: build_argv must never ro-bind a models_dir
+        with a `..` component (would expose the sibling data_dir under strict)."""
+        if not check_bubblewrap_available():
+            pytest.skip("bubblewrap not installed on this host")
+        with pytest.raises(SandboxNotAvailableError):
+            build_argv(
+                _strict_config(
+                    executor_command=["python", "exec.py"],
+                    models_dir="/srv/models/../../var/lib/auspexai-coordinator",
+                ),
+                seccomp_fd=7,
+            )
 
     def test_permissive_default_still_shares_host_fs(self) -> None:
         if not check_bubblewrap_available():
@@ -277,3 +305,29 @@ class TestProbeBubblewrap:
         # workaround, the user will see exactly the same actionable error
         # the daemon would surface.
         assert result.ok is True, f"bwrap probe failed unexpectedly: {result.reason}"
+
+
+class TestEnforcedPolicy:
+    """AUD-25 (A9 audit): the signed `ran_under` must reflect what the argv
+    ACTUALLY enforces, not the configured policy knob — so a strict config that
+    isn't actually contained can't forge a strict attestation."""
+
+    def test_linux_strict_with_bubblewrap_is_strict(self, monkeypatch) -> None:
+        monkeypatch.setattr(sys, "platform", "linux")
+        assert enforced_policy(_strict_config(use_bubblewrap=True)) is SandboxPolicy.STRICT
+
+    def test_linux_strict_without_bubblewrap_is_not_strict(self, monkeypatch) -> None:
+        # The forged-strict case: build_argv returns a bare runner (no containment),
+        # so it must be reported PERMISSIVE and never signed strict.
+        monkeypatch.setattr(sys, "platform", "linux")
+        assert enforced_policy(_strict_config(use_bubblewrap=False)) is SandboxPolicy.PERMISSIVE
+
+    def test_darwin_strict_without_bubblewrap_is_strict(self, monkeypatch) -> None:
+        # macOS delivers STRICT via Seatbelt with use_bubblewrap always False.
+        monkeypatch.setattr(sys, "platform", "darwin")
+        assert enforced_policy(_strict_config(use_bubblewrap=False)) is SandboxPolicy.STRICT
+
+    def test_permissive_stays_permissive(self, monkeypatch) -> None:
+        monkeypatch.setattr(sys, "platform", "linux")
+        cfg = _strict_config(policy=SandboxPolicy.PERMISSIVE, use_bubblewrap=True)
+        assert enforced_policy(cfg) is SandboxPolicy.PERMISSIVE

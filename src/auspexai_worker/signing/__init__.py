@@ -23,7 +23,9 @@ from __future__ import annotations
 
 from .result import (
     RESULT_SCHEMA_VERSION,
+    canonical_raw_bytes,
     canonical_result_bytes,
+    sign_raw,
     sign_result,
     verify_result_signature,
 )
@@ -40,8 +42,10 @@ __all__ = [
     "SIGNATURE_LABEL",
     "SUPPORTED_ALG",
     "Rfc9421Signer",
+    "canonical_raw_bytes",
     "canonical_result_bytes",
     "compute_content_digest",
+    "sign_raw",
     "sign_request",
     "sign_result",
     "verify_result_signature",

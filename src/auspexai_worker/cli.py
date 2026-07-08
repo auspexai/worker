@@ -951,6 +951,33 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
         db.close()
         sys.exit(2)
 
+    # AUD-25 (A9 audit): couple the policy + bubblewrap knobs. On Linux, STRICT
+    # is delivered ONLY by bubblewrap — a strict worker with use_bubblewrap=false
+    # would run every unit as a bare, uncontained runner yet sign each result
+    # ran_under="strict", forging a firewall-#2 containment attestation the
+    # coordinator counts toward strict equal-trust and the public board displays.
+    # Refuse to start: a strict CLAIM must be a strict ENFORCEMENT. (macOS strict
+    # is delivered by Seatbelt with use_bubblewrap always False, so this coupling
+    # is Linux-only; the darwin Seatbelt probe below is its equivalent gate.)
+    if (
+        sys.platform == "linux"
+        and config.sandbox_policy == "strict"
+        and not config.sandbox_use_bubblewrap
+    ):
+        click.echo(
+            "ERROR: [sandbox] policy=strict requires use_bubblewrap=true on Linux.\n"
+            "       With use_bubblewrap=false the runner executes with NO containment,\n"
+            '       yet each result would be signed ran_under="strict" — a forged\n'
+            "       containment attestation. Refusing to start.\n"
+            "\n"
+            "       Fix ONE of:\n"
+            "         - install bubblewrap and set `[sandbox] use_bubblewrap = true`, or\n"
+            "         - run `auspexai-worker sandbox set-policy permissive`.",
+            err=True,
+        )
+        db.close()
+        sys.exit(2)
+
     # Sandbox pre-check (Q-W10): when running with bubblewrap, verify it
     # can actually construct a user namespace on this host before we start
     # accepting work. On Ubuntu 24.04 with default AppArmor settings the
@@ -975,9 +1002,12 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
                 "          profile scoped to auspexai-worker-runner is the right\n"
                 "          long-term fix; ships with the .deb in M7.\n"
                 "\n"
-                "       3. (last resort, DEGRADES SECURITY) Set\n"
-                "          `[sandbox] use_bubblewrap = false` in worker.toml to\n"
-                "          run the runner outside the §5.17 sandbox.\n"
+                "       3. (last resort, DEGRADES SECURITY — PERMISSIVE policy only)\n"
+                "          Set `[sandbox] use_bubblewrap = false` in worker.toml to\n"
+                "          run the runner outside the §5.17 sandbox. A STRICT worker\n"
+                "          REFUSES to start without bubblewrap (it would sign a\n"
+                "          containment it cannot enforce); run\n"
+                "          `auspexai-worker sandbox set-policy permissive` first.\n"
                 "\n"
                 "       See Documentation/AuspexAI/v0.1.0/worker_daemon_design.md\n"
                 "       §15 Q-W10 for the full resolution discussion.",

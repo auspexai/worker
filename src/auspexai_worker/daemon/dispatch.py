@@ -61,9 +61,10 @@ from auspexai_worker.sandbox import (
     SandboxPolicy,
     UnitCgroup,
     build_argv,
+    enforced_policy,
 )
 from auspexai_worker.sandbox.seccomp import SeccompUnavailableError, open_seccomp_fd
-from auspexai_worker.signing import RESULT_SCHEMA_VERSION, sign_result
+from auspexai_worker.signing import RESULT_SCHEMA_VERSION, sign_raw, sign_result
 from auspexai_worker.state import (
     PendingSubmissionRepository,
     SubmittedResultRepository,
@@ -352,6 +353,12 @@ class RunnerDispatcher:
             inference_model=inference_model,
             capture_raw=_capture_raw,
         )
+        # AUD-25 (A9 audit): the truthful `ran_under` is what the built argv
+        # ACTUALLY enforces, not the configured policy. A strict CONFIG without
+        # bubblewrap (Linux) runs a bare, uncontained runner, so it must NOT be
+        # signed strict. `enforced_policy` mirrors build_argv's branch logic.
+        # (The daemon also refuses to start Linux-strict-without-bwrap at cli.py.)
+        ran_under = enforced_policy(sandbox_config).value
         # §41(a): STRICT requires a seccomp filter (the "escape via syscall"
         # gate). Build it fail-closed — if libseccomp/pyseccomp can't produce
         # it, refuse the unit rather than run STRICT without the syscall gate.
@@ -591,6 +598,25 @@ class RunnerDispatcher:
                 reason=f"runner output.json malformed: {exc}",
             )
 
+        # AUD-26 (A9 audit): D20 raw model text is emitted INSIDE the executor
+        # payload but must NOT be part of the worker-signed/stored result payload —
+        # it varies per replica (so it would break consensus) and stripping it AFTER
+        # signing breaks the signature (the reported defect). Pop it out BEFORE
+        # signing; sign it DETACHED and ship it as a separate submit field, so the
+        # stored payload's signature verifies on export and raw stays tamper-evident.
+        raw_response: str | None = None
+        raw_signature: str | None = None
+        if _capture_raw and "raw_response" in result_payload:
+            _popped = result_payload.pop("raw_response")
+            if isinstance(_popped, str):
+                raw_response = _popped
+                raw_signature = sign_raw(
+                    privkey=self._privkey,
+                    pubkey_hex=self._worker_pubkey,
+                    unit_id=unit.unit_id,
+                    raw_response=raw_response,
+                )
+
         worker_signature = sign_result(
             privkey=self._privkey,
             pubkey_hex=self._worker_pubkey,
@@ -600,11 +626,12 @@ class RunnerDispatcher:
             payload=result_payload,
             # §9 #13a / A2 #32: sign every result as v2 — binding the served-weights
             # digest (empty for non-inference) AND `ran_under`, the sandbox policy
-            # this unit actually ran under. STRICT refuses rather than silently
-            # degrades, so the configured policy is the truthful per-result claim.
+            # this unit actually ran under. AUD-25: `ran_under` is derived from the
+            # argv actually built (enforced_policy), not the configured knob, so a
+            # strict config that didn't actually contain can't forge a strict claim.
             schema_version=RESULT_SCHEMA_VERSION,
             served_weights=served_weights,
-            ran_under=self._sandbox_policy.value,
+            ran_under=ran_under,
         )
 
         payload_json = json.dumps(result_payload, separators=(",", ":"), sort_keys=True)
@@ -625,7 +652,7 @@ class RunnerDispatcher:
             worker_pubkey=self._worker_pubkey,
             result_schema_version=RESULT_SCHEMA_VERSION,
             served_weights_json=served_weights_json,
-            ran_under=self._sandbox_policy.value,
+            ran_under=ran_under,
         )
 
         return self._attempt_submit_pending(
@@ -638,7 +665,12 @@ class RunnerDispatcher:
             worker_signature=worker_signature,
             result_schema_version=RESULT_SCHEMA_VERSION,
             served_weights=served_weights,
-            ran_under=self._sandbox_policy.value,
+            ran_under=ran_under,
+            # AUD-26: raw + its detached signature ride only the FIRST submit
+            # attempt (in-memory). A retry from the persisted pending queue omits
+            # them — raw is live-only / never at rest, so retry-loss is correct.
+            raw_response=raw_response,
+            raw_signature=raw_signature,
         )
 
     def retry_pending(self, *, max_per_tick: int = 5) -> list[DispatchOutcome]:
@@ -733,6 +765,8 @@ class RunnerDispatcher:
         result_schema_version: int = 0,
         served_weights: dict[str, str] | None = None,
         ran_under: str | None = None,
+        raw_response: str | None = None,
+        raw_signature: str | None = None,
     ) -> DispatchOutcome:
         """Single submit attempt for an already-queued pending row.
 
@@ -764,6 +798,9 @@ class RunnerDispatcher:
                 served_weights=served_weights,
                 # A2 #32: the worker-signed sandbox policy (v2).
                 ran_under=ran_under,
+                # AUD-26: D20 raw content + its detached signature, out-of-payload.
+                raw_response=raw_response,
+                raw_signature=raw_signature,
             )
         except ResultAlreadySubmittedError as exc:
             # The coord already has this result. Use the existing_result_id

@@ -399,7 +399,21 @@ def resolve_model_dir(
     model_id = model.get("id")
     if not isinstance(model_id, str) or not model_id:
         return None, "manifest model declaration is missing a valid `id`"
+    # AUD-24 (A9 audit): model_id is tenant-controlled (the SDK Model.id has no
+    # pattern constraint) and is used verbatim as a filesystem path that dispatch
+    # bind-mounts into the STRICT sandbox. An id like ".." or "../tenants" would
+    # resolve OUTSIDE the model store and bind the coordinator's data_dir
+    # (keystore.enc, cross-tenant staged packages) read-only into 'strict' —
+    # defeating firewall #2. Require a strict single-segment basename that
+    # resolves back inside the store; refuse traversal, separators, and absolute
+    # paths. (Mirrors the workspace/paths.py:71-77 guard.)
+    if model_id != Path(model_id).name:
+        return None, f"model id {model_id!r} is not a single path segment; refusing"
     model_dir = model_store_dir / model_id
+    try:
+        model_dir.resolve().relative_to(model_store_dir.resolve())
+    except ValueError:
+        return None, f"model id {model_id!r} resolves outside the model store; refusing"
     if model_dir.is_dir():
         return model_dir, None
     if model.get("local_weights_required"):

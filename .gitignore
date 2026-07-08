@@ -46,3 +46,6 @@ debian/*.log
 ../auspexai-worker_*.changes
 ../auspexai-worker_*.dsc
 ../auspexai-worker_*.tar.*
+
+# Cloudflare wrangler local cache
+packaging/.wrangler/

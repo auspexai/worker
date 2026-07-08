@@ -39,6 +39,7 @@ The worker_signature on the wire is `base64.b64encode(ed25519_sign(...))`.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 from datetime import datetime
 from typing import Any
@@ -129,6 +130,36 @@ def sign_result(
         ran_under=ran_under,
     )
     sig = privkey.sign(sig_input)
+    return base64.b64encode(sig).decode("ascii")
+
+
+def canonical_raw_bytes(*, unit_id: str, worker_pubkey: str, raw_response: str) -> bytes:
+    """AUD-26: the DETACHED raw-content signature body. D20 raw model text must
+    NOT live inside the worker-signed result payload — it varies per replica (so
+    it would break consensus) and stripping it after signing breaks the result
+    signature (the AUD-26 defect). Instead raw travels as a SEPARATE submit field
+    signed on its own: this binds `sha256(raw_response)` to the unit + worker, so
+    the coordinator authenticates the raw at ingest and an R3 driver can verify
+    the worker actually produced it. Signs the digest (not the full text) for
+    efficiency; the coordinator recomputes it from the received bytes.
+
+    WIRE CONTRACT: a byte-for-byte mirror of the coordinator's
+    `auspexai_platform.result_signature.canonical_raw_bytes`."""
+    body = {
+        "unit_id": unit_id,
+        "worker_pubkey": worker_pubkey.lower(),
+        "raw_response_sha256": hashlib.sha256(raw_response.encode("utf-8")).hexdigest(),
+    }
+    return json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def sign_raw(
+    *, privkey: Ed25519PrivateKey, pubkey_hex: str, unit_id: str, raw_response: str
+) -> str:
+    """Sign the detached raw-content body; returns the base64 signature."""
+    sig = privkey.sign(
+        canonical_raw_bytes(unit_id=unit_id, worker_pubkey=pubkey_hex, raw_response=raw_response)
+    )
     return base64.b64encode(sig).decode("ascii")
 
 

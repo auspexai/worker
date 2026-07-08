@@ -272,6 +272,34 @@ def test_resolve_model_dir_multi_model_unsupported(tmp_path: Path):
     assert "multi-model" in reason
 
 
+def test_resolve_model_dir_allows_dotted_ids(tmp_path: Path):
+    """AUD-24 guard must not reject the real convention (dots + hyphens)."""
+    (tmp_path / "qwen2.5-0.5b-instruct-q4").mkdir()
+    manifest = {"models": [{"id": "qwen2.5-0.5b-instruct-q4", "version": "1.0"}]}
+    models_dir, reason = resolve_model_dir(manifest, tmp_path)
+    assert models_dir == tmp_path / "qwen2.5-0.5b-instruct-q4"
+    assert reason is None
+
+
+@pytest.mark.parametrize(
+    "evil_id",
+    ["..", "../tenants", "a/b", "/etc", "../../keystore.enc", "sub/../..", "."],
+)
+def test_resolve_model_dir_refuses_path_traversal(tmp_path: Path, evil_id: str):
+    """AUD-24 (A9 audit): a tenant-controlled model id that is not a single safe
+    segment must be refused BEFORE it is used as a path — otherwise it would be
+    bind-mounted into the STRICT sandbox and expose sibling data_dir contents
+    (keystore.enc, other tenants' staged packages). Even if the traversal target
+    exists as a directory, resolve_model_dir must return (None, <reason>)."""
+    # Make the traversal target real so is_dir() alone would have accepted it.
+    (tmp_path.parent / "tenants").mkdir(exist_ok=True)
+    manifest = {"models": [{"id": evil_id, "local_weights_required": True}]}
+    models_dir, reason = resolve_model_dir(manifest, tmp_path)
+    assert models_dir is None
+    assert reason is not None
+    assert "refusing" in reason
+
+
 def test_decide_execution_refuses_missing_required_model(tmp_path: Path):
     manifest = {
         "tenant_id": "t",

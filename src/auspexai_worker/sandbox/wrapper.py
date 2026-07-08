@@ -189,6 +189,17 @@ def probe_seatbelt() -> SeatbeltProbeResult:
     )
 
 
+def _reject_traversal_bind(label: str, path: str) -> None:
+    """Fail closed if a to-be-bound path contains a `..` traversal component
+    (AUD-24). Guards the ro-bind of tenant-influenced dirs into the sandbox so
+    no caller can bind a path that resolves outside its intended root — e.g. the
+    coordinator's sibling data_dir (keystore, cross-tenant packages)."""
+    if ".." in Path(path).parts:
+        raise SandboxNotAvailableError(
+            f"refusing to bind {label} {path!r} into the sandbox: path traversal"
+        )
+
+
 def build_argv(config: SandboxConfig, *, seccomp_fd: int | None = None) -> list[str]:
     """Construct the argv used to spawn the runner.
 
@@ -267,8 +278,15 @@ def build_argv(config: SandboxConfig, *, seccomp_fd: int | None = None) -> list[
     # the ONLY paths the executor can reach besides the system dirs + workspace.
     if config.executor_command is not None:
         if config.executor_package_dir:
+            _reject_traversal_bind("executor package dir", config.executor_package_dir)
             argv += ["--ro-bind", config.executor_package_dir, config.executor_package_dir]
         if config.models_dir:
+            # AUD-24 (A9 audit): defense-in-depth at the bind site. provisioning's
+            # resolve_model_dir already refuses a traversal model.id, but never
+            # ro-bind a path with a `..` component into the sandbox regardless of
+            # caller — a traversal here would expose the coordinator's data_dir
+            # (keystore, cross-tenant packages) under 'strict'. Fail closed.
+            _reject_traversal_bind("models dir", config.models_dir)
             argv += ["--ro-bind-try", config.models_dir, config.models_dir]
         if config.inference_socket:
             sock_dir = str(Path(config.inference_socket).parent)
@@ -278,6 +296,28 @@ def build_argv(config: SandboxConfig, *, seccomp_fd: int | None = None) -> list[
     # the daemon's own PATH, unchanged.
     argv += [*env_args, "--", resolved_runner]
     return argv
+
+
+def enforced_policy(config: SandboxConfig) -> SandboxPolicy:
+    """The containment policy the argv from `build_argv` ACTUALLY enforces — the
+    truthful `ran_under` claim (AUD-25). Derived from the SAME branch logic as
+    `build_argv`, NOT from the configured `policy` knob, so a strict CONFIG that
+    isn't actually contained is never signed as strict.
+
+    STRICT is only real when a sandbox actually wraps the runner:
+      - macOS STRICT is delivered by Seatbelt regardless of `use_bubblewrap`
+        (always False there), so a STRICT config stands.
+      - Otherwise, when `use_bubblewrap` is False, `build_argv` short-circuits to
+        a BARE runner with no containment — so a STRICT config enforces nothing
+        and is reported PERMISSIVE, never signed strict. (The daemon also refuses
+        to START in this state on Linux, cli.py; this is defense-in-depth.)
+      - With bubblewrap, the configured policy is the one built.
+    """
+    if sys.platform == "darwin" and config.policy is SandboxPolicy.STRICT:
+        return SandboxPolicy.STRICT
+    if not config.use_bubblewrap:
+        return SandboxPolicy.PERMISSIVE
+    return config.policy
 
 
 def _permissive_fs_argv(config: SandboxConfig) -> list[str]:
@@ -305,10 +345,31 @@ def _strict_fs_argv(config: SandboxConfig, resolved_runner: str) -> list[str]:
     ephemeral mount), a fresh `/proc` + minimal `/dev`, and the per-unit
     workspace as the SOLE host-writable path. The identity keystore, `$HOME`,
     prior receipts, and other tenants' staged packages live OUTSIDE these binds,
-    so the executor cannot read them."""
+    so the executor cannot read them.
+
+    AUD-31 (A9 audit): STRICT also isolates the ENVIRONMENT. Without `--clearenv`
+    bubblewrap inherits the daemon's full env (dispatch passes env=os.environ),
+    leaking operator secrets like HF_TOKEN into tenant code — STRICT would be an
+    additive overlay, not an exclusive allowlist. Clear it and re-set only the
+    minimal, host-independent env the runner needs; the later `--setenv AUSPEXAI_*`
+    pairs (emitted after this `--clearenv`) survive because bwrap applies args in
+    order."""
     # <venv>/bin/<runner> -> <venv>; binds the python + auspexai_worker + deps.
     venv_root = str(Path(resolved_runner).resolve().parents[1])
     return [
+        # AUD-31: exclusive env allowlist. --clearenv MUST precede every --setenv
+        # (here HOME below + the AUSPEXAI_* pairs in _env_argv). PATH/TMPDIR/LANG
+        # are fixed (not read from the daemon env) so STRICT is host-independent.
+        "--clearenv",
+        "--setenv",
+        "PATH",
+        "/usr/bin:/bin:/usr/sbin:/sbin",
+        "--setenv",
+        "TMPDIR",
+        "/tmp",
+        "--setenv",
+        "LANG",
+        "C.UTF-8",
         "--ro-bind",
         "/usr",
         "/usr",

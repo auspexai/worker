@@ -648,6 +648,8 @@ class CoordinatorClient:
         result_schema_version: int = 0,
         served_weights: dict[str, str] | None = None,
         ran_under: str | None = None,
+        raw_response: str | None = None,
+        raw_signature: str | None = None,
     ) -> ResultSubmissionResponse:
         """POST .../result. Worker-credentialed.
 
@@ -687,6 +689,14 @@ class CoordinatorClient:
         # the accountable (worker-signed) containment.
         if result_schema_version >= 2:
             body["ran_under"] = str(ran_under or "").lower()
+        # AUD-26: D20 raw model text rides OUTSIDE the signed result payload as a
+        # separate field with its own detached signature (never in the payload the
+        # result_signature covers, so the stored bundle verifies). Only sent on the
+        # first attempt for a capture unit; omitted otherwise.
+        if raw_response is not None:
+            body["raw_response"] = raw_response
+            if raw_signature is not None:
+                body["raw_signature"] = raw_signature
         response = self._signed_request(
             method="POST",
             path=f"/api/v0/workers/{worker_id}/assignments/{unit_id}/result",

@@ -21,6 +21,7 @@ from .wrapper import (
     SeatbeltProbeResult,
     build_argv,
     check_bubblewrap_available,
+    enforced_policy,
     probe_bubblewrap,
     probe_seatbelt,
 )
@@ -35,6 +36,7 @@ __all__ = [
     "UnitCgroup",
     "build_argv",
     "check_bubblewrap_available",
+    "enforced_policy",
     "probe_bubblewrap",
     "probe_seatbelt",
 ]

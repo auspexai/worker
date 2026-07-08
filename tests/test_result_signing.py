@@ -9,7 +9,9 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from auspexai_worker.signing import (
+    canonical_raw_bytes,
     canonical_result_bytes,
+    sign_raw,
     sign_result,
     verify_result_signature,
 )
@@ -328,3 +330,47 @@ class TestRanUnderV2:
 def _drop_pub(args: dict) -> dict:
     """sign_result takes pubkey_hex, not worker_pubkey — strip the dup key."""
     return {k: v for k, v in args.items() if k != "worker_pubkey"}
+
+
+# ── AUD-26: detached raw-content signature ─────────────────────────────────────
+
+# MUST equal the coordinator's known vector (platform test_result_signature_v2.py):
+# sha256("hi"), keys sorted, worker_pubkey lower-cased.
+_RAW_KNOWN_VECTOR = (
+    b'{"raw_response_sha256":'
+    b'"8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4",'
+    b'"unit_id":"u","worker_pubkey":"ab"}'
+)
+
+
+def test_raw_canonical_known_vector() -> None:
+    """Byte-for-byte drift guard vs the coordinator's canonical_raw_bytes."""
+    assert (
+        canonical_raw_bytes(unit_id="u", worker_pubkey="AB", raw_response="hi") == _RAW_KNOWN_VECTOR
+    )
+
+
+def test_sign_raw_roundtrips() -> None:
+    import base64
+
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+    pk, pub = _make_key()
+    raw = "some untrusted model text"
+    sig_b64 = sign_raw(privkey=pk, pubkey_hex=pub, unit_id="u1", raw_response=raw)
+    pubkey = Ed25519PublicKey.from_public_bytes(bytes.fromhex(pub))
+    # verifies over the canonical detached body
+    pubkey.verify(
+        base64.b64decode(sig_b64),
+        canonical_raw_bytes(unit_id="u1", worker_pubkey=pub, raw_response=raw),
+    )
+    # a tampered raw no longer verifies
+    try:
+        pubkey.verify(
+            base64.b64decode(sig_b64),
+            canonical_raw_bytes(unit_id="u1", worker_pubkey=pub, raw_response=raw + "!"),
+        )
+        raise AssertionError("tampered raw should not verify")
+    except InvalidSignature:
+        pass
