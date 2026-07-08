@@ -589,20 +589,35 @@ def _resolve_and_pull(
     if not quants:
         click.echo(f"no GGUF files found in {repo!r}", err=True)
         return False
+    usable = usable_budget_gb(acc.memory_budget_gb, unified=acc.unified)  # type: ignore[attr-defined]
     if quant:
         chosen = next((q for q in quants if q.quant.lower() == quant.lower()), None)
         if chosen is None:
             avail = ", ".join(sorted({q.quant for q in quants}))
             click.echo(f"quant {quant!r} not in {repo!r}; available: {avail}", err=True)
             return False
+        # RAM guard: don't stage a quant this host can't serve, even named explicitly
+        # (presence-on-disk is worthless if it never loads). Refuse rather than pull.
+        if not quant_fits(chosen, usable, disk_free):
+            click.echo(
+                f"{chosen.model_id} [{chosen.quant}] (~{chosen.size_gb:.1f} GB load footprint) "
+                f"won't fit this host (usable ~{usable:.1f} GB) — refusing; it could never serve.",
+                err=True,
+            )
+            return False
     else:
-        usable = usable_budget_gb(acc.memory_budget_gb, unified=acc.unified)  # type: ignore[attr-defined]
         fitting = [q for q in quants if quant_fits(q, usable, disk_free)]
-        chosen = (
-            max(fitting, key=lambda q: q.size_bytes)
-            if fitting
-            else min(quants, key=lambda q: q.size_bytes)
-        )
+        # No fitting quant → REFUSE (never "pull the smallest anyway" — that just
+        # strands an unservable file, the deepseek/gemma-4-on-a-mayhem class).
+        if not fitting:
+            smallest = min(quants, key=lambda q: q.size_bytes)
+            click.echo(
+                f"no quant of {repo!r} fits this host (smallest is {smallest.quant} "
+                f"~{smallest.size_gb:.1f} GB, usable ~{usable:.1f} GB) — refusing.",
+                err=True,
+            )
+            return False
+        chosen = max(fitting, key=lambda q: q.size_bytes)  # best quality that fits
     click.echo(f"pulling {chosen.repo} [{chosen.quant}] (~{chosen.size_gb:.1f} GB) …")
     try:
         dest = pull_quant(chosen, store, HfHubFetcher(), disk_free_bytes=disk_free)
@@ -1125,6 +1140,11 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
                     policy=policy,
                 )
 
+        # RAM guard for auto-acquire (fleet-fit): this worker won't download a model
+        # its memory can't serve. Computed once from the detected accelerator budget.
+        _acc = detect_accelerator()
+        _usable_memory_gb = usable_budget_gb(_acc.memory_budget_gb, unified=_acc.unified)
+
         dispatcher = RunnerDispatcher(
             coordinator=client,
             worker_id=worker.worker_id,
@@ -1165,7 +1185,9 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
             # true AT STARTUP made `executor set --auto-acquire` a no-op for
             # acquisition until a perfectly-timed restart — #44 surfaced this
             # (caps reported auto_acquire=true but acquirer was None → refuse).
-            model_acquirer=StoreModelAcquirer(ModelStore(config.models_store_path)),
+            model_acquirer=StoreModelAcquirer(
+                ModelStore(config.models_store_path), usable_memory_gb=_usable_memory_gb
+            ),
             live_executor=_live_executor,
             open_inference_session=open_inference_session,
             # M1 (v0_2): this worker's serving version, for the manifest's
@@ -1252,7 +1274,9 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
             prestage = PrestageLoop(
                 coordinator=client,
                 worker_id=worker.worker_id,
-                acquirer=StoreModelAcquirer(ModelStore(config.models_store_path)),
+                acquirer=StoreModelAcquirer(
+                    ModelStore(config.models_store_path), usable_memory_gb=_usable_memory_gb
+                ),
                 interval_seconds=config.heartbeat_interval_seconds * 2,
             )
 

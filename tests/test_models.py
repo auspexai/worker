@@ -323,3 +323,49 @@ def test_pull_quant_installs_single_gguf(tmp_path: Path):
     assert (dest / "M-Q4_K_M.gguf").read_bytes() == b"gguf-bytes"
     pull_quant(q, store, fetcher)  # idempotent
     assert fetcher.calls == 1
+
+
+def test_pull_from_coords_ram_guard_refuses_unservable(tmp_path: Path, monkeypatch):
+    """RAM guard: a model whose load footprint exceeds usable memory is REFUSED
+    before any download (the 156 GB-deepseek-on-a-7 GB-mayhem class)."""
+    import auspexai_worker.models.fetch as fetch_mod
+
+    monkeypatch.setattr(fetch_mod, "_hf_total_bytes", lambda r, f: 156_000_000_000)
+    store = ModelStore(tmp_path)
+    fetcher = _FakeFileFetcher()
+    with pytest.raises(ModelFetchError, match="usable memory"):
+        pull_from_coords(
+            model_id="deepseek-v4",
+            hf_repo="Org/DS-GGUF",
+            hf_filename="ds.gguf",
+            store=store,
+            fetcher=fetcher,
+            usable_memory_gb=7.4,
+        )
+    assert fetcher.calls == []  # refused BEFORE fetching — no wasted 156 GB download
+    assert not store.has("deepseek-v4")
+
+
+def test_pull_from_coords_ram_guard_allows_fitting(tmp_path: Path, monkeypatch):
+    import auspexai_worker.models.fetch as fetch_mod
+
+    monkeypatch.setattr(fetch_mod, "_hf_total_bytes", lambda r, f: 1_000_000_000)  # 1 GB fits
+    store = ModelStore(tmp_path)
+    fetcher = _FakeFileFetcher()
+    pull_from_coords(
+        model_id="small",
+        hf_repo="Org/S-GGUF",
+        hf_filename="s.gguf",
+        store=store,
+        fetcher=fetcher,
+        usable_memory_gb=7.4,
+    )
+    assert store.has("small")  # fits → proceeds
+
+
+def test_memory_fits_helper():
+    from auspexai_worker.models.hf_browse import memory_fits
+
+    assert memory_fits(1_000_000_000, 7.4)  # 1 GB * 1.2 overhead ≤ 7.4
+    assert not memory_fits(156_000_000_000, 7.4)  # 156 GB won't fit
+    assert memory_fits(999_000_000_000, None)  # unknown budget ⇒ not gating

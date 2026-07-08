@@ -17,6 +17,7 @@ import threading
 from pathlib import Path
 
 from auspexai_worker.models.download_progress import DownloadProgressPoller
+from auspexai_worker.models.hf_browse import memory_fits
 from auspexai_worker.models.store import ModelStore
 
 # M3 fetch-hardening (mayhem0, 2026-06-06): a `model setup` download wedged for
@@ -130,10 +131,13 @@ class StoreModelAcquirer:
         fetcher: HfHubFetcher | None = None,
         *,
         min_headroom_bytes: int = 2_000_000_000,
+        usable_memory_gb: float | None = None,
     ) -> None:
         self._store = store
         self._fetcher = fetcher or HfHubFetcher()
         self._min_headroom_bytes = min_headroom_bytes
+        # RAM guard: this worker won't auto-acquire a model it can't load/serve.
+        self._usable_memory_gb = usable_memory_gb
 
     def acquire(self, *, model_id: str, hf_repo: str, hf_filename: str) -> Path:
         return pull_from_coords(
@@ -144,6 +148,7 @@ class StoreModelAcquirer:
             fetcher=self._fetcher,
             disk_free_bytes=_free_bytes_for(self._store.root),
             min_headroom_bytes=self._min_headroom_bytes,
+            usable_memory_gb=self._usable_memory_gb,
         )
 
 
@@ -156,17 +161,32 @@ def pull_from_coords(
     fetcher,
     disk_free_bytes: int | None = None,
     min_headroom_bytes: int = 2_000_000_000,
+    usable_memory_gb: float | None = None,
 ) -> Path:
     """Pull a single pinned file (`hf_repo`/`hf_filename`) into the store under
     `model_id` — the M3 lazy-auto-acquire path. Mirrors `pull_quant`'s atomic
     `.partial` staging + idempotence, but takes the explicit acquisition coords
-    the manifest carries (we don't know the size up front, so the disk guard is
-    a coarse free-headroom check rather than an exact size pre-check).
+    the manifest carries.
+
+    `usable_memory_gb` (when known) is the RAM GUARD: a worker must not download a
+    model it can't serve — presence-on-disk is worthless if it never loads (the
+    stranded-156GB-on-a-7GB-mayhem class). We size the file from HF and REFUSE
+    up-front when its load footprint exceeds this worker's usable memory; a failed
+    size query falls through (best-effort, disk guard still applies).
 
     `fetcher` must expose `fetch_file(repo, filename, dest_dir)` (HfHubFetcher)."""
     dest = store.path_for(model_id)
     if store.has(model_id):
         return dest
+    # RAM guard (AUD/fleet-fit): refuse to acquire a model this worker can't serve.
+    if usable_memory_gb is not None:
+        size = _hf_total_bytes(hf_repo, hf_filename)
+        if size is not None and not memory_fits(size, usable_memory_gb):
+            raise ModelFetchError(
+                f"refusing to auto-acquire {model_id!r}: ~{size / 1e9:.1f} GB "
+                f"(load footprint) exceeds this worker's usable memory "
+                f"(~{usable_memory_gb:.1f} GB) — it could never serve"
+            )
     # Serialize concurrent acquires of the SAME model (prestage loop vs. dispatch):
     # both stage into `<model>.partial`, and one's rmtree-at-start would wipe the
     # other's in-flight download. The loser re-checks the store and returns.

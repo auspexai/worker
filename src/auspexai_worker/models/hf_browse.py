@@ -124,6 +124,15 @@ def quant_fits(quant: ModelQuant, usable_gb: float | None, disk_free_bytes: int)
     return quant.size_gb * _LOAD_OVERHEAD <= usable_gb
 
 
+def memory_fits(size_bytes: int, usable_gb: float | None) -> bool:
+    """Whether a model of `size_bytes` can LOAD into `usable_gb` of memory (the same
+    load-estimate `quant_fits` uses). Unknown budget ⇒ True (not gating). The RAM
+    guard on the auto-acquire path (don't download what this worker can't serve)."""
+    if usable_gb is None:
+        return True
+    return (size_bytes / 1e9) * _LOAD_OVERHEAD <= usable_gb
+
+
 def runnable_models(
     browser: HfBrowser,
     *,
