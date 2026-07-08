@@ -121,6 +121,13 @@ class Capabilities:
     # digest differs (§9 #13b: the declared model provably ran). Omitted from
     # the wire when empty (absent == no served weights to attest).
     served_model_digests: dict[str, str] = field(default_factory=dict)
+    # Fleet-fit: {model_id: on-disk bytes} for the BYOM store, so the coordinator
+    # can size a PRESENT model directly (mark it available only if it FITS this
+    # worker's RAM, too_big if not) instead of only sizing models it happens to
+    # have in its HF catalog. Presence alone never implies runnable — this closes
+    # the gap where a small locally-run model (or a huge stranded one) had no size.
+    # Omitted from the wire when empty.
+    model_sizes: dict[str, int] = field(default_factory=dict)
     # Current thermal/health snapshot (W-H), or None where no sensor exists.
     # Lets the coordinator route work away from a degraded/overheating worker
     # (forward-compatible; opaque until consumed).
@@ -193,6 +200,8 @@ class Capabilities:
             d.pop("served_models", None)  # absent == not an inference host
         if not self.served_model_digests:
             d.pop("served_model_digests", None)  # absent == no served weights to attest
+        if not self.model_sizes:
+            d.pop("model_sizes", None)  # compact wire when the store is empty
         if self.thermal is None:
             d.pop("thermal", None)  # omit where no sensor / health disabled
         if self.worker_version is None:
@@ -332,6 +341,9 @@ def collect(
     # Locally-available model ids (BYOM store inventory). Caller-supplied — the
     # collector doesn't read the store itself (keeps detection store-agnostic).
     models: list[str] | None = None,
+    # {model_id: on-disk bytes} for the same store (caller-supplied) — lets the
+    # coordinator size a present model directly for the fleet-fit classification.
+    model_sizes: dict[str, int] | None = None,
     # W-S: model ids loaded in the inference backend (caller-supplied from the
     # daemon's ModelServer; empty/None on non-inference hosts).
     served_models: list[str] | None = None,
@@ -378,6 +390,7 @@ def collect(
         gpus_declared=declared_gpus or GpuDeclaration(),
         declared_caps=resolved_caps,
         models=models or [],
+        model_sizes=model_sizes or {},
         served_models=served_models or [],
         served_model_digests=served_model_digests or {},
         thermal=thermal,

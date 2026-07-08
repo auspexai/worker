@@ -1212,11 +1212,15 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
             # Re-read the executor policy each beat so the coordinator-facing
             # capability tracks the live worker.toml (hot-reload, no restart).
             policy, auto_acquire = _live_executor()
+            _byom = ModelStore(config.models_store_path).list()
             return collect_capabilities(
                 declared_caps=declared_caps,
                 declared_gpus=config.declared_gpus,
-                # W-M: declare the BYOM store inventory so #30 can route on it.
-                models=ModelStore(config.models_store_path).inventory(),
+                # W-M: declare the BYOM store inventory (ids + on-disk sizes) so #30
+                # can route on it AND the coordinator can size a present model to
+                # classify it honestly (fits this worker's RAM or not).
+                models=[m.id for m in _byom],
+                model_sizes={m.id: m.size_bytes for m in _byom},
                 # W-S: declare what's serve-ready (loaded in the backend) so the
                 # scheduler can route inference experiments to warm workers.
                 served_models=(model_server.served_ids() if model_server is not None else None),

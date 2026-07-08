@@ -156,6 +156,17 @@ class TestCollect:
         payload = collect(sysroot=tmp_path, auto_acquire=True).to_dict()
         assert payload["auto_acquire"] is True
 
+    def test_to_dict_includes_model_sizes_when_present(self, tmp_path: Path) -> None:
+        # Fleet-fit: on-disk sizes ride the heartbeat so the coordinator can size a
+        # PRESENT model directly (classify it available/too_big by its real footprint).
+        payload = collect(
+            sysroot=tmp_path, models=["m-a"], model_sizes={"m-a": 1_000_000_000}
+        ).to_dict()
+        assert payload["model_sizes"] == {"m-a": 1_000_000_000}
+
+    def test_to_dict_omits_model_sizes_when_empty(self, tmp_path: Path) -> None:
+        assert "model_sizes" not in collect(sysroot=tmp_path).to_dict()
+
     def test_to_dict_omits_self_paused_when_off(self, tmp_path: Path) -> None:
         # §2.1 #11: absent == not self-paused (coordinator checks `is True`).
         assert "self_paused" not in collect(sysroot=tmp_path).to_dict()
