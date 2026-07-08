@@ -264,3 +264,37 @@ def test_ollama_chat_omits_keep_alive_by_default():
         "h", [{"role": "user", "content": "x"}], {}
     )
     assert "keep_alive" not in seen["body"]  # Ollama default applies
+
+
+def _store_with_sized_model(
+    tmp_path: Path, size_bytes: int, model_id: str = "big-q4"
+) -> ModelStore:
+    model_dir = tmp_path / "models" / model_id
+    model_dir.mkdir(parents=True)
+    (model_dir / "weights.gguf").write_bytes(b"\0" * size_bytes)
+    return ModelStore(tmp_path / "models")
+
+
+def test_serve_refuses_model_too_big_for_ram(tmp_path: Path):
+    # BYOM RAM guard (last line): a model whose footprint exceeds usable memory is
+    # refused at SERVE time — even one side-loaded into the store without `model
+    # pull`, so no path can end up serving what the host can't run.
+    store = _store_with_sized_model(tmp_path, 2_000_000)  # ~2 MB → footprint ~0.0024 GB
+    server = ModelServer(store, FakeBackend(), usable_memory_gb=0.001)  # 0.001 GB budget
+    with pytest.raises(ModelServeError, match="exceeds this host's usable memory"):
+        server.serve("big-q4")
+    assert server.served_ids() == []  # never loaded
+
+
+def test_serve_allows_fitting_model_with_budget(tmp_path: Path):
+    store = _store_with_sized_model(tmp_path, 2_000_000)
+    server = ModelServer(store, FakeBackend(), usable_memory_gb=1.0)  # ample budget
+    assert server.serve("big-q4").model_id == "big-q4"
+
+
+def test_serve_no_budget_does_not_gate(tmp_path: Path):
+    # Unknown budget ⇒ the serve guard is a backstop, not a wall (never blocks when
+    # it can't judge). Preserves the pre-guard behavior on RAM-unknown hosts.
+    store = _store_with_sized_model(tmp_path, 2_000_000)
+    server = ModelServer(store, FakeBackend())  # usable_memory_gb defaults to None
+    assert server.serve("big-q4").model_id == "big-q4"

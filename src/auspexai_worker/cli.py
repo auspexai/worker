@@ -51,7 +51,13 @@ from .health import ThermalMonitor
 from .keystore import KeystoreError
 from .models import ModelStore, survey_resources
 from .models.fetch import HfHubFetcher, ModelFetchError, StoreModelAcquirer, pull_quant
-from .models.hf_browse import HfHubBrowser, quant_fits, runnable_models, usable_budget_gb
+from .models.hf_browse import (
+    HfHubBrowser,
+    memory_fits,
+    quant_fits,
+    runnable_models,
+    usable_budget_gb,
+)
 from .models.recommend import parse_selection
 from .oauth import (
     AccessDeniedError,
@@ -422,13 +428,17 @@ def model() -> None:
 _DISK_SAFETY_MARGIN_BYTES = 5_000_000_000
 
 
-@model.command("doctor", help="Diagnose the local model store: presence, size, empty/partial dirs.")
+@model.command(
+    "doctor",
+    help="Diagnose the local model store: presence, size, partial dirs, and RAM-fit.",
+)
 @click.pass_context
 def model_doctor(ctx: click.Context) -> None:
     """E8: a health check on the BYOM store — flags empty or suspiciously-small
-    model directories (a partial/interrupted pull), reports total footprint, and
-    confirms the store path is readable. Exits non-zero if any problem is found
-    so it's scriptable in a cron/self-test."""
+    model directories (a partial/interrupted pull), flags any model TOO BIG to
+    serve on this host's memory (a side-load that skipped the pull-time RAM guard),
+    reports total footprint, and confirms the store path is readable. Exits
+    non-zero if any problem is found so it's scriptable in a cron/self-test."""
     import sys as _sys
 
     store = ModelStore(ctx.obj["config"].models_store_path)
@@ -440,6 +450,8 @@ def model_doctor(ctx: click.Context) -> None:
     if not models:
         click.echo("  empty store (no models) — OK; `model recommend` to see what fits")
         return
+    acc = detect_accelerator()
+    usable = usable_budget_gb(acc.memory_budget_gb, unified=acc.unified)
     problems = 0
     total = 0
     for m in models:
@@ -451,6 +463,13 @@ def model_doctor(ctx: click.Context) -> None:
             problems += 1
             why = "no .gguf file" if not has_gguf else f"suspiciously small ({gb:.3f} GB)"
             click.echo(f"  ⚠ {m.id}: {why} — likely a partial pull; re-run `model pull {m.id}`")
+        elif usable is not None and not memory_fits(m.size_bytes, usable):
+            # Present but unrunnable — the side-load case the RAM guard now catches.
+            problems += 1
+            click.echo(
+                f"  ✗ {m.id}  {gb:.2f} GB — TOO BIG to serve on this host "
+                f"(usable ~{usable:.1f} GB); it can't run. Remove with `model rm {m.id}`"
+            )
         else:
             click.echo(f"  ✓ {m.id}  {gb:.2f} GB")
     click.echo(f"total: {total / 1e9:.2f} GB across {len(models)} model(s)")
@@ -1098,6 +1117,14 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
         # The session provider serves the unit's model out of the BYOM store
         # (eager: loaded + warm before the runner spawns) and opens the broker
         # socket in the unit workspace; dispatch closes it when the unit ends.
+        # Usable memory budget (fleet-fit RAM guard): computed once from the detected
+        # accelerator and shared by the model server (serve-time guard) and the
+        # acquirers (acquire-time guard), so NO model that can't fit this host is ever
+        # served or pulled — the guard is a REQUIRED gate on every BYOM path, incl. a
+        # raw side-load that skipped `model pull`.
+        _acc = detect_accelerator()
+        _usable_memory_gb = usable_budget_gb(_acc.memory_budget_gb, unified=_acc.unified)
+
         model_server = None
         open_inference_session = None
         _ollama_version: str | None = None
@@ -1109,7 +1136,11 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
                 ollama_bin=config.inference_ollama_bin,
                 keep_alive=config.inference_keep_alive,
             )
-            model_server = ModelServer(ModelStore(config.models_store_path), _inference_backend)
+            model_server = ModelServer(
+                ModelStore(config.models_store_path),
+                _inference_backend,
+                usable_memory_gb=_usable_memory_gb,
+            )
             # §9 #46 determinism provenance: probe the serving Ollama's version
             # ONCE at daemon start (no per-tick HTTP); declared in heartbeats.
             _ollama_version = _inference_backend.version()
@@ -1139,11 +1170,6 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
                     socket_dir=socket_dir,
                     policy=policy,
                 )
-
-        # RAM guard for auto-acquire (fleet-fit): this worker won't download a model
-        # its memory can't serve. Computed once from the detected accelerator budget.
-        _acc = detect_accelerator()
-        _usable_memory_gb = usable_budget_gb(_acc.memory_budget_gb, unified=_acc.unified)
 
         dispatcher = RunnerDispatcher(
             coordinator=client,

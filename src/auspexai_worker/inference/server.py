@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from auspexai_worker.inference.backend import BackendError, InferenceBackend
+from auspexai_worker.models.hf_browse import memory_fits
 from auspexai_worker.models.store import ModelStore
 
 logger = logging.getLogger(__name__)
@@ -88,11 +89,17 @@ class ModelServer:
         *,
         seed: int = DEFAULT_SEED,
         num_ctx: int = DEFAULT_NUM_CTX,
+        usable_memory_gb: float | None = None,
     ) -> None:
         self._store = store
         self._backend = backend
         self._seed = seed
         self._num_ctx = num_ctx
+        # RAM guard (BYOM requirement): a model must FIT this host's memory to be
+        # served. This is the LAST-LINE, non-bypassable gate — it catches a model
+        # that reached the store any way at all, including a raw side-load that
+        # skipped the pull-time guard. None ⇒ budget unknown, gate off (backstop).
+        self._usable_memory_gb = usable_memory_gb
         self._served: dict[str, ServedModel] = {}
         self._lock = threading.Lock()
 
@@ -123,6 +130,17 @@ class ModelServer:
             return cached
 
         gguf = self._locate_gguf(model_id)
+        # RAM guard: refuse to serve a model this host can't fit — even one that was
+        # side-loaded straight into the store (bypassing the pull-time guard). A
+        # clean refusal (turned into a dispatch refusal upstream) beats letting the
+        # backend OOM mid-load. Unknown budget ⇒ not gating (the backstop).
+        if self._usable_memory_gb is not None:
+            size = gguf.stat().st_size
+            if not memory_fits(size, self._usable_memory_gb):
+                raise ModelServeError(
+                    f"{model_id!r} (~{size / 1e9:.1f} GB load footprint) exceeds this "
+                    f"host's usable memory (~{self._usable_memory_gb:.1f} GB) — cannot serve"
+                )
         digest = _sha256_of(gguf)
         handle = backend_handle(model_id)
 

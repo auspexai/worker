@@ -137,3 +137,45 @@ class TestRefuseCommand:
         assert rows[0].action == "refused_manual"
         assert rows[0].unit_id == "u-1"
         assert rows[0].reason == "testing"
+
+
+def test_model_doctor_flags_too_big_for_ram(tmp_path: Path, monkeypatch) -> None:
+    # A model present in the store but too big for this host's RAM is flagged (the
+    # side-load case the pull-time guard can't catch) and doctor exits non-zero.
+    import auspexai_worker.cli as cli_mod
+
+    class _Acc:
+        memory_budget_gb = 0.5
+        unified = False
+
+    monkeypatch.setattr(cli_mod, "detect_accelerator", lambda: _Acc())
+    monkeypatch.setattr(cli_mod, "usable_budget_gb", lambda *a, **k: 0.05)  # 0.05 GB usable
+
+    md = tmp_path / "data" / "models" / "toobig-q4"
+    md.mkdir(parents=True)
+    with open(md / "weights.gguf", "wb") as f:
+        f.truncate(60_000_000)  # 60 MB (clears the >50MB partial check) → footprint ~0.072 GB
+    cfg = _write_config(tmp_path)
+    r = CliRunner().invoke(cli, ["--config", str(cfg), "model", "doctor"], env=_env(tmp_path))
+    assert r.exit_code == 1
+    assert "TOO BIG" in r.output and "toobig-q4" in r.output
+
+
+def test_model_doctor_healthy_when_models_fit(tmp_path: Path, monkeypatch) -> None:
+    import auspexai_worker.cli as cli_mod
+
+    class _Acc:
+        memory_budget_gb = 16.0
+        unified = False
+
+    monkeypatch.setattr(cli_mod, "detect_accelerator", lambda: _Acc())
+    monkeypatch.setattr(cli_mod, "usable_budget_gb", lambda *a, **k: 15.0)  # ample
+
+    md = tmp_path / "data" / "models" / "small-q4"
+    md.mkdir(parents=True)
+    with open(md / "weights.gguf", "wb") as f:
+        f.truncate(60_000_000)  # 60 MB, well within the 15 GB budget
+    cfg = _write_config(tmp_path)
+    r = CliRunner().invoke(cli, ["--config", str(cfg), "model", "doctor"], env=_env(tmp_path))
+    assert r.exit_code == 0
+    assert "store healthy" in r.output
