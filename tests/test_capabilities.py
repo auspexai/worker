@@ -167,6 +167,13 @@ class TestCollect:
     def test_to_dict_omits_model_sizes_when_empty(self, tmp_path: Path) -> None:
         assert "model_sizes" not in collect(sysroot=tmp_path).to_dict()
 
+    def test_to_dict_includes_usable_memory_gb_when_set(self, tmp_path: Path) -> None:
+        # Fleet-fit: the coordinator gates routing on this (serve budget), not ram_total.
+        assert collect(sysroot=tmp_path, usable_memory_gb=5.44).to_dict()["usable_memory_gb"] == 5.44
+
+    def test_to_dict_omits_usable_memory_gb_when_none(self, tmp_path: Path) -> None:
+        assert "usable_memory_gb" not in collect(sysroot=tmp_path).to_dict()
+
     def test_to_dict_omits_self_paused_when_off(self, tmp_path: Path) -> None:
         # §2.1 #11: absent == not self-paused (coordinator checks `is True`).
         assert "self_paused" not in collect(sysroot=tmp_path).to_dict()

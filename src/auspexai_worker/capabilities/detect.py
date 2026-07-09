@@ -128,6 +128,13 @@ class Capabilities:
     # the gap where a small locally-run model (or a huge stranded one) had no size.
     # Omitted from the wire when empty.
     model_sizes: dict[str, int] = field(default_factory=dict)
+    # Fleet-fit: the memory actually AVAILABLE to load a model (`ram/vram_total -
+    # OS/runtime headroom`), i.e. the exact budget this worker's serve-time guard
+    # uses. The coordinator must gate routing on THIS, not raw `ram_total_gb` — on a
+    # unified 8 GB box the ~2 GB headroom means an 8B-q4 model fits raw RAM but NOT
+    # the serve budget, so a raw-RAM gate would route a model the worker then
+    # refuses. None when the accelerator budget is unknown. Omitted when None.
+    usable_memory_gb: float | None = None
     # Current thermal/health snapshot (W-H), or None where no sensor exists.
     # Lets the coordinator route work away from a degraded/overheating worker
     # (forward-compatible; opaque until consumed).
@@ -202,6 +209,8 @@ class Capabilities:
             d.pop("served_model_digests", None)  # absent == no served weights to attest
         if not self.model_sizes:
             d.pop("model_sizes", None)  # compact wire when the store is empty
+        if self.usable_memory_gb is None:
+            d.pop("usable_memory_gb", None)  # absent == budget unknown
         if self.thermal is None:
             d.pop("thermal", None)  # omit where no sensor / health disabled
         if self.worker_version is None:
@@ -344,6 +353,9 @@ def collect(
     # {model_id: on-disk bytes} for the same store (caller-supplied) — lets the
     # coordinator size a present model directly for the fleet-fit classification.
     model_sizes: dict[str, int] | None = None,
+    # The worker's usable load budget (caller-supplied from the accelerator) — the
+    # coordinator gates routing on this, not raw ram_total, to match serve-time fit.
+    usable_memory_gb: float | None = None,
     # W-S: model ids loaded in the inference backend (caller-supplied from the
     # daemon's ModelServer; empty/None on non-inference hosts).
     served_models: list[str] | None = None,
@@ -391,6 +403,7 @@ def collect(
         declared_caps=resolved_caps,
         models=models or [],
         model_sizes=model_sizes or {},
+        usable_memory_gb=usable_memory_gb,
         served_models=served_models or [],
         served_model_digests=served_model_digests or {},
         thermal=thermal,

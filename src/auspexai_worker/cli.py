@@ -1247,6 +1247,9 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
                 # classify it honestly (fits this worker's RAM or not).
                 models=[m.id for m in _byom],
                 model_sizes={m.id: m.size_bytes for m in _byom},
+                # Fleet-fit: the worker's usable load budget, so the coordinator gates
+                # routing on what this worker can actually SERVE, not raw ram_total.
+                usable_memory_gb=_usable_memory_gb,
                 # W-S: declare what's serve-ready (loaded in the backend) so the
                 # scheduler can route inference experiments to warm workers.
                 served_models=(model_server.served_ids() if model_server is not None else None),
