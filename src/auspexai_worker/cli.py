@@ -49,7 +49,7 @@ from .daemon import AssignmentPoller, HeartbeatLoop, PrestageLoop
 from .daemon.dispatch import RunnerDispatcher
 from .health import ThermalMonitor
 from .keystore import KeystoreError
-from .models import ModelStore, survey_resources
+from .models import ModelStore, download_progress, survey_resources
 from .models.fetch import HfHubFetcher, ModelFetchError, StoreModelAcquirer, pull_quant
 from .models.hf_browse import (
     HfHubBrowser,
@@ -1250,6 +1250,9 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
                 # Fleet-fit: the worker's usable load budget, so the coordinator gates
                 # routing on what this worker can actually SERVE, not raw ram_total.
                 usable_memory_gb=_usable_memory_gb,
+                # D12 5c: in-flight model downloads, so the operator UI shows a live
+                # "provisioning: downloading <model> NN%" instead of a silent gap.
+                downloads=download_progress.snapshot(),
                 # W-S: declare what's serve-ready (loaded in the backend) so the
                 # scheduler can route inference experiments to warm workers.
                 served_models=(model_server.served_ids() if model_server is not None else None),

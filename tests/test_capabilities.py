@@ -239,3 +239,11 @@ class TestWorkerFeatures:
     def test_generation_policy_always_declared(self, tmp_path: Path) -> None:
         payload = collect(sysroot=tmp_path).to_dict()
         assert "generation_policy" in payload["worker_features"]
+
+    def test_to_dict_includes_downloads_when_active(self, tmp_path: Path) -> None:
+        # D12 5c: an in-flight download rides the heartbeat so the UI can show progress.
+        dl = {"m-x": {"bytes_downloaded": 500, "total_bytes": 1000}}
+        assert collect(sysroot=tmp_path, downloads=dl).to_dict()["downloads"] == dl
+
+    def test_to_dict_omits_downloads_when_idle(self, tmp_path: Path) -> None:
+        assert "downloads" not in collect(sysroot=tmp_path).to_dict()

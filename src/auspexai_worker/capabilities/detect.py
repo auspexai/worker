@@ -135,6 +135,12 @@ class Capabilities:
     # the serve budget, so a raw-RAM gate would route a model the worker then
     # refuses. None when the accelerator budget is unknown. Omitted when None.
     usable_memory_gb: float | None = None
+    # In-flight model downloads (D12 5c): {model_id: {bytes_downloaded, total_bytes}}
+    # while the worker is auto-acquiring a model. Lets the coordinator + operator UI
+    # show "provisioning: downloading <model> NN%" instead of a silent "provisioned"
+    # for the minutes a multi-GB pull takes. Omitted from the wire when nothing is
+    # downloading (the common case).
+    downloads: dict[str, dict] = field(default_factory=dict)
     # Current thermal/health snapshot (W-H), or None where no sensor exists.
     # Lets the coordinator route work away from a degraded/overheating worker
     # (forward-compatible; opaque until consumed).
@@ -211,6 +217,8 @@ class Capabilities:
             d.pop("model_sizes", None)  # compact wire when the store is empty
         if self.usable_memory_gb is None:
             d.pop("usable_memory_gb", None)  # absent == budget unknown
+        if not self.downloads:
+            d.pop("downloads", None)  # compact wire when nothing is downloading
         if self.thermal is None:
             d.pop("thermal", None)  # omit where no sensor / health disabled
         if self.worker_version is None:
@@ -356,6 +364,8 @@ def collect(
     # The worker's usable load budget (caller-supplied from the accelerator) — the
     # coordinator gates routing on this, not raw ram_total, to match serve-time fit.
     usable_memory_gb: float | None = None,
+    # In-flight model downloads (caller-supplied from download_progress.snapshot()).
+    downloads: dict[str, dict] | None = None,
     # W-S: model ids loaded in the inference backend (caller-supplied from the
     # daemon's ModelServer; empty/None on non-inference hosts).
     served_models: list[str] | None = None,
@@ -404,6 +414,7 @@ def collect(
         models=models or [],
         model_sizes=model_sizes or {},
         usable_memory_gb=usable_memory_gb,
+        downloads=downloads or {},
         served_models=served_models or [],
         served_model_digests=served_model_digests or {},
         thermal=thermal,
