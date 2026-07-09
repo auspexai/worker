@@ -169,7 +169,9 @@ class TestCollect:
 
     def test_to_dict_includes_usable_memory_gb_when_set(self, tmp_path: Path) -> None:
         # Fleet-fit: the coordinator gates routing on this (serve budget), not ram_total.
-        assert collect(sysroot=tmp_path, usable_memory_gb=5.44).to_dict()["usable_memory_gb"] == 5.44
+        assert (
+            collect(sysroot=tmp_path, usable_memory_gb=5.44).to_dict()["usable_memory_gb"] == 5.44
+        )
 
     def test_to_dict_omits_usable_memory_gb_when_none(self, tmp_path: Path) -> None:
         assert "usable_memory_gb" not in collect(sysroot=tmp_path).to_dict()
