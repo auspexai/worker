@@ -39,14 +39,14 @@ dev = [
     "pytest>=7.4",
     "pytest-cov>=4.1",
     "respx>=0.21",
-    "ruff==0.15.20",
+    "ruff==0.15.21",
     # §9 #47 harness-seam test: the REAL SDK ExecutorHarness driven through the
     # worker dispatch path (the 2026-06-08 audit's critical-finding seam —
     # fixture executors validate our BELIEFS about the SDK contract; this dep
     # lets one test validate the contract itself). Pinned to the released tag;
     # bump deliberately when the SDK releases. Dev-only: the worker RUNTIME
     # never depends on tenant-sdk.
-    "auspexai-tenant==0.6.46",  # deliberate seam-test pin (PyPI; direct URLs are unpublishable)
+    "auspexai-tenant==0.6.54",  # deliberate seam-test pin (PyPI; direct URLs are unpublishable)
     # Test env pinned to current fastapi/starlette. starlette 1.x's TestClient
     # emits a DeprecationWarning that filterwarnings=error would escalate to a
     # collection error — handled by a targeted ignore in [tool.pytest.ini_options]
