@@ -35,7 +35,7 @@ wheels = [
 
 [[package]]
 name = "auspexai-tenant"
-version = "0.6.13"
+version = "0.6.46"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cbor2" },
@@ -45,9 +45,9 @@ dependencies = [
     { name = "httpx" },
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f5/87/7271aaec2090621dd644a4d95489d42c22478a1597ad1ff6248ccfac11de/auspexai_tenant-0.6.13.tar.gz", hash = "sha256:6de345a6ef9442a6889fc102e0269884d0a3d7d1c4c4bd77538630572e55650a", size = 155459, upload-time = "2026-06-27T16:16:46.18Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/82/e9/17b440ec0bdadb830ebca4636197b7820848e580c0bb435419e16fd08fcf/auspexai_tenant-0.6.46.tar.gz", hash = "sha256:8037bb1f59d45743d23a3d96b8b6fb053d75f8fe803aee3d6e62f7252246e6f8", size = 225916, upload-time = "2026-07-06T20:03:50.357Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f9/6f/9fb0a71003ae89663a2bb654ba303fb320d3d2f9eb20c212dc048122f083/auspexai_tenant-0.6.13-py3-none-any.whl", hash = "sha256:1c298c0bdd3c7db64dad88b130c61fb2b257f27b4300109505ab9c9bdd87d1c5", size = 121312, upload-time = "2026-06-27T16:16:44.844Z" },
+    { url = "https://files.pythonhosted.org/packages/b5/93/87d409c9d6f1ae790d9c8a465e229d40f23bbd8087425b02297963085761/auspexai_tenant-0.6.46-py3-none-any.whl", hash = "sha256:c6ba4ac21f45d5178ce7ecef17d399c7acf473f2a89b219a289c80577759dd47", size = 191818, upload-time = "2026-07-06T20:03:48.826Z" },
 ]
 
 [[package]]
@@ -82,11 +82,11 @@ secret-service = [
 
 [package.metadata]
 requires-dist = [
-    { name = "auspexai-tenant", marker = "extra == 'dev'", specifier = "==0.6.13" },
+    { name = "auspexai-tenant", marker = "extra == 'dev'", specifier = "==0.6.46" },
     { name = "click", specifier = ">=8.1" },
     { name = "cryptography", specifier = ">=42" },
     { name = "fastapi", specifier = ">=0.115" },
-    { name = "fastapi", marker = "extra == 'dev'", specifier = "==0.138.1" },
+    { name = "fastapi", marker = "extra == 'dev'", specifier = "==0.139.0" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "huggingface-hub", marker = "extra == 'models'", specifier = ">=0.20" },
     { name = "pydantic", specifier = ">=2.5" },
@@ -436,7 +436,7 @@ wheels = [
 
 [[package]]
 name = "fastapi"
-version = "0.138.1"
+version = "0.139.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "annotated-doc" },
@@ -445,9 +445,9 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "typing-inspection" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/8a/c9/5e8defe249899c0dc900643695fc07829a67fc88b4ff2cdb03fcbdbf5a4b/fastapi-0.138.1.tar.gz", hash = "sha256:96e3702dce09ee0dce48856135620d3d865ca684a79fe7513fd7b13a12f82862", size = 419646, upload-time = "2026-06-25T15:40:42.115Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d3/af/a5f50ccfa659ec1802cb4ca842c23f06d906a8cc9aef6016a2caeea3d4ed/fastapi-0.139.0.tar.gz", hash = "sha256:99ab7b2d92223c76d6cf10757ab3f89d45b38267fc20b2a136cf02f6beac3145", size = 423016, upload-time = "2026-07-01T16:35:33.436Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/38/a9/69a6924f645eb4dd8cd625bf255b3625990eb3e14e073438a53c405dcd3e/fastapi-0.138.1-py3-none-any.whl", hash = "sha256:b994cae7ba8b82c976a728b544244de31333fa5f7d261f9a1dffe526444cae23", size = 129182, upload-time = "2026-06-25T15:40:40.771Z" },
+    { url = "https://files.pythonhosted.org/packages/9e/7c/8e3c6ad324ea5cb36604fc3f968554887891c316d9dfde57761611d907ad/fastapi-0.139.0-py3-none-any.whl", hash = "sha256:cf15e1e9e667ddb0ad63811e60bd11390d1aac838ca4a7a23f421807b2308189", size = 130339, upload-time = "2026-07-01T16:35:32.19Z" },
 ]
 
 [[package]]
