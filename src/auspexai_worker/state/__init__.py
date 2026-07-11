@@ -23,7 +23,12 @@ from .m3_repositories import (
     SubmittedResultRepository,
     TenantListRepository,
 )
-from .repository import WorkerSelf, WorkerSelfRepository
+from .repository import (
+    ServeAdvisoryRepository,
+    ServeAdvisoryRow,
+    WorkerSelf,
+    WorkerSelfRepository,
+)
 
 __all__ = [
     "AcceptedSensitiveRepository",
@@ -37,6 +42,8 @@ __all__ = [
     "PendingSubmission",
     "PendingSubmissionRepository",
     "PinResult",
+    "ServeAdvisoryRepository",
+    "ServeAdvisoryRow",
     "SubmittedResult",
     "SubmittedResultRepository",
     "TenantListRepository",

@@ -92,6 +92,10 @@ class InferenceBackend(Protocol):
         self, handle: str, messages: list[dict[str, Any]], options: dict[str, Any]
     ) -> dict[str, Any]: ...
 
+    def loaded_models(self) -> list[str]: ...
+
+    def unload(self, handle: str) -> None: ...
+
 
 class OllamaBackend:
     """Ollama over localhost HTTP + the `ollama` CLI for Modelfile creation.
@@ -230,3 +234,27 @@ class OllamaBackend:
             },
             timeout=CHAT_TIMEOUT_SECONDS,
         )
+
+    def loaded_models(self) -> list[str]:
+        """Handles currently resident in VRAM (GET /api/ps). Best-effort — an
+        empty list on any error, since callers use this only to free memory."""
+        try:
+            data = self._get("/api/ps")
+        except BackendError:
+            return []
+        models = data.get("models") if isinstance(data, dict) else None
+        return [
+            m["name"]
+            for m in (models or [])
+            if isinstance(m, dict) and isinstance(m.get("name"), str)
+        ]
+
+    def unload(self, handle: str) -> None:
+        """Evict `handle` from VRAM now (keep_alive:0 — the Sentinel run_batch.py
+        posture). Best-effort and never raises: freeing memory is opportunistic,
+        so an unreachable/odd backend just leaves it loaded rather than failing
+        the serve that asked for the room."""
+        try:
+            self._post("/api/generate", {"model": handle, "keep_alive": 0}, timeout=30.0)
+        except BackendError as exc:
+            logger.debug("ollama: unload %s failed (ignored): %s", handle, exc)

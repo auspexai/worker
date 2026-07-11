@@ -12,16 +12,33 @@ import httpx
 import pytest
 
 from auspexai_worker.inference.backend import BackendError, OllamaBackend, resolve_ollama_bin
-from auspexai_worker.inference.server import ModelServeError, ModelServer, backend_handle
+from auspexai_worker.inference.server import (
+    ModelServeError,
+    ModelServer,
+    ServeAdvisory,
+    backend_handle,
+)
 from auspexai_worker.models.store import ModelStore
 
 
 class FakeBackend:
-    def __init__(self, *, healthy: bool = True, preloaded: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        healthy: bool = True,
+        preloaded: bool = False,
+        loaded: list[str] | None = None,
+        chat_fail_times: int = 0,
+        chat_error: str = "cudaMalloc failed: out of memory",
+    ) -> None:
         self.healthy = healthy
         self.preloaded = preloaded
         self.created: list[tuple[str, str]] = []
         self.chats: list[tuple[str, list, dict]] = []
+        self._loaded = list(loaded or [])
+        self.unloaded: list[str] = []
+        self._chat_fail_times = chat_fail_times
+        self._chat_error = chat_error
 
     def is_healthy(self) -> bool:
         return self.healthy
@@ -33,8 +50,19 @@ class FakeBackend:
         self.created.append((handle, modelfile))
 
     def chat(self, handle: str, messages: list, options: dict) -> dict[str, Any]:
+        if self._chat_fail_times > 0:
+            self._chat_fail_times -= 1
+            raise BackendError(self._chat_error)
         self.chats.append((handle, messages, options))
         return {"message": {"role": "assistant", "content": "ok"}, "eval_count": 1}
+
+    def loaded_models(self) -> list[str]:
+        return list(self._loaded)
+
+    def unload(self, handle: str) -> None:
+        self.unloaded.append(handle)
+        if handle in self._loaded:
+            self._loaded.remove(handle)
 
 
 def _store_with_model(tmp_path: Path, model_id: str = "tiny-q4") -> tuple[ModelStore, bytes]:
@@ -298,3 +326,94 @@ def test_serve_no_budget_does_not_gate(tmp_path: Path):
     store = _store_with_sized_model(tmp_path, 2_000_000)
     server = ModelServer(store, FakeBackend())  # usable_memory_gb defaults to None
     assert server.serve("big-q4").model_id == "big-q4"
+
+
+# ---- GPU-memory guard: A (pre-serve hygiene) + B (recover, then advise) ------
+
+
+def test_constrained_host_unloads_other_models_before_serving(tmp_path: Path):
+    store, _ = _store_with_model(tmp_path)
+    backend = FakeBackend(loaded=["auspex-other-model"])
+    server = ModelServer(store, backend, usable_memory_gb=6.0)  # at/below the tight line
+
+    server.serve("tiny-q4")
+
+    assert "auspex-other-model" in backend.unloaded  # freed the other model first
+    assert "auspex-tiny-q4" not in backend.unloaded  # never unloads the one being served
+
+
+def test_roomy_host_keeps_other_models_loaded(tmp_path: Path):
+    store, _ = _store_with_model(tmp_path)
+    backend = FakeBackend(loaded=["auspex-other-model"])
+    server = ModelServer(store, backend, usable_memory_gb=64.0)  # well above the line
+
+    server.serve("tiny-q4")
+
+    assert backend.unloaded == []  # no one-model-at-a-time hygiene on a big host
+
+
+def test_gpu_oom_recovers_by_freeing_vram_and_retrying(tmp_path: Path):
+    store, _ = _store_with_model(tmp_path)
+    backend = FakeBackend(loaded=["auspex-hog"], chat_fail_times=1)  # first load OOMs, then OK
+    server = ModelServer(store, backend, usable_memory_gb=6.0)
+
+    served = server.serve("tiny-q4")  # must not raise
+
+    assert served.model_id == "tiny-q4"
+    assert "auspex-hog" in backend.unloaded  # freed VRAM in recovery
+    assert len(backend.chats) == 1  # the successful retry's warm chat landed
+
+
+def test_gpu_oom_persists_refuses_and_emits_advisory(tmp_path: Path):
+    store, _ = _store_with_model(tmp_path)
+    backend = FakeBackend(chat_fail_times=2)  # OOMs on both the first load and the retry
+    advisories: list[ServeAdvisory] = []
+    server = ModelServer(store, backend, usable_memory_gb=6.0, advisory_sink=advisories.append)
+
+    with pytest.raises(ModelServeError, match="insufficient GPU memory"):
+        server.serve("tiny-q4")
+
+    assert len(advisories) == 1
+    adv = advisories[0]
+    assert adv.model_id == "tiny-q4"
+    # the manual (privileged) remedies are surfaced for the operator, never auto-run
+    assert any("drop_caches" in c for c in adv.commands)
+    assert any("restart ollama" in c for c in adv.commands)
+
+
+def test_non_memory_serve_error_is_not_retried_and_no_advisory(tmp_path: Path):
+    store, _ = _store_with_model(tmp_path)
+    backend = FakeBackend(chat_fail_times=1, chat_error="ollama create failed: no such file")
+    advisories: list[ServeAdvisory] = []
+    server = ModelServer(store, backend, usable_memory_gb=6.0, advisory_sink=advisories.append)
+
+    with pytest.raises(ModelServeError, match="failed to serve"):
+        server.serve("tiny-q4")
+
+    assert backend.chats == []  # never succeeded
+    assert advisories == []  # a non-memory failure is not a GPU-OOM advisory
+
+
+def test_successful_serve_clears_any_prior_advisory(tmp_path: Path):
+    store, _ = _store_with_model(tmp_path)
+    emitted: list[ServeAdvisory | None] = []
+    server = ModelServer(store, FakeBackend(), advisory_sink=emitted.append)
+
+    server.serve("tiny-q4")
+
+    # A clean serve pushes a clear (None) so the dashboard card self-dismisses once
+    # the memory pressure is gone.
+    assert emitted == [None]
+
+
+def test_gpu_oom_recovery_then_success_clears_the_slot(tmp_path: Path):
+    store, _ = _store_with_model(tmp_path)
+    backend = FakeBackend(chat_fail_times=1)  # OOMs once, succeeds on the retry
+    emitted: list[ServeAdvisory | None] = []
+    server = ModelServer(store, backend, usable_memory_gb=6.0, advisory_sink=emitted.append)
+
+    server.serve("tiny-q4")
+
+    # Recovered by freeing VRAM in-process — no advisory raised, and the success
+    # still clears the slot.
+    assert emitted == [None]

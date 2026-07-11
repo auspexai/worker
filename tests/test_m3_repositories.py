@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ from auspexai_worker.state import (
     ManifestPinRepository,
     MigrationRunner,
     PinResult,
+    ServeAdvisoryRepository,
     TenantListRepository,
 )
 
@@ -154,3 +156,48 @@ class TestAssignmentAuditRepository:
         rows = repo.by_unit("u-1")
         assert len(rows) == 2
         assert all(r.unit_id == "u-1" for r in rows)
+
+
+class TestServeAdvisoryRepository:
+    def test_empty_by_default(self, db: Database) -> None:
+        assert ServeAdvisoryRepository(db).get() is None
+
+    def test_record_roundtrips_commands_as_a_list(self, db: Database) -> None:
+        repo = ServeAdvisoryRepository(db)
+        at = datetime(2026, 7, 10, 4, 30, tzinfo=UTC)
+        repo.record(
+            "smollm2-1.7b",
+            "freed VRAM and retried once, still out of memory",
+            ["sudo sync && sudo sysctl vm.drop_caches=3", "sudo systemctl restart ollama"],
+            at,
+        )
+        got = repo.get()
+        assert got is not None
+        assert got.model_id == "smollm2-1.7b"
+        assert "still out of memory" in got.reason
+        assert got.commands == [
+            "sudo sync && sudo sysctl vm.drop_caches=3",
+            "sudo systemctl restart ollama",
+        ]
+        assert got.raised_at == at
+
+    def test_record_is_singleton_latest_wins(self, db: Database) -> None:
+        repo = ServeAdvisoryRepository(db)
+        at = datetime(2026, 7, 10, 4, 30, tzinfo=UTC)
+        repo.record("model-a", "first", ["cmd-a"], at)
+        repo.record("model-b", "second", ["cmd-b"], at)
+        got = repo.get()
+        assert got is not None
+        assert got.model_id == "model-b"
+        assert got.commands == ["cmd-b"]
+
+    def test_clear_removes_the_advisory(self, db: Database) -> None:
+        repo = ServeAdvisoryRepository(db)
+        repo.record("model-a", "boom", ["cmd-a"], datetime(2026, 7, 10, tzinfo=UTC))
+        repo.clear()
+        assert repo.get() is None
+
+    def test_clear_when_empty_is_a_noop(self, db: Database) -> None:
+        repo = ServeAdvisoryRepository(db)
+        repo.clear()  # must not raise
+        assert repo.get() is None

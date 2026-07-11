@@ -1136,10 +1136,27 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
                 ollama_bin=config.inference_ollama_bin,
                 keep_alive=config.inference_keep_alive,
             )
+
+            # Persist an operator-actionable serve failure (a GPU-OOM that survived
+            # the worker's own free-VRAM-and-retry) so the local dashboard can surface
+            # a copy-to-run recovery card; clear it (advisory=None) when serving next
+            # succeeds. Best-effort — the ModelServer swallows any sink error.
+            from .state.repository import ServeAdvisoryRepository
+
+            def _serve_advisory_sink(advisory) -> None:
+                repo = ServeAdvisoryRepository(db)
+                if advisory is None:
+                    repo.clear()
+                else:
+                    repo.record(
+                        advisory.model_id, advisory.reason, list(advisory.commands), advisory.at
+                    )
+
             model_server = ModelServer(
                 ModelStore(config.models_store_path),
                 _inference_backend,
                 usable_memory_gb=_usable_memory_gb,
+                advisory_sink=_serve_advisory_sink,
             )
             # §9 #46 determinism provenance: probe the serving Ollama's version
             # ONCE at daemon start (no per-tick HTTP); declared in heartbeats.

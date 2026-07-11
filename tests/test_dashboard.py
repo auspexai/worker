@@ -17,6 +17,7 @@ from auspexai_worker.state import (
     AssignmentAuditRepository,
     Database,
     MigrationRunner,
+    ServeAdvisoryRepository,
     WorkerSelfRepository,
 )
 
@@ -755,3 +756,51 @@ class TestLoginCitation:
     def test_login_citation_post_goes_to_dashboard(self, client: TestClient) -> None:
         r = client.post("/login/citation", data={"choice": "anonymous"}, follow_redirects=False)
         assert r.status_code == 303 and r.headers["location"] == "/"
+
+
+class TestServeAdvisoryCard:
+    """The GPU-OOM guard surfaces a persistent serve failure on the live notice
+    slot as a copy-to-run recovery card — the commands are shown, never run."""
+
+    def _record(self, db: Database) -> None:
+        ServeAdvisoryRepository(db).record(
+            "smollm2-1.7b",
+            "freed VRAM and retried once, still out of memory",
+            ["sudo sync && sudo sysctl vm.drop_caches=3", "sudo systemctl restart ollama"],
+            datetime(2026, 7, 10, 4, 30, tzinfo=UTC),
+        )
+
+    def test_no_advisory_means_empty_notice(self, client: TestClient, db: Database) -> None:
+        d = client.get("/api/stats").json()
+        assert d["update_notice_html"] == ""
+
+    def test_advisory_claims_the_notice_slot_as_a_fault(
+        self, client: TestClient, db: Database
+    ) -> None:
+        self._record(db)
+        d = client.get("/api/stats").json()
+        assert d["update_notice_class"] == "notice fault"
+        html = d["update_notice_html"]
+        assert "GPU out of memory" in html
+        # The recovery command is shown + copyable, never executed by the worker.
+        assert "vm.drop_caches=3" in html
+        assert "copy commands" in html
+        assert "sandbox install" in html
+
+    def test_advisory_takes_precedence_over_update_notice(
+        self, client: TestClient, db: Database
+    ) -> None:
+        _enroll(db)
+        WorkerSelfRepository(db).record_latest_release(
+            version="9.9.9", notes="new", url=None, at=datetime.now(UTC)
+        )
+        self._record(db)
+        d = client.get("/api/stats").json()
+        assert d["update_notice_class"] == "notice fault"
+        assert "GPU out of memory" in d["update_notice_html"]
+
+    def test_clearing_the_advisory_empties_the_slot(self, client: TestClient, db: Database) -> None:
+        self._record(db)
+        ServeAdvisoryRepository(db).clear()
+        d = client.get("/api/stats").json()
+        assert d["update_notice_html"] == ""

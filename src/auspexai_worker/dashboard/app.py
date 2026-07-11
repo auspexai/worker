@@ -294,6 +294,42 @@ def _update_notice(worker, config: WorkerConfig) -> tuple[str, str]:
     return "notice", inner
 
 
+def _serve_advisory_notice(db: Database) -> tuple[str, str]:
+    """§ GPU-OOM guard: (css_class, inner_html) for a persistent GPU-out-of-memory
+    serve failure the operator can clear by hand, or ('', '') when none. The worker
+    already freed VRAM and retried; this is what survived. The recovery commands are
+    PRINTED + one-click COPIED, NEVER run — they need privileges (drop the OS page
+    cache, restart the model server) a sandboxed/volunteer worker must not assume;
+    the click+paste is the volunteer's election, exactly like the update command. The
+    row is cleared automatically once serving next succeeds, so the card self-dismisses."""
+    from auspexai_worker.state.repository import ServeAdvisoryRepository
+
+    try:
+        advisory = ServeAdvisoryRepository(db).get()
+    except Exception:
+        return "", ""
+    if advisory is None or not advisory.commands:
+        return "", ""
+    joined = "\n".join(advisory.commands)
+    copy_btn = (
+        f'<button type="button" class="copy-cmd" data-cmd="{html.escape(joined)}" '
+        'onclick="navigator.clipboard.writeText(this.dataset.cmd)'
+        ".then(()=>{this.textContent='copied!';"
+        "setTimeout(()=>{this.textContent='copy commands';},2000);})\">"
+        "copy commands</button>"
+    )
+    cmd_block = "<br>".join(f"<code>{html.escape(c)}</code>" for c in advisory.commands)
+    inner = (
+        f"<strong>Couldn't load a model — GPU out of memory.</strong> "
+        f"{html.escape(advisory.reason)}<br>"
+        f"To let this machine serve it, run these by hand (needs admin): {copy_btn}<br>"
+        f"{cmd_block}<br>"
+        '<span class="muted">Skip this if your worker is a locked-down / sandbox install — '
+        "no action needed; the coordinator routes the unit elsewhere.</span>"
+    )
+    return "notice fault", inner
+
+
 def _inference_status(config: WorkerConfig) -> dict[str, Any] | None:
     """W-S: live reachability of the inference backend, or None when
     `[inference] backend = "none"` (not an inference host). The heart renders it
@@ -1123,7 +1159,11 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
         state_key = state_label = state_tone = state_detail = None
         activity_headline = activity_detail = None
         notice_class = notice_html = ""
-        if worker is not None:
+        # A live GPU-memory serve advisory (operator-actionable) claims the notice
+        # slot ahead of the update notice — it's the more urgent card, and it clears
+        # itself the moment serving recovers.
+        notice_class, notice_html = _serve_advisory_notice(db)
+        if not notice_html and worker is not None:
             notice_class, notice_html = _update_notice(worker, config)
         if worker is not None:
             now = datetime.now(UTC)

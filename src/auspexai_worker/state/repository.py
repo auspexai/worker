@@ -196,6 +196,56 @@ class WorkerSelfRepository:
             conn.execute("DELETE FROM worker_self WHERE id = 1")
 
 
+@dataclass(frozen=True)
+class ServeAdvisoryRow:
+    """The worker's most recent operator-actionable serve failure (a persistent
+    GPU out-of-memory). `commands` are copy-to-run recovery hints — never auto-run."""
+
+    model_id: str
+    reason: str
+    commands: list[str]
+    raised_at: datetime
+
+
+class ServeAdvisoryRepository:
+    """The singleton `serve_advisory` row (id=1). The daemon records a persistent
+    GPU-OOM here via the ModelServer advisory sink and clears it when serving
+    recovers; the local dashboard reads it to show/hide the recovery card."""
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    def record(self, model_id: str, reason: str, commands: list[str], raised_at: datetime) -> None:
+        with self._db.transaction() as cur:
+            cur.execute(
+                "INSERT INTO serve_advisory (id, model_id, reason, commands, raised_at) "
+                "VALUES (1, ?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET model_id = excluded.model_id, "
+                "reason = excluded.reason, commands = excluded.commands, "
+                "raised_at = excluded.raised_at",
+                (model_id, reason, "\n".join(commands), _format_ts(raised_at)),
+            )
+
+    def get(self) -> ServeAdvisoryRow | None:
+        row = self._db.connection.execute(
+            "SELECT model_id, reason, commands, raised_at FROM serve_advisory WHERE id = 1"
+        ).fetchone()
+        if row is None:
+            return None
+        raised = _parse_ts(row["raised_at"])
+        assert raised is not None  # NOT NULL column
+        return ServeAdvisoryRow(
+            model_id=row["model_id"],
+            reason=row["reason"],
+            commands=[c for c in (row["commands"] or "").split("\n") if c],
+            raised_at=raised,
+        )
+
+    def clear(self) -> None:
+        with self._db.transaction() as cur:
+            cur.execute("DELETE FROM serve_advisory WHERE id = 1")
+
+
 def _format_ts(ts: datetime) -> str:
     return ts.isoformat()
 
