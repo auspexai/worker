@@ -4,7 +4,7 @@ The volunteer worker process for [AuspexAI](https://github.com/auspexai) — run
 
 ## Status
 
-**Phase 1 — M1 + M2 + M3 + M4 SHIPPED 2026-05-20.** First-run enrollment, signed-heartbeat loop, assignment-pull pipeline, and sandboxed runner subprocess all verified end-to-end against the coordinator. Phase 1 worker target is Linux x86_64 + ARM64 (per principles doc §5.13 + §5.19); macOS/WSL2 packaging arrives in Phase 2.
+**Open beta — worker v0.2.x, live on the AuspexAI network.** First-run enrollment, the signed-heartbeat loop, the assignment pipeline, and the sandboxed runner shipped across Phase 1 (M1–M7, 2026-05). Since then the worker has grown local LLM-inference serving, coordinator-driven model acquisition, RAM-fit routing, and a serve-time GPU-OOM guard (see **Since M7** below). Supported targets: Linux **x86_64 + ARM64** (ARM64 in production on Jetson-class hardware) and **macOS** (install script + launchd); Windows/WSL2 remains Phase 2.
 
 What's live:
 
@@ -16,25 +16,31 @@ What's live:
   - Sensitive-content gate (§5.14 + §5.12): assignments carrying `sensitive_content_flags` in the payload require an explicit `accept <experiment-id>` to proceed (default-decline). *Note: the M6-era coordinator does NOT yet ship this field on `WorkUnitEnvelopeOut`; the gate is plumbed and waits for the coordinator-side change.*
   - Tenant allow/deny gate (§5.14): tenants on the deny list are always refused; a non-empty allow list restricts acceptance to listed tenants.
   - **Refusals call back to the coordinator** via `POST /api/v0/workers/{id}/assignments/{unit_id}/refuse` so the operator console can see the refusal reason and the unit's replication slot is freed for another worker (Option A per Q-W4). Each decision is also written to a local `assignment_audit` log.
-- **M4: sandboxed runner + signed result submission.** On accept, the daemon spawns `auspexai-worker-runner` inside a `bubblewrap` sandbox (Phase 1 permissive policy: `--die-with-parent --new-session --dev-bind / /` plus env passthrough). The runner reads the work-unit envelope from stdin, executes the M4 *synthetic* executor (echoes the payload — tenant code arrives later), writes a Result body to `$AUSPEXAI_OUTPUT_PATH`, exits. Daemon reads the output, signs it with the worker key over a canonical encoding, POSTs to `/api/v0/workers/{id}/assignments/{unit_id}/result`. Local `submitted_results` table mirrors the coordinator's ack. Per Q-W4: any failure during dispatch (runner crash, submit error) triggers an explicit `refuse` to the coordinator. Per Q-W9: one-at-a-time on the poller thread; heartbeat thread runs independently. Per Q-W10: bubblewrap requires unprivileged user namespaces — on AppArmor-restricted hosts (Ubuntu 24.04 default) deploy needs `kernel.apparmor_restrict_unprivileged_userns=0` or a worker AppArmor profile. Passthrough mode (`[sandbox] use_bubblewrap = false`) is the documented escape hatch for CI + dev hosts.
+- **M4: sandboxed runner + signed result submission.** On accept, the daemon spawns `auspexai-worker-runner` inside a `bubblewrap` sandbox (Phase 1 permissive policy: `--die-with-parent --new-session --dev-bind / /` plus env passthrough). The runner reads the work-unit envelope from stdin, executes the tenant executor (LLM-inference tenants reach the worker-served model over a sandbox-local socket, under the manifest's declared generation policy), writes a Result body to `$AUSPEXAI_OUTPUT_PATH`, exits. Daemon reads the output, signs it with the worker key over a canonical encoding, POSTs to `/api/v0/workers/{id}/assignments/{unit_id}/result`. Local `submitted_results` table mirrors the coordinator's ack. Per Q-W4: any failure during dispatch (runner crash, submit error) triggers an explicit `refuse` to the coordinator. Per Q-W9: one-at-a-time on the poller thread; heartbeat thread runs independently. Per Q-W10: bubblewrap requires unprivileged user namespaces — on AppArmor-restricted hosts (Ubuntu 24.04 default) deploy needs `kernel.apparmor_restrict_unprivileged_userns=0` or a worker AppArmor profile. Passthrough mode (`[sandbox] use_bubblewrap = false`) is the documented escape hatch for CI + dev hosts.
 - `auspexai-worker abort <unit-id>` — reads the runner PID file from the workspace, sends SIGTERM, waits `--grace-seconds` (default 5), sends SIGKILL if still running. No-op when no workspace / no PID / process already exited; always writes an audit row.
 - M3 CLI verbs: `queue`, `peek <unit-id>`, `accept <coordinator-experiment-id>`, `refuse <unit-id>`, `tenant {allow,deny,list} <tenant-id>`.
 - RFC 9421 HTTP Message Signature signer (`ed25519`, covered `@method`+`@path`+`@authority`+`content-digest`, label `sig1`, `created` window enforced by the coordinator). Symmetric to the platform's verifier; wire format verified by an inline oracle in the worker's own test suite.
 - Keystore backends: libsecret (Secret Service) primary; encrypted-file (ChaCha20-Poly1305, key derived from `/etc/machine-id` + UID) fallback for headless hosts and containers.
 - Local SQLite state at `$XDG_STATE_HOME/auspexai-worker/worker.db` with a sequential migration framework matching the coordinator's convention. Re-entrant transaction lock so the two daemon threads can write concurrently without colliding on `BEGIN`.
 - `systemd --user` service unit templates with Phase 1 hardening (`PrivateTmp`, `ProtectHome=read-only`, `ProtectSystem=strict`, `NoNewPrivileges`, `SystemCallFilter=@system-service`). Two variants ship: `packaging/systemd/auspexai-worker.service` for pip/uv installs (ExecStart=`%h/.local/bin/auspexai-worker`); `packaging/systemd-deb/auspexai-worker.service` for `.deb` installs (ExecStart=`/opt/auspexai-worker/bin/auspexai-worker`, installed by the `.deb` to `/etc/systemd/user/auspexai-worker.service`).
-- 157 tests on Python 3.11 + 3.12; ruff check + format-check clean.
+- Comprehensive test suite on Python 3.11 + 3.12; ruff check + format-check clean.
 
 Subsequent milestones (per design doc §14):
 - **M5** ✅ Receipts store on `submitted_results` + `receipts list/show` + `log` CLI (SQLite-as-canonical-store per 2026-05-22 design update).
 - **M6** ✅ T1 upgrade via OAuth Device Flow (`auspexai-worker login`) + `withdraw` flow (`auspexai-worker withdraw`).
 - **M7** ✅ SHIPPED 2026-05-23 — Cosign-signed `.deb` + source tarball + wheel as GitHub release artifacts. `dh-virtualenv`-built `/opt/auspexai-worker/` venv; system-installed user-unit at `/etc/systemd/user/`; AppArmor profile confining the daemon with a `cx -> bwrap_sandbox` child profile that grants `userns,` scoped to bwrap-as-child-of-the-daemon (Q-W10 Phase 2 durable fix); postinst probes the sandbox as `nobody` before declaring install successful. Release pipeline at `.github/workflows/release.yml` signs via Sigstore keyless GitHub Actions OIDC (no manual cosign step per release). See `AUTHORIZED_SIGNERS.md` for the trust roster.
 
+Since M7 (open beta, worker v0.2.x):
+- **Local LLM-inference serving.** With `[inference] backend = "ollama"` the worker serves a tenant-requested model over a sandbox-local socket (the tenant executor never reaches the network) under the manifest's declared generation policy (greedy / seeded-sampling, applied per request). The `model` CLI group manages the local model store.
+- **Fleet-fit RAM routing.** The coordinator routes a unit to a worker only when the model fits the worker's usable RAM (HF-derived sizing); the worker refuses to serve what can't fit (non-bypassable BYOM RAM guard).
+- **GPU-OOM serve guard (v0.2.72).** On constrained hosts (≤12 GB usable, e.g. Jetson-class) the worker serves one model at a time (unloading others first) and, on a CUDA out-of-memory at serve, frees all VRAM and retries once; if it still can't serve it refuses with a clear error and surfaces a **copy-to-run recovery command** on the local dashboard (drop the OS page cache / restart the model server) — informational only, **never auto-run**. Worker migration `0012` (`serve_advisory`).
+- **Volunteer controls.** Self `pause`/`resume`, `login`/`logout` (T1 identity binding), and `withdraw`.
+
 Full design rationale: `Documentation/AuspexAI/v0.1.0/worker_daemon_design.md` (ratified into principles doc §5.19 on 2026-05-20).
 
 ## Install
 
-Phase 1 supported target: **Ubuntu 24.04+ / Debian 12+, x86_64**. ARM64 + Ubuntu 22.04 land in Phase 2.
+Supported targets: **Ubuntu 24.04+ / Debian 12+ (x86_64 and ARM64)** and **macOS** (install script → `~/.local` + launchd). The signed `.deb` is x86_64; ARM64 (e.g. Jetson) and macOS install from PyPI via pip. Windows/WSL2 remains Phase 2.
 
 ### Via `.deb` release artifact (recommended)
 
@@ -74,7 +80,7 @@ Open the local dashboard in a browser (since v0.1.4):
 http://localhost:7799
 ```
 
-Read-only view of your worker's identity, activity log, receipts, and loaded config. Localhost-only by design — bound to `127.0.0.1` and never exposed externally. Disable with `[dashboard] enabled = false` in `~/.config/auspexai-worker/worker.toml` or `AUSPEXAI_WORKER_DASHBOARD_ENABLED=0` if you'd rather not have the local HTTP server running.
+Read-only view of your worker's identity, activity log, receipts, and loaded config. When a serve attempt fails on a constrained host (e.g. a CUDA out-of-memory the worker's own unload-and-retry can't clear), the dashboard also surfaces a copy-to-run recovery command (drop the OS page cache / restart the model server) — informational only, never auto-run. Localhost-only by design — bound to `127.0.0.1` and never exposed externally. Disable with `[dashboard] enabled = false` in `~/.config/auspexai-worker/worker.toml` or `AUSPEXAI_WORKER_DASHBOARD_ENABLED=0` if you'd rather not have the local HTTP server running.
 
 ### Container / minimal host caveat
 
@@ -103,7 +109,7 @@ Outputs land at `/tmp/auspexai-deb-build/auspexai-worker_<version>_amd64.deb`.
 
 The Worker:
 
-- Runs on volunteer machines — Linux x86_64 + ARM64 in Phase 1; macOS via Homebrew tap and Windows via WSL2 in Phase 2 (per §5.13)
+- Runs on volunteer machines — Linux x86_64 + ARM64 and macOS (install script + launchd) today; Windows via WSL2 in Phase 2 (per §5.13)
 - Generates an Ed25519 keypair on first run, stored in OS-native keystore (libsecret on Linux; Keychain / DPAPI in Phase 2 platforms) — volunteers never paste keys into web forms
 - Enrolls anonymously (T0) or upgrades to verified identity via OAuth 2.0 Device Authorization Flow (T1+; M6)
 - Executes work units within sandboxed limits (CPU, GPU, RAM, network caps; idle-only mode by default — Phase 2)
@@ -201,4 +207,4 @@ Worker conduct on the AuspexAI network is governed by the **Volunteer Terms of P
 
 ## Watch this repo
 
-Activity will begin as Phase 1 ramps up.
+The worker is live on the open-beta network; releases ship through the GitHub release pipeline (Cosign-signed `.deb` + wheel) and PyPI.
