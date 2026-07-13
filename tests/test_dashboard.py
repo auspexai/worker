@@ -119,6 +119,26 @@ class TestOverview:
         ):
             assert key in d, key
 
+    def test_api_stats_surfaces_in_flight_model_download(
+        self, client: TestClient, db: Database
+    ) -> None:
+        """D12 5c: the heart's poll source carries in-flight model pulls, so the
+        volunteer sees a multi-GB first-serve on their OWN dashboard (not only the
+        coordinator consoles). None when nothing is pulling."""
+        from auspexai_worker.models import download_progress
+
+        _enroll(db)
+        assert client.get("/api/stats").json()["downloads"] is None
+        download_progress._set("m-x", 3_000_000, 12_000_000)
+        try:
+            d = client.get("/api/stats").json()
+            assert d["downloads"] == {
+                "m-x": {"bytes_downloaded": 3_000_000, "total_bytes": 12_000_000}
+            }
+        finally:
+            download_progress.clear("m-x")
+        assert client.get("/api/stats").json()["downloads"] is None
+
     def test_overview_renders_activity_heart(self, client: TestClient, db: Database) -> None:
         """The volunteer's heart monitor — its skeleton (filled by the immediate
         live tick) is on the overview, and the poll script renders into it."""

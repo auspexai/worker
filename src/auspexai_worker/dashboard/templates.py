@@ -210,6 +210,17 @@ _LIVE_SCRIPT = """  <script>
           var infTxt = infName + infVer + (inf.reachable ? '' : ' \\u2014 unreachable');
           v.push('<span class="vital' + (inf.reachable ? '' : ' bad') + '"><i class="vdot ' + (inf.reachable ? '' : 'down') + '"></i>' + infTxt + '</span>');
         }
+        // D12 5c: in-flight model pulls — a multi-GB first-serve is legible right
+        // here (the volunteer's own machine) instead of only on the coordinator.
+        if (d.downloads) {
+          Object.keys(d.downloads).forEach(function (mid) {
+            var p = d.downloads[mid] || {};
+            var done = p.bytes_downloaded || 0, tot = p.total_bytes;
+            var name = String(mid).replace(/[<>&"]/g, '');
+            var pctTxt = (tot && tot > 0) ? ' ' + Math.min(100, Math.floor(done / tot * 100)) + '%' : '';
+            v.push('<span class="vital warn"><i class="vdot"></i>\\u2193 downloading ' + name + pctTxt + '</span>');
+          });
+        }
         vit.innerHTML = v.join('');
       }
       var hu = document.getElementById('heart-units'); if (hu) hu.textContent = d.completed_units || 0;

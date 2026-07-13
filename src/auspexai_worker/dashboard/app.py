@@ -28,7 +28,7 @@ from auspexai_worker import __version__
 from auspexai_worker.accelerator import detect_accelerator
 from auspexai_worker.config import WorkerConfig
 from auspexai_worker.health import ThermalMonitor, ThermalState
-from auspexai_worker.models import ModelStore
+from auspexai_worker.models import ModelStore, download_progress
 from auspexai_worker.state import (
     AssignmentAuditRepository,
     Database,
@@ -1218,6 +1218,11 @@ def build_app(*, db: Database, config: WorkerConfig, config_path: Path | None = 
                 "accelerator": accelerator_label,
                 "execution": _current_executor_policy(config, config_path),
                 "inference": _inference_status(config),  # live backend reachability (or null)
+                # D12 5c: in-flight model pulls ({model_id: {bytes_downloaded,
+                # total_bytes}}) — the SAME snapshot the heartbeat reports, so the
+                # volunteer sees their own machine's download progress in the heart
+                # (not only the coordinator-side consoles). Empty ⇒ nothing pulling.
+                "downloads": download_progress.snapshot() or None,
                 # §9 #46: update-available notice (server-built, escaped) + flavor.
                 "update_available": bool(notice_html),
                 "update_notice_class": notice_class,
