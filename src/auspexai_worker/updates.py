@@ -15,6 +15,23 @@ _NUMERIC_PREFIX = re.compile(r"^(\d+(?:\.\d+)*)")
 
 ONRAMP_URL = "https://getworker.auspexai.network"
 
+# The Ollama version we recommend workers run. Newer models (phi-3.5, qwen3-2507,
+# gpt-oss) need a recent runtime; an install-once-never-updated Ollama silently
+# 500s on them (the serve guard now diagnoses that at runtime — inference/server.py
+# `_looks_like_stale_backend`). This is a soft NUDGE floor (doctor + installer), not
+# a hard gate — bump it when onboarding a model that needs a newer runtime. The
+# coordinator carries the same floor to flag stale workers proactively.
+RECOMMENDED_MIN_OLLAMA = "0.30.0"
+
+
+def ollama_update_recommended(current: str | None, floor: str = RECOMMENDED_MIN_OLLAMA) -> bool:
+    """True when `current` is a parseable Ollama version older than `floor`. None /
+    unparseable ⇒ False (never nag when we can't tell — the runtime may be fine, or
+    not serving at all)."""
+    if not current:
+        return False
+    return is_newer_version(floor, current)
+
 
 def _split(version: str) -> tuple[tuple[int, ...] | None, str]:
     """(numeric parts, trailing suffix) — e.g. '0.2.0.dev3' → ((0,2,0), '.dev3')."""

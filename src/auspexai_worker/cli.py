@@ -428,6 +428,32 @@ def model() -> None:
 _DISK_SAFETY_MARGIN_BYTES = 5_000_000_000
 
 
+def _report_ollama_health() -> None:
+    """Report the serving Ollama's version and NUDGE if it's behind the recommended
+    floor — the recurring bite is an install-once-never-updated Ollama that 500s on
+    newer models (phi-3.5, qwen3, gpt-oss). Best-effort: an unreachable backend (not
+    a serving flavor) just prints nothing. A soft nudge, not a hard failure."""
+    from auspexai_worker.inference.backend import OllamaBackend
+    from auspexai_worker.updates import RECOMMENDED_MIN_OLLAMA, ollama_update_recommended
+
+    try:
+        version = OllamaBackend().version()
+    except Exception:
+        version = None
+    if version is None:
+        return  # not serving / unreachable — nothing to report
+    if ollama_update_recommended(version):
+        click.echo(
+            f"  ⚠ Ollama {version} is older than the recommended {RECOMMENDED_MIN_OLLAMA} — "
+            "newer models (e.g. phi-3.5, qwen3, gpt-oss) may fail to serve. Update it:\n"
+            "      curl -fsSL https://ollama.com/install.sh | sh    (Linux/Jetson)\n"
+            "      brew upgrade ollama                              (macOS)\n"
+            "    then restart the model server."
+        )
+    else:
+        click.echo(f"ollama: {version} (>= recommended {RECOMMENDED_MIN_OLLAMA}) ✓")
+
+
 @model.command(
     "doctor",
     help="Diagnose the local model store: presence, size, partial dirs, and RAM-fit.",
@@ -441,6 +467,7 @@ def model_doctor(ctx: click.Context) -> None:
     non-zero if any problem is found so it's scriptable in a cron/self-test."""
     import sys as _sys
 
+    _report_ollama_health()
     store = ModelStore(ctx.obj["config"].models_store_path)
     click.echo(f"store: {store.root}")
     if not store.root.exists():
@@ -1149,7 +1176,11 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
                     repo.clear()
                 else:
                     repo.record(
-                        advisory.model_id, advisory.reason, list(advisory.commands), advisory.at
+                        advisory.model_id,
+                        advisory.headline,
+                        advisory.reason,
+                        list(advisory.commands),
+                        advisory.at,
                     )
 
             model_server = ModelServer(

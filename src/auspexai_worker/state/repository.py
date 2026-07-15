@@ -198,10 +198,12 @@ class WorkerSelfRepository:
 
 @dataclass(frozen=True)
 class ServeAdvisoryRow:
-    """The worker's most recent operator-actionable serve failure (a persistent
-    GPU out-of-memory). `commands` are copy-to-run recovery hints — never auto-run."""
+    """The worker's most recent operator-actionable serve failure (GPU out-of-memory,
+    a stale model server, or a generic serve error). `headline` is the short bold
+    banner; `commands` are copy-to-run recovery hints — never auto-run."""
 
     model_id: str
+    headline: str
     reason: str
     commands: list[str]
     raised_at: datetime
@@ -209,26 +211,34 @@ class ServeAdvisoryRow:
 
 class ServeAdvisoryRepository:
     """The singleton `serve_advisory` row (id=1). The daemon records a persistent
-    GPU-OOM here via the ModelServer advisory sink and clears it when serving
+    serve failure here via the ModelServer advisory sink and clears it when serving
     recovers; the local dashboard reads it to show/hide the recovery card."""
 
     def __init__(self, db: Database) -> None:
         self._db = db
 
-    def record(self, model_id: str, reason: str, commands: list[str], raised_at: datetime) -> None:
+    def record(
+        self,
+        model_id: str,
+        headline: str,
+        reason: str,
+        commands: list[str],
+        raised_at: datetime,
+    ) -> None:
         with self._db.transaction() as cur:
             cur.execute(
-                "INSERT INTO serve_advisory (id, model_id, reason, commands, raised_at) "
-                "VALUES (1, ?, ?, ?, ?) "
+                "INSERT INTO serve_advisory (id, model_id, headline, reason, commands, raised_at) "
+                "VALUES (1, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(id) DO UPDATE SET model_id = excluded.model_id, "
-                "reason = excluded.reason, commands = excluded.commands, "
-                "raised_at = excluded.raised_at",
-                (model_id, reason, "\n".join(commands), _format_ts(raised_at)),
+                "headline = excluded.headline, reason = excluded.reason, "
+                "commands = excluded.commands, raised_at = excluded.raised_at",
+                (model_id, headline, reason, "\n".join(commands), _format_ts(raised_at)),
             )
 
     def get(self) -> ServeAdvisoryRow | None:
         row = self._db.connection.execute(
-            "SELECT model_id, reason, commands, raised_at FROM serve_advisory WHERE id = 1"
+            "SELECT model_id, headline, reason, commands, raised_at "
+            "FROM serve_advisory WHERE id = 1"
         ).fetchone()
         if row is None:
             return None
@@ -236,6 +246,7 @@ class ServeAdvisoryRepository:
         assert raised is not None  # NOT NULL column
         return ServeAdvisoryRow(
             model_id=row["model_id"],
+            headline=row["headline"],
             reason=row["reason"],
             commands=[c for c in (row["commands"] or "").split("\n") if c],
             raised_at=raised,

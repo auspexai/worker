@@ -78,6 +78,26 @@ class BackendError(Exception):
     it must never crash the worker daemon."""
 
 
+def _backend_error(path: str, exc: httpx.HTTPError) -> BackendError:
+    """A BackendError that PRESERVES the server's response body. Ollama returns the
+    real cause in the error body — e.g. a 500 whose body is
+    `{"error":"unknown model architecture 'qwen3'"}` when the runtime is too old to
+    load the model — but `str(HTTPStatusError)` reports only "Server error '500…'".
+    Losing the body is what left serve failures diagnosed as a bare 500; it is what
+    lets the serve guard tell a stale-Ollama failure from a transient one."""
+    detail = ""
+    resp = getattr(exc, "response", None)
+    if resp is not None:
+        try:
+            detail = (resp.text or "").strip()
+        except Exception:
+            detail = ""
+    msg = f"ollama {path} failed: {exc}"
+    if detail:
+        msg += f" — {detail[:500]}"
+    return BackendError(msg)
+
+
 class InferenceBackend(Protocol):
     """What the ModelServer + broker need from a runtime. Kept minimal so a
     fake (tests) or an embedded llama-cpp backend (future) drops in."""
@@ -136,7 +156,7 @@ class OllamaBackend:
                 r.raise_for_status()
                 return r.json()
         except httpx.HTTPError as exc:
-            raise BackendError(f"ollama {path} failed: {exc}") from exc
+            raise _backend_error(path, exc) from exc
 
     def _get(self, path: str, *, timeout: float = 10.0) -> dict[str, Any]:
         try:
@@ -145,7 +165,7 @@ class OllamaBackend:
                 r.raise_for_status()
                 return r.json()
         except httpx.HTTPError as exc:
-            raise BackendError(f"ollama {path} failed: {exc}") from exc
+            raise _backend_error(path, exc) from exc
 
     # ---- InferenceBackend ---------------------------------------------------
 

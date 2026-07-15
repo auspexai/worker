@@ -30,6 +30,7 @@ class FakeBackend:
         loaded: list[str] | None = None,
         chat_fail_times: int = 0,
         chat_error: str = "cudaMalloc failed: out of memory",
+        version: str | None = None,
     ) -> None:
         self.healthy = healthy
         self.preloaded = preloaded
@@ -39,9 +40,13 @@ class FakeBackend:
         self.unloaded: list[str] = []
         self._chat_fail_times = chat_fail_times
         self._chat_error = chat_error
+        self._version = version
 
     def is_healthy(self) -> bool:
         return self.healthy
+
+    def version(self) -> str | None:
+        return self._version
 
     def has_model(self, handle: str) -> bool:
         return self.preloaded or any(h == handle for h, _ in self.created)
@@ -381,7 +386,10 @@ def test_gpu_oom_persists_refuses_and_emits_advisory(tmp_path: Path):
     assert any("restart ollama" in c for c in adv.commands)
 
 
-def test_non_memory_serve_error_is_not_retried_and_no_advisory(tmp_path: Path):
+def test_non_memory_serve_error_is_not_retried_but_still_advises(tmp_path: Path):
+    # A non-OOM serve failure is NOT retried (freeing memory won't heal it), but it
+    # must no longer be SILENT — it now emits a generic operator advisory so a
+    # persistent serve failure shows on the dashboard instead of vanishing.
     store, _ = _store_with_model(tmp_path)
     backend = FakeBackend(chat_fail_times=1, chat_error="ollama create failed: no such file")
     advisories: list[ServeAdvisory] = []
@@ -390,8 +398,34 @@ def test_non_memory_serve_error_is_not_retried_and_no_advisory(tmp_path: Path):
     with pytest.raises(ModelServeError, match="failed to serve"):
         server.serve("tiny-q4")
 
-    assert backend.chats == []  # never succeeded
-    assert advisories == []  # a non-memory failure is not a GPU-OOM advisory
+    assert backend.chats == []  # never succeeded (not retried)
+    assert len(advisories) == 1
+    assert advisories[0].headline == "Couldn't serve a model."
+
+
+def test_stale_backend_serve_error_advises_ollama_update(tmp_path: Path):
+    # The recurring real-world bite: an Ollama too old to load a newer model's
+    # architecture 500s with "unknown model architecture 'qwen3'". The guard must
+    # name the LIKELY cause (stale Ollama) + the fix, and refuse with a reason the
+    # coordinator can show — not a bare 500.
+    store, _ = _store_with_model(tmp_path)
+    backend = FakeBackend(
+        chat_fail_times=1,
+        chat_error="ollama /api/chat failed: 500 — unknown model architecture 'qwen3'",
+        version="0.17.7",
+    )
+    advisories: list[ServeAdvisory] = []
+    server = ModelServer(store, backend, usable_memory_gb=6.0, advisory_sink=advisories.append)
+
+    with pytest.raises(ModelServeError, match="too old for this model architecture"):
+        server.serve("tiny-q4")
+
+    assert backend.chats == []  # not retried
+    assert len(advisories) == 1
+    adv = advisories[0]
+    assert "out of date" in adv.headline
+    assert "0.17.7" in adv.reason  # the host's version is named
+    assert any("ollama.com/install.sh" in c for c in adv.commands)
 
 
 def test_successful_serve_clears_any_prior_advisory(tmp_path: Path):

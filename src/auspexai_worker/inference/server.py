@@ -77,6 +77,42 @@ def _looks_like_gpu_oom(exc: Exception) -> bool:
     return any(marker in text for marker in _GPU_OOM_MARKERS)
 
 
+# Substrings that mark a serve failure as an Ollama VERSION / model-architecture
+# incompatibility — the runtime is too old to load this model's architecture (vs a
+# transient error or a corrupt file). Ollama returns a 500 whose BODY reads e.g.
+# "unknown model architecture 'qwen3'" or "this model requires a newer version of
+# Ollama"; the body is now preserved through `_backend_error`. This is the recurring
+# real-world bite: a worker that installed Ollama once and never updated silently
+# strands runs of newer models (phi-3.5, qwen3-2507, gpt-oss). Broad on purpose.
+_STALE_BACKEND_MARKERS: tuple[str, ...] = (
+    "unknown model architecture",
+    "unsupported model architecture",
+    "unknown architecture",
+    "unsupported architecture",
+    "invalid model architecture",
+    "requires a newer version",
+    "requires newer version",
+    "please update ollama",
+    "update ollama",
+    "not compatible with your version",
+    "unable to load model",
+)
+
+# Copy-to-run remedies surfaced on the local dashboard (NEVER auto-run — a
+# sandboxed/volunteer worker must not assume privilege or restart a live serve).
+_OLLAMA_UPDATE_COMMANDS: tuple[str, ...] = (
+    "curl -fsSL https://ollama.com/install.sh | sh   # Linux / Jetson: update Ollama",
+    "brew upgrade ollama                             # macOS",
+    "sudo systemctl restart ollama                   # then restart the model server",
+)
+_OLLAMA_RESTART_COMMANDS: tuple[str, ...] = ("sudo systemctl restart ollama   # or: ollama serve",)
+
+
+def _looks_like_stale_backend(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(marker in text for marker in _STALE_BACKEND_MARKERS)
+
+
 class ModelServeError(Exception):
     """The model can't be served (missing/ambiguous GGUF, backend down,
     create failed). Dispatch maps this to a refusal — never an echo."""
@@ -96,12 +132,14 @@ class ServedModel:
 class ServeAdvisory:
     """A serve failure the host operator might clear by hand. The worker NEVER
     runs the remedies itself — they need privileges (drop the OS page cache,
-    restart the model server) a sandboxed/volunteer worker must not assume. It's
-    logged and surfaced on the local dashboard (copy-to-run, never auto-run) so
+    update/restart the model server) a sandboxed/volunteer worker must not assume.
+    It's logged and surfaced on the local dashboard (copy-to-run, never auto-run) so
     the operator can act if they choose; the coordinator routes the unit elsewhere
-    meanwhile."""
+    meanwhile. `headline` is the short bold banner (the cause varies now —
+    GPU-out-of-memory vs a stale Ollama vs a generic serve error)."""
 
     model_id: str
+    headline: str
     reason: str
     commands: tuple[str, ...]
     at: datetime
@@ -225,7 +263,12 @@ class ModelServer:
             # (missing binary, corrupt GGUF, daemon down) is not retried — those
             # don't heal by freeing memory.
             if not _looks_like_gpu_oom(exc):
-                raise ModelServeError(f"failed to serve {model_id}: {exc}") from exc
+                # A non-OOM serve failure. Unlike OOM it is NOT retried (freeing
+                # memory won't heal a missing binary / corrupt GGUF / an Ollama too
+                # old for the model), but it must still surface an operator advisory
+                # — a persistent serve failure was previously silent on the
+                # dashboard, and an out-of-date Ollama gave only a bare "500".
+                self._raise_serve_failure(model_id, exc)
             logger.warning(
                 "serve %s: GPU-memory failure (%s) — freeing VRAM and retrying once",
                 model_id,
@@ -298,6 +341,7 @@ class ModelServer:
         self._emit_advisory(
             ServeAdvisory(
                 model_id=model_id,
+                headline="Couldn't load a model — GPU out of memory.",
                 reason=(
                     f"GPU out of memory serving {model_id}. The worker freed what it "
                     "could and retried; it still failed, so this unit was declined."
@@ -309,6 +353,59 @@ class ModelServer:
         raise ModelServeError(
             f"insufficient GPU memory to serve {model_id} (freed VRAM and retried, still failed)"
         ) from exc
+
+    def _backend_version(self) -> str | None:
+        """The backend's version, if it exposes one (Ollama does via /api/version).
+        Never raises — used only to enrich a diagnosis, on the failure path."""
+        probe = getattr(self._backend, "version", None)
+        if not callable(probe):
+            return None
+        try:
+            return probe()
+        except Exception:
+            return None
+
+    def _raise_serve_failure(self, model_id: str, exc: BackendError) -> NoReturn:
+        """A non-OOM serve failure. Emit an operator advisory (so a persistent
+        failure is never silent on the dashboard) and refuse. When the backend error
+        looks like an Ollama version / architecture incompatibility, the advisory AND
+        the refusal name the LIKELY cause — the runtime is too old for this model —
+        and the fix, so the volunteer isn't left staring at a bare 500 and the
+        coordinator's refusal reason says WHY. Always raises."""
+        version = self._backend_version()
+        if _looks_like_stale_backend(exc):
+            vtxt = f" (this host runs Ollama {version})" if version else ""
+            headline = "Couldn't load a model — your model server may be out of date."
+            reason = (
+                f"{model_id} failed to load{vtxt}. This usually means Ollama is too old "
+                "to run this model's architecture. Update Ollama, then restart the model "
+                "server — the worker will retry automatically."
+            )
+            commands = _OLLAMA_UPDATE_COMMANDS
+            refuse = (
+                f"cannot serve {model_id}: the model server is likely too old for this "
+                f"model architecture — update Ollama"
+                f"{f' (this host runs {version})' if version else ''} ({exc})"
+            )
+        else:
+            headline = "Couldn't serve a model."
+            reason = (
+                f"{model_id} failed to serve — the model server returned an error. "
+                "Check the model server (Ollama) logs on this host."
+            )
+            commands = _OLLAMA_RESTART_COMMANDS
+            refuse = f"failed to serve {model_id}: {exc}"
+        logger.error("serve %s: %s", model_id, refuse)
+        self._emit_advisory(
+            ServeAdvisory(
+                model_id=model_id,
+                headline=headline,
+                reason=reason,
+                commands=commands,
+                at=datetime.now(UTC),
+            )
+        )
+        raise ModelServeError(refuse) from exc
 
     def _emit_advisory(self, advisory: ServeAdvisory | None) -> None:
         """Push a new advisory (persistent GPU-OOM) or None (clear) to the sink.

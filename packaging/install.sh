@@ -26,6 +26,12 @@ INSTALL_PREFIX="/opt/auspexai-worker"
 SYSTEMD_UNIT_DIR="/etc/systemd/user"
 APPARMOR_DIR="/etc/apparmor.d"
 GITHUB_REPO="auspexai/worker"
+# Keep in sync with auspexai_worker/updates.py RECOMMENDED_MIN_OLLAMA — the Ollama
+# version we recommend for serving newer models (phi-3.5 / qwen3 / gpt-oss). A SOFT
+# nudge floor: an install-once-never-updated Ollama silently 500s on newer models,
+# so below this the installer WARNS (and `--update-ollama` upgrades in place).
+RECOMMENDED_MIN_OLLAMA="0.30.0"
+UPDATE_OLLAMA="false"
 MIN_PYTHON_MINOR=11
 
 # ONE installer, OS-aware internals (NOT a separate script per OS): Linux uses
@@ -152,11 +158,44 @@ list_flavors() {
 # installs, the dashboard's reachability badge shows the gap, and re-running
 # this installer heals it. The flavor choice IS the volunteer's consent to
 # this third-party install — the menu text says so plainly.
+# True (0) when $1 is a parseable version STRICTLY below RECOMMENDED_MIN_OLLAMA.
+# Uses `sort -V` (GNU + modern BSD); if unavailable or $1 is empty, returns false
+# (never nag when we can't tell).
+_ollama_below_floor() {
+    [ -n "$1" ] || return 1
+    printf 'x' | sort -V >/dev/null 2>&1 || return 1
+    _lowest="$(printf '%s\n%s\n' "$1" "$RECOMMENDED_MIN_OLLAMA" | sort -V | head -1)"
+    [ "$_lowest" = "$1" ] && [ "$1" != "$RECOMMENDED_MIN_OLLAMA" ]
+}
+
+_update_ollama_in_place() {
+    if [ "$OS" = "Darwin" ]; then
+        command -v brew >/dev/null 2>&1 && brew upgrade ollama \
+            || warn "couldn't upgrade Ollama via brew — update manually from https://ollama.com/download"
+    else
+        curl -fsSL https://ollama.com/install.sh | sh \
+            || warn "Ollama update failed — update manually: curl -fsSL https://ollama.com/install.sh | sh"
+    fi
+}
+
 install_ollama() {
     # 1) Install if absent. macOS: Homebrew (the ollama.com/install.sh is the LINUX
     #    installer — it half-installs the CLI then fails to launch a desktop app).
     if command -v ollama >/dev/null 2>&1; then
-        info "Ollama already installed ($(ollama --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo 'version unknown')) — skipping install"
+        _cur_ollama="$(ollama --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo '')"
+        # Never auto-mutate a volunteer's machine on a plain re-run: below-floor
+        # only WARNS with the one-liner + the --update-ollama hint. --update-ollama
+        # is the volunteer's explicit election to upgrade in place.
+        if [ "${UPDATE_OLLAMA}" = "true" ]; then
+            info "Updating Ollama in place (--update-ollama; currently ${_cur_ollama:-unknown}) …"
+            _update_ollama_in_place
+        elif _ollama_below_floor "${_cur_ollama}"; then
+            warn "Ollama ${_cur_ollama} is older than the recommended ${RECOMMENDED_MIN_OLLAMA} — newer models (phi-3.5 / qwen3 / gpt-oss) may FAIL to serve on this worker."
+            info "  update it:  curl -fsSL https://ollama.com/install.sh | sh   (Linux/Jetson)  |  brew upgrade ollama  (macOS)"
+            info "  or re-run this installer with --update-ollama to upgrade it now."
+        else
+            info "Ollama already installed (${_cur_ollama:-version unknown}) — skipping install"
+        fi
     else
         info "Installing Ollama …"
         if [ "$OS" = "Darwin" ]; then
@@ -706,6 +745,7 @@ main() {
                     || fail "unknown flavor: ${requested_flavor} (one of: ${FLAVOR_NAMES})"
                 shift 2
                 ;;
+            --update-ollama) UPDATE_OLLAMA="true"; shift ;;
             --list-flavors)
                 list_flavors
                 exit 0
@@ -724,6 +764,7 @@ main() {
                 echo "  --uninstall      Stop, de-enroll, and remove the worker"
                 echo "  --version V      Install a specific version instead of latest"
                 echo "  --flavor NAME    Install profile (upgrades keep the recorded one)"
+                echo "  --update-ollama  Upgrade an already-installed Ollama to latest"
                 echo "  --list-flavors   Show available flavors and exit"
                 echo ""
                 list_flavors

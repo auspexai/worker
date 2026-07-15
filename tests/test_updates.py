@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from auspexai_worker.updates import is_newer_version, upgrade_command
+from auspexai_worker.updates import (
+    RECOMMENDED_MIN_OLLAMA,
+    is_newer_version,
+    ollama_update_recommended,
+    upgrade_command,
+)
 
 
 class TestIsNewerVersion:
@@ -60,3 +65,19 @@ class TestUpgradeCommand:
 
     def test_none_flavor_same_command(self) -> None:
         assert upgrade_command(None) == upgrade_command("inference")
+
+
+class TestOllamaUpdateRecommended:
+    def test_old_version_is_flagged(self) -> None:
+        # The Jetson case that stranded phi/qwen3.
+        assert ollama_update_recommended("0.17.7") is True
+        assert ollama_update_recommended("0.18.2") is True
+
+    def test_current_version_is_not_flagged(self) -> None:
+        assert ollama_update_recommended("0.30.11") is False  # the Mac's Ollama
+        assert ollama_update_recommended(RECOMMENDED_MIN_OLLAMA) is False  # exactly the floor
+
+    def test_unknown_or_unparseable_never_nags(self) -> None:
+        assert ollama_update_recommended(None) is False
+        assert ollama_update_recommended("") is False
+        assert ollama_update_recommended("garbage") is False

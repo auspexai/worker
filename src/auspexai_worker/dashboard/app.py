@@ -320,7 +320,7 @@ def _serve_advisory_notice(db: Database) -> tuple[str, str]:
     )
     cmd_block = "<br>".join(f"<code>{html.escape(c)}</code>" for c in advisory.commands)
     inner = (
-        f"<strong>Couldn't load a model — GPU out of memory.</strong> "
+        f"<strong>{html.escape(advisory.headline)}</strong> "
         f"{html.escape(advisory.reason)}<br>"
         f"To let this machine serve it, run these by hand (needs admin): {copy_btn}<br>"
         f"{cmd_block}<br>"
