@@ -350,20 +350,31 @@ class ModelServer:
             "sudo sync && sudo sysctl vm.drop_caches=3",
             "sudo systemctl restart ollama",
         )
+        # The worker already unloaded EVERY other model and retried (see serve()),
+        # so a persistent OOM usually means the model itself is too big for this
+        # host — not that something else is hogging memory. Name the usable budget
+        # so the volunteer understands the fix commands (which free page cache) may
+        # not help, rather than reading a bare "run these" that can't work here.
+        usable = self._usable_memory_gb
+        budget_txt = f" This worker has ~{usable:.1f} GB usable for models." if usable else ""
         logger.error(
-            "serve %s: insufficient GPU memory after freeing VRAM and retrying. "
-            "Manual recovery on this host (needs admin — skip on a sandboxed worker): %s",
+            "serve %s: insufficient GPU memory after unloading all models and retrying"
+            "%s Manual recovery (needs admin — skip on a sandboxed worker): %s",
             model_id,
+            budget_txt,
             " ; ".join(commands),
         )
         self._emit_advisory(
             ServeAdvisory(
                 model_id=model_id,
                 kind=ADVISORY_GPU_OOM,
-                headline="Couldn't load a model — GPU out of memory.",
+                headline="Couldn't load a model — out of memory.",
                 reason=(
-                    f"GPU out of memory serving {model_id}. The worker freed what it "
-                    "could and retried; it still failed, so this unit was declined."
+                    f"Ran out of memory serving {model_id}. The worker unloaded every "
+                    f"other model and retried; it still failed.{budget_txt} Freeing other "
+                    "memory consumers on this host may help — otherwise this model is "
+                    "likely too large to serve here, and the coordinator will route it "
+                    "to a larger worker."
                 ),
                 commands=commands,
                 at=datetime.now(UTC),

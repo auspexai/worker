@@ -24,6 +24,14 @@ logger = logging.getLogger(__name__)
 # raise-time baseline — enough to be confident the volunteer freed memory
 # (sync + drop_caches), not just measurement noise.
 _GPU_OOM_RECOVERY_MARGIN_GB = 0.5
+# A baseline-LESS GPU-OOM card (raised before this worker recorded a raise-time
+# baseline, or when the memory probe was unavailable) can't do the relative
+# comparison. Rather than pin it forever — which stranded orphaned cards from
+# aborted experiments — clear it once free memory is comfortably healthy in
+# ABSOLUTE terms. A genuine OOM on a constrained host happens near-starved (~1-2 GB
+# free), so this floor sits clearly above that, and the next real dispatch re-raises
+# WITH a baseline if the serve still fails — an optimistic clear is safe here.
+_GPU_OOM_STALE_CLEAR_GB = 3.0
 
 
 def advisory_recovered(
@@ -31,15 +39,19 @@ def advisory_recovered(
 ) -> bool:
     """True when the condition behind `row` looks resolved by the volunteer's action:
       - stale backend → Ollama updated to >= the recommended floor,
-      - GPU-OOM → free memory rose above the raise-time baseline by the margin.
+      - GPU-OOM (with a raise-time baseline) → free memory rose above it by the margin,
+      - GPU-OOM (no baseline: legacy/orphaned card) → free memory is comfortably
+        healthy in absolute terms (the dispatch backstop re-raises if still broken).
     A generic serve error has no cheap recovery signal → clears on the next successful
     serve (handled by the ModelServer), so this returns False for it."""
     if row.kind == ADVISORY_STALE_BACKEND:
         return backend_version is not None and not ollama_update_recommended(backend_version)
     if row.kind == ADVISORY_GPU_OOM:
-        base = row.available_at_raise_gb
-        if base is None or available_memory_gb is None:
+        if available_memory_gb is None:
             return False
+        base = row.available_at_raise_gb
+        if base is None:
+            return available_memory_gb >= _GPU_OOM_STALE_CLEAR_GB
         return available_memory_gb >= base + _GPU_OOM_RECOVERY_MARGIN_GB
     return False
 

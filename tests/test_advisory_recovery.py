@@ -51,9 +51,19 @@ def test_gpu_oom_recovers_when_free_memory_rises_above_baseline():
     assert advisory_recovered(row, backend_version=None, available_memory_gb=3.5)
 
 
-def test_gpu_oom_no_baseline_does_not_recover():
+def test_gpu_oom_no_baseline_recovers_on_healthy_free_memory():
+    # A baseline-less (legacy / orphaned) card can't do the relative comparison, so
+    # it clears once free memory is comfortably healthy in absolute terms — the next
+    # dispatch re-raises WITH a baseline if the serve still fails. Starved → stays.
     row = _row("gpu_oom", available_at_raise_gb=None)
-    assert not advisory_recovered(row, backend_version=None, available_memory_gb=8.0)
+    assert advisory_recovered(row, backend_version=None, available_memory_gb=8.0)
+    assert not advisory_recovered(row, backend_version=None, available_memory_gb=1.5)
+
+
+def test_gpu_oom_no_baseline_stays_without_a_memory_reading():
+    # No memory reading at all → can't judge; leave the card for the next dispatch.
+    row = _row("gpu_oom", available_at_raise_gb=None)
+    assert not advisory_recovered(row, backend_version=None, available_memory_gb=None)
 
 
 def test_generic_serve_error_has_no_cheap_recovery():
