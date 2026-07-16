@@ -203,10 +203,12 @@ class ServeAdvisoryRow:
     banner; `commands` are copy-to-run recovery hints — never auto-run."""
 
     model_id: str
+    kind: str
     headline: str
     reason: str
     commands: list[str]
     raised_at: datetime
+    available_at_raise_gb: float | None = None
 
 
 class ServeAdvisoryRepository:
@@ -220,24 +222,36 @@ class ServeAdvisoryRepository:
     def record(
         self,
         model_id: str,
+        kind: str,
         headline: str,
         reason: str,
         commands: list[str],
         raised_at: datetime,
+        available_at_raise_gb: float | None = None,
     ) -> None:
         with self._db.transaction() as cur:
             cur.execute(
-                "INSERT INTO serve_advisory (id, model_id, headline, reason, commands, raised_at) "
-                "VALUES (1, ?, ?, ?, ?, ?) "
+                "INSERT INTO serve_advisory "
+                "(id, model_id, kind, headline, reason, commands, raised_at, available_at_raise_gb) "
+                "VALUES (1, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(id) DO UPDATE SET model_id = excluded.model_id, "
-                "headline = excluded.headline, reason = excluded.reason, "
-                "commands = excluded.commands, raised_at = excluded.raised_at",
-                (model_id, headline, reason, "\n".join(commands), _format_ts(raised_at)),
+                "kind = excluded.kind, headline = excluded.headline, reason = excluded.reason, "
+                "commands = excluded.commands, raised_at = excluded.raised_at, "
+                "available_at_raise_gb = excluded.available_at_raise_gb",
+                (
+                    model_id,
+                    kind,
+                    headline,
+                    reason,
+                    "\n".join(commands),
+                    _format_ts(raised_at),
+                    available_at_raise_gb,
+                ),
             )
 
     def get(self) -> ServeAdvisoryRow | None:
         row = self._db.connection.execute(
-            "SELECT model_id, headline, reason, commands, raised_at "
+            "SELECT model_id, kind, headline, reason, commands, raised_at, available_at_raise_gb "
             "FROM serve_advisory WHERE id = 1"
         ).fetchone()
         if row is None:
@@ -246,10 +260,12 @@ class ServeAdvisoryRepository:
         assert raised is not None  # NOT NULL column
         return ServeAdvisoryRow(
             model_id=row["model_id"],
+            kind=row["kind"],
             headline=row["headline"],
             reason=row["reason"],
             commands=[c for c in (row["commands"] or "").split("\n") if c],
             raised_at=raised,
+            available_at_raise_gb=row["available_at_raise_gb"],
         )
 
     def clear(self) -> None:

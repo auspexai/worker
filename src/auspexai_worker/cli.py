@@ -14,6 +14,7 @@ import signal
 import subprocess
 import sys
 import threading
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -1155,6 +1156,7 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
         model_server = None
         open_inference_session = None
         _ollama_version: str | None = None
+        _advisory_recovery: Callable[[float | None], None] | None = None
         if config.inference_backend == "ollama":
             from .inference import ModelServer, OllamaBackend, open_unit_session
 
@@ -1177,18 +1179,36 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
                 else:
                     repo.record(
                         advisory.model_id,
+                        advisory.kind,
                         advisory.headline,
                         advisory.reason,
                         list(advisory.commands),
                         advisory.at,
+                        advisory.available_at_raise_gb,
                     )
+
+            from auspexai_worker.capabilities.detect import detect_available_memory_gb
+            from auspexai_worker.daemon.advisory_recovery import run_recovery_check
 
             model_server = ModelServer(
                 ModelStore(config.models_store_path),
                 _inference_backend,
                 usable_memory_gb=_usable_memory_gb,
                 advisory_sink=_serve_advisory_sink,
+                available_memory_probe=detect_available_memory_gb,
             )
+
+            # Per-heartbeat auto-recovery: clear the serve-advisory card once the
+            # volunteer's fix takes effect (free memory recovered / Ollama updated),
+            # so their action gets a worker-UI response without waiting for the
+            # coordinator to route the next unit here.
+            def _advisory_recovery(available_memory_gb: float | None) -> None:
+                run_recovery_check(
+                    ServeAdvisoryRepository(db),
+                    backend=_inference_backend,
+                    available_memory_gb=available_memory_gb,
+                )
+
             # §9 #46 determinism provenance: probe the serving Ollama's version
             # ONCE at daemon start (no per-tick HTTP); declared in heartbeats.
             _ollama_version = _inference_backend.version()
@@ -1336,6 +1356,7 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
             worker_id=worker.worker_id,
             capability_collector=_collect_capabilities,
             interval_seconds=config.heartbeat_interval_seconds,
+            advisory_recovery=_advisory_recovery,
         )
         poller = AssignmentPoller(
             coordinator=client,

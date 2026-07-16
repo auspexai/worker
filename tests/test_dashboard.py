@@ -785,6 +785,7 @@ class TestServeAdvisoryCard:
     def _record(self, db: Database) -> None:
         ServeAdvisoryRepository(db).record(
             "smollm2-1.7b",
+            "gpu_oom",
             "Couldn't load a model — GPU out of memory.",
             "freed VRAM and retried once, still out of memory",
             ["sudo sync && sudo sysctl vm.drop_caches=3", "sudo systemctl restart ollama"],

@@ -167,14 +167,17 @@ class TestServeAdvisoryRepository:
         at = datetime(2026, 7, 10, 4, 30, tzinfo=UTC)
         repo.record(
             "smollm2-1.7b",
+            "gpu_oom",
             "Couldn't load a model — GPU out of memory.",
             "freed VRAM and retried once, still out of memory",
             ["sudo sync && sudo sysctl vm.drop_caches=3", "sudo systemctl restart ollama"],
             at,
+            3.1,
         )
         got = repo.get()
         assert got is not None
         assert got.model_id == "smollm2-1.7b"
+        assert got.kind == "gpu_oom"
         assert got.headline == "Couldn't load a model — GPU out of memory."
         assert "still out of memory" in got.reason
         assert got.commands == [
@@ -182,21 +185,23 @@ class TestServeAdvisoryRepository:
             "sudo systemctl restart ollama",
         ]
         assert got.raised_at == at
+        assert got.available_at_raise_gb == 3.1
 
     def test_record_is_singleton_latest_wins(self, db: Database) -> None:
         repo = ServeAdvisoryRepository(db)
         at = datetime(2026, 7, 10, 4, 30, tzinfo=UTC)
-        repo.record("model-a", "h1", "first", ["cmd-a"], at)
-        repo.record("model-b", "h2", "second", ["cmd-b"], at)
+        repo.record("model-a", "gpu_oom", "h1", "first", ["cmd-a"], at)
+        repo.record("model-b", "stale_backend", "h2", "second", ["cmd-b"], at)
         got = repo.get()
         assert got is not None
         assert got.model_id == "model-b"
+        assert got.kind == "stale_backend"
         assert got.headline == "h2"
         assert got.commands == ["cmd-b"]
 
     def test_clear_removes_the_advisory(self, db: Database) -> None:
         repo = ServeAdvisoryRepository(db)
-        repo.record("model-a", "h", "boom", ["cmd-a"], datetime(2026, 7, 10, tzinfo=UTC))
+        repo.record("model-a", "gpu_oom", "h", "boom", ["cmd-a"], datetime(2026, 7, 10, tzinfo=UTC))
         repo.clear()
         assert repo.get() is None
 

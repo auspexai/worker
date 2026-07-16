@@ -34,7 +34,7 @@ def test_parse_quant():
 
 
 def test_usable_budget():
-    assert usable_budget_gb(8.0, unified=True) == 6.0  # 2 GB OS headroom
+    assert usable_budget_gb(8.0, unified=True) == 5.0  # 3 GB OS headroom (unified reality)
     assert usable_budget_gb(24.0, unified=False) == 23.5  # 0.5 GB discrete headroom
     assert usable_budget_gb(None, unified=True) is None
     assert usable_budget_gb(1.0, unified=True) == 0.0  # floored

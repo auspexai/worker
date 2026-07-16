@@ -136,13 +136,26 @@ class ServeAdvisory:
     It's logged and surfaced on the local dashboard (copy-to-run, never auto-run) so
     the operator can act if they choose; the coordinator routes the unit elsewhere
     meanwhile. `headline` is the short bold banner (the cause varies now —
-    GPU-out-of-memory vs a stale Ollama vs a generic serve error)."""
+    GPU-out-of-memory vs a stale Ollama vs a generic serve error). `kind` names the
+    cause so the daemon can AUTO-CLEAR the card once the volunteer's fix takes effect
+    (see daemon.advisory_recovery) — the worker is the volunteer's to manage, so
+    their action must get a UI response without waiting for the coordinator."""
 
     model_id: str
+    kind: str  # ADVISORY_GPU_OOM | ADVISORY_STALE_BACKEND | ADVISORY_SERVE_ERROR
     headline: str
     reason: str
     commands: tuple[str, ...]
     at: datetime
+    # Live available memory (GB) when raised — the GPU-OOM recovery baseline (the card
+    # clears when free memory rises above this). None when no live-mem probe.
+    available_at_raise_gb: float | None = None
+
+
+# Advisory kinds — drive the daemon's auto-recovery (which recovery signal clears it).
+ADVISORY_GPU_OOM = "gpu_oom"  # clears when free memory recovers above the model footprint
+ADVISORY_STALE_BACKEND = "stale_backend"  # clears when Ollama is updated to >= the floor
+ADVISORY_SERVE_ERROR = "serve_error"  # clears on the next successful serve
 
 
 def backend_handle(model_id: str) -> str:
@@ -176,11 +189,16 @@ class ModelServer:
         num_ctx: int = DEFAULT_NUM_CTX,
         usable_memory_gb: float | None = None,
         advisory_sink: Callable[[ServeAdvisory | None], None] | None = None,
+        available_memory_probe: Callable[[], float | None] | None = None,
     ) -> None:
         self._store = store
         self._backend = backend
         self._seed = seed
         self._num_ctx = num_ctx
+        # Live available-memory probe (detect_available_memory_gb) — stamped onto a
+        # GPU-OOM advisory as its recovery baseline so the daemon can clear the card
+        # once the volunteer frees memory. None ⇒ no baseline (recovery falls back).
+        self._available_memory_probe = available_memory_probe
         # Sink for the operator-actionable serve state: called with a ServeAdvisory
         # when a GPU-OOM persists after in-process recovery, and with None to CLEAR
         # it when serving next succeeds. The daemon wires this to persist so the local
@@ -341,6 +359,7 @@ class ModelServer:
         self._emit_advisory(
             ServeAdvisory(
                 model_id=model_id,
+                kind=ADVISORY_GPU_OOM,
                 headline="Couldn't load a model — GPU out of memory.",
                 reason=(
                     f"GPU out of memory serving {model_id}. The worker freed what it "
@@ -348,11 +367,22 @@ class ModelServer:
                 ),
                 commands=commands,
                 at=datetime.now(UTC),
+                available_at_raise_gb=self._available_memory(),
             )
         )
         raise ModelServeError(
             f"insufficient GPU memory to serve {model_id} (freed VRAM and retried, still failed)"
         ) from exc
+
+    def _available_memory(self) -> float | None:
+        """Live available memory (GB) via the injected probe, or None. Never raises."""
+        probe = self._available_memory_probe
+        if probe is None:
+            return None
+        try:
+            return probe()
+        except Exception:
+            return None
 
     def _backend_version(self) -> str | None:
         """The backend's version, if it exposes one (Ollama does via /api/version).
@@ -374,6 +404,7 @@ class ModelServer:
         coordinator's refusal reason says WHY. Always raises."""
         version = self._backend_version()
         if _looks_like_stale_backend(exc):
+            kind = ADVISORY_STALE_BACKEND
             vtxt = f" (this host runs Ollama {version})" if version else ""
             headline = "Couldn't load a model — your model server may be out of date."
             reason = (
@@ -388,6 +419,7 @@ class ModelServer:
                 f"{f' (this host runs {version})' if version else ''} ({exc})"
             )
         else:
+            kind = ADVISORY_SERVE_ERROR
             headline = "Couldn't serve a model."
             reason = (
                 f"{model_id} failed to serve — the model server returned an error. "
@@ -399,6 +431,7 @@ class ModelServer:
         self._emit_advisory(
             ServeAdvisory(
                 model_id=model_id,
+                kind=kind,
                 headline=headline,
                 reason=reason,
                 commands=commands,

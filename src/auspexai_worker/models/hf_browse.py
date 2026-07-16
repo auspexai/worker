@@ -24,7 +24,13 @@ from typing import Protocol
 # Memory overhead beyond the weight file (KV cache + runtime), and headroom left
 # for the OS — larger on unified memory where the accelerator shares system RAM.
 _LOAD_OVERHEAD = 1.2
-_UNIFIED_HEADROOM_GB = 2.0
+# Unified-memory hosts (Jetson / Apple Silicon) share system RAM with the GPU, and
+# the OS + JetPack/driver + CUDA context + page cache eat well more than a discrete
+# box's slice: on the 8 GB Jetsons, models up to ~2.5 GB weights (qwen3-4b, phi) OOM'd
+# despite passing a 2.0 GB-reserve check, so the real serve ceiling is ~4 GB, not 5.44.
+# 3.0 makes the reported usable honest (a live available_memory_gb probe now refines it
+# per-tick). Kept below the smallest fitting model's need so a 1.7B still fits.
+_UNIFIED_HEADROOM_GB = 3.0
 _DISCRETE_HEADROOM_GB = 0.5
 
 _QUANT_RE = re.compile(r"(I?Q\d+(?:_[A-Za-z0-9]+)*|F16|BF16|F32)", re.IGNORECASE)

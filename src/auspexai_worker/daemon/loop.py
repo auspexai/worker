@@ -52,6 +52,7 @@ class HeartbeatLoop:
         capability_collector: CapabilityCollector,
         interval_seconds: float,
         stop_event: threading.Event | None = None,
+        advisory_recovery: Callable[[float | None], None] | None = None,
     ) -> None:
         self._coordinator = coordinator
         self._repo = repo
@@ -60,6 +61,10 @@ class HeartbeatLoop:
         self._interval = float(interval_seconds)
         self._stop_event = stop_event or threading.Event()
         self._stats = HeartbeatStats()
+        # Optional per-tick hook: clear a serve-advisory once the volunteer's fix took
+        # effect (auto-recovery), given the freshly-collected live available memory.
+        # Best-effort; the loop never lets it disturb the heartbeat.
+        self._advisory_recovery = advisory_recovery
 
     @property
     def stats(self) -> HeartbeatStats:
@@ -103,6 +108,14 @@ class HeartbeatLoop:
         self._stats.ticks_attempted += 1
         try:
             capabilities = self._collect_capabilities().to_dict()
+            # Auto-recover a serve-advisory the moment the volunteer's fix shows in the
+            # fresh capabilities (free memory recovered / Ollama updated). Best-effort,
+            # never blocks the heartbeat.
+            if self._advisory_recovery is not None:
+                try:
+                    self._advisory_recovery(capabilities.get("available_memory_gb"))
+                except Exception:
+                    logger.debug("advisory recovery hook failed (ignored)", exc_info=True)
             # D12 5c: in-flight model-download progress (bytes/total) so a queued
             # researcher sees the pull advance. Empty → None (omit from the body).
             downloads = download_progress.snapshot()
