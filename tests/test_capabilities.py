@@ -32,6 +32,23 @@ class TestRamDetection:
         assert detect_ram_total_gb(meminfo_path=path) is None
 
 
+class TestAvailableMemoryDetection:
+    def test_parses_mem_available(self, tmp_path: Path) -> None:
+        from auspexai_worker.capabilities.detect import detect_available_memory_gb
+
+        path = tmp_path / "meminfo"
+        # A Jetson mid-serve: 7.44 GB total but only ~3 GB actually available.
+        path.write_text("MemTotal: 7802880 kB\nMemFree: 500000 kB\nMemAvailable: 3145728 kB\n")
+        assert detect_available_memory_gb(meminfo_path=path) == 3.0
+
+    def test_none_when_unavailable_field_missing(self, tmp_path: Path) -> None:
+        from auspexai_worker.capabilities.detect import detect_available_memory_gb
+
+        path = tmp_path / "meminfo"
+        path.write_text("MemTotal: 7802880 kB\n")  # no MemAvailable → unknown
+        assert detect_available_memory_gb(meminfo_path=path) is None
+
+
 class TestGpuObservation:
     def test_no_gpu_when_sysroot_empty(self, tmp_path: Path) -> None:
         observed = detect_gpus(sysroot=tmp_path)

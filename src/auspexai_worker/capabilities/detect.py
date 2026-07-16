@@ -135,6 +135,13 @@ class Capabilities:
     # the serve budget, so a raw-RAM gate would route a model the worker then
     # refuses. None when the accelerator budget is unknown. Omitted when None.
     usable_memory_gb: float | None = None
+    # LIVE available memory (GB) at heartbeat time — free RAM a serve can actually
+    # claim right now (MemAvailable / vm_stat). The dynamic fit THRESHOLD the
+    # coordinator prefers over the static usable_memory_gb: it sees the page cache +
+    # other processes + (unified memory) the real GPU-allocatable headroom, which is
+    # what a static budget missed when phi/qwen3 passed the RAM check then OOM'd.
+    # Omitted when None (unknown → coordinator falls back to the static budget).
+    available_memory_gb: float | None = None
     # In-flight model downloads (D12 5c): {model_id: {bytes_downloaded, total_bytes}}
     # while the worker is auto-acquiring a model. Lets the coordinator + operator UI
     # show "provisioning: downloading <model> NN%" instead of a silent "provisioned"
@@ -217,6 +224,8 @@ class Capabilities:
             d.pop("model_sizes", None)  # compact wire when the store is empty
         if self.usable_memory_gb is None:
             d.pop("usable_memory_gb", None)  # absent == budget unknown
+        if self.available_memory_gb is None:
+            d.pop("available_memory_gb", None)  # absent == live free-mem unknown
         if not self.downloads:
             d.pop("downloads", None)  # compact wire when nothing is downloading
         if self.thermal is None:
@@ -285,6 +294,58 @@ def detect_ram_total_gb(*, meminfo_path: Path | None = None) -> float | None:
         ).stdout.strip()
         if out.isdigit() and int(out) > 0:
             return round(int(out) / (1024**3), 2)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    return None
+
+
+def detect_available_memory_gb(*, meminfo_path: Path | None = None) -> float | None:
+    """Currently-AVAILABLE memory in GB (binary) — free memory a new process can use
+    RIGHT NOW without swapping. This is the LIVE fit threshold: it reflects the OS
+    page cache, other processes, and (on unified-memory hosts like Jetson / Apple
+    Silicon, where the GPU shares system RAM) roughly what's actually allocatable to
+    a model. Distinct from `usable_memory_gb`, which is a STATIC budget
+    (total - fixed reserve) that cannot see the dynamic state that OOMs a serve — the
+    exact blind spot behind the phi/qwen3 Jetson OOMs.
+
+    Linux reads `/proc/meminfo` `MemAvailable`; Darwin parses `vm_stat`
+    (free + inactive + speculative pages). None when nothing resolves — the
+    coordinator then falls back to the static budget. As with `detect_ram_total_gb`,
+    an explicit `meminfo_path` (test mode) runs ONLY the meminfo parse."""
+    path = meminfo_path or Path("/proc/meminfo")
+    try:
+        content = path.read_text(encoding="ascii", errors="replace")
+        for line in content.splitlines():
+            if line.startswith("MemAvailable:"):
+                parts = line.split()
+                if len(parts) >= 2 and parts[1].isdigit():
+                    return round(int(parts[1]) / (1024 * 1024), 2)
+    except (FileNotFoundError, PermissionError, OSError):
+        pass
+    if meminfo_path is not None:
+        return None  # explicit path — no host fallback
+
+    # Darwin: vm_stat pages (free + inactive + speculative) x page size.
+    try:
+        import re
+        import subprocess
+
+        out = subprocess.run(
+            ["vm_stat"], capture_output=True, text=True, timeout=2, check=True
+        ).stdout
+        page_size = 4096
+        pm = re.search(r"page size of (\d+) bytes", out)
+        if pm:
+            page_size = int(pm.group(1))
+        pages = 0
+        for line in out.splitlines():
+            low = line.lower()
+            if any(k in low for k in ("pages free", "pages inactive", "pages speculative")):
+                val = line.rsplit(":", 1)[-1].strip().rstrip(".")
+                if val.isdigit():
+                    pages += int(val)
+        if pages > 0:
+            return round(pages * page_size / (1024**3), 2)
     except (OSError, ValueError, subprocess.SubprocessError):
         pass
     return None
@@ -407,6 +468,7 @@ def collect(
         arch=platform.machine().lower(),
         python_version=platform.python_version(),
         ram_total_gb=detect_ram_total_gb(meminfo_path=meminfo_path),
+        available_memory_gb=detect_available_memory_gb(meminfo_path=meminfo_path),
         cpu_count=detect_cpu_count(),
         gpus_observed=detect_gpus(sysroot=sysroot, probe=probe),
         gpus_declared=declared_gpus or GpuDeclaration(),
