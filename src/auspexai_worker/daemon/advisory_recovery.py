@@ -23,15 +23,20 @@ logger = logging.getLogger(__name__)
 
 # A GPU-OOM card clears when free memory rises at least this many GB above its
 # raise-time baseline — enough to be confident the volunteer freed memory
-# (sync + drop_caches), not just measurement noise.
+# (sync + drop_caches), not just measurement noise. This is the RELATIVE signal, and
+# it's responsive for a classic system-RAM exhaustion (raised near-starved → freeing
+# memory clears it immediately, even below the absolute floor below).
 _GPU_OOM_RECOVERY_MARGIN_GB = 0.5
-# A baseline-LESS GPU-OOM card (raised before this worker recorded a raise-time
-# baseline, or when the memory probe was unavailable) can't do the relative
-# comparison. Rather than pin it forever — which stranded orphaned cards from
-# aborted experiments — clear it once free memory is comfortably healthy in
-# ABSOLUTE terms. A genuine OOM on a constrained host happens near-starved (~1-2 GB
-# free), so this floor sits clearly above that, and the next real dispatch re-raises
-# WITH a baseline if the serve still fails — an optimistic clear is safe here.
+# ...but the relative signal ALONE is wrong for the recurring Jetson case: a CUDA/GPU
+# allocation OOM that starves the GPU while SYSTEM RAM is plentiful (page cache), so the
+# raise-time baseline is already HIGH (~6 GB on a 7.4 GB box). Freeing page cache +
+# restarting the serve stack can't push system-free-RAM 0.5 GB above an already-high
+# baseline, so the card would pin forever after a correct remediation. So a GPU-OOM card
+# ALSO clears once free memory is comfortably healthy in ABSOLUTE terms — this covers both
+# the baseline-less orphaned card AND the high-baseline GPU/page-cache case. A genuine
+# RAM-exhaustion OOM happens near-starved (~1-2 GB free), so this floor sits clearly above
+# that, and the next real dispatch re-raises WITH a baseline if the serve still fails — an
+# optimistic clear is safe.
 _GPU_OOM_STALE_CLEAR_GB = 3.0
 
 
@@ -53,7 +58,13 @@ def advisory_recovered(
         base = row.available_at_raise_gb
         if base is None:
             return available_memory_gb >= _GPU_OOM_STALE_CLEAR_GB
-        return available_memory_gb >= base + _GPU_OOM_RECOVERY_MARGIN_GB
+        # Relative (freed above the raise point) OR absolute-healthy — the latter covers a
+        # GPU/page-cache OOM whose baseline is already high (system RAM was fine), where the
+        # relative test can never be met after a correct remediation.
+        return (
+            available_memory_gb >= base + _GPU_OOM_RECOVERY_MARGIN_GB
+            or available_memory_gb >= _GPU_OOM_STALE_CLEAR_GB
+        )
     return False
 
 

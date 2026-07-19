@@ -112,13 +112,34 @@ def test_on_cleared_fires_with_kind_and_model_when_a_card_clears():
 def test_on_cleared_does_not_fire_when_nothing_clears():
     from auspexai_worker.inference.server import ADVISORY_GPU_OOM
 
-    repo = _Repo(_row(ADVISORY_GPU_OOM, available_at_raise_gb=5.0))
+    repo = _Repo(_row(ADVISORY_GPU_OOM, available_at_raise_gb=1.5))
     seen: list[tuple[str, str]] = []
     cleared = run_recovery_check(
         repo,
         backend=_Backend(None),
-        available_memory_gb=5.1,  # barely above baseline, under the 0.5 margin → NOT recovered
+        # still genuinely starved: under the 0.5 relative margin AND the absolute floor → NOT recovered
+        available_memory_gb=1.8,
         on_cleared=lambda kind, model_id: seen.append((kind, model_id)),
     )
     assert cleared is False
     assert seen == []
+
+
+def test_gpu_oom_high_baseline_recovers_on_absolute_healthy_memory():
+    # The recurring Jetson case (mayhem1): a CUDA/page-cache OOM that starved the GPU while
+    # SYSTEM RAM was plentiful → the raise-time baseline is HIGH (6.2 GB). Freeing memory
+    # can't rise 0.5 GB above it on a 7.4 GB box, but the node IS healthy (6.68 GB free), so
+    # it recovers via the ABSOLUTE floor — a correctly-remediated node isn't pinned forever.
+    from auspexai_worker.inference.server import ADVISORY_GPU_OOM
+
+    row = _row(ADVISORY_GPU_OOM, available_at_raise_gb=6.2)
+    assert advisory_recovered(row, backend_version=None, available_memory_gb=6.68) is True
+
+
+def test_gpu_oom_low_baseline_still_stays_when_genuinely_starved():
+    # A near-starved OOM (base 1.5) with free still below both the relative AND absolute
+    # thresholds must NOT clear — the absolute floor didn't loosen the constrained case.
+    from auspexai_worker.inference.server import ADVISORY_GPU_OOM
+
+    row = _row(ADVISORY_GPU_OOM, available_at_raise_gb=1.5)
+    assert advisory_recovered(row, backend_version=None, available_memory_gb=1.8) is False
