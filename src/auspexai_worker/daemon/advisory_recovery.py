@@ -14,6 +14,7 @@ re-raises the advisory if the serve still fails, so an optimistic clear is safe.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 
 from auspexai_worker.inference.server import ADVISORY_GPU_OOM, ADVISORY_STALE_BACKEND
 from auspexai_worker.updates import ollama_update_recommended
@@ -56,10 +57,21 @@ def advisory_recovered(
     return False
 
 
-def run_recovery_check(repo, *, backend, available_memory_gb: float | None) -> bool:
+def run_recovery_check(
+    repo,
+    *,
+    backend,
+    available_memory_gb: float | None,
+    on_cleared: Callable[[str, str], None] | None = None,
+) -> bool:
     """If a serve-advisory is active and looks recovered by the volunteer's fix, CLEAR
     it (the dashboard card then vanishes). Returns True if cleared. Best-effort — never
-    raises, so it's safe to call from the heartbeat tick."""
+    raises, so it's safe to call from the heartbeat tick.
+
+    `on_cleared(kind, model_id)` fires when an advisory is cleared, so the caller can
+    ALSO tell the coordinator the node recovered — a locally-cleared GPU-OOM card doesn't
+    lift the coordinator's model-level serve exclusion, so without this the remediated node
+    stays benched the full 6h (the exact remote-volunteer confusion this closes)."""
     try:
         row = repo.get()
         if row is None:
@@ -81,6 +93,11 @@ def run_recovery_check(repo, *, backend, available_memory_gb: float | None) -> b
                 row.kind,
                 row.model_id,
             )
+            if on_cleared is not None and row.model_id:
+                try:
+                    on_cleared(row.kind, row.model_id)
+                except Exception:
+                    logger.debug("serve-recovered signal failed (ignored)", exc_info=True)
             return True
     except Exception:
         logger.debug("advisory recovery check failed (ignored)", exc_info=True)

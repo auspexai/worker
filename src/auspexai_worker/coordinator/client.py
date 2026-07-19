@@ -311,6 +311,9 @@ class AssignmentResponse:
     assigned_at: datetime | None
     coordinator_experiment_id: str | None  # coordinator's exp-... id (stable)
     work_unit: WorkUnitEnvelope | None
+    # WHY there's no work (only when work_unit is None) — {code, message, model_id?} — so
+    # the volunteer sees "understood" not "stuck". None on older coordinators.
+    idle_reason: dict | None = None
 
 
 class CoordinatorClient:
@@ -794,6 +797,31 @@ class CoordinatorClient:
             f"refuse_assignment: unexpected status {response.status_code}: {response.text[:500]}"
         )
 
+    def report_serve_recovered(self, *, worker_id: str, model_id: str) -> None:
+        """POST .../serve-recovered. Worker-credentialed. Tells the coordinator this node's
+        operator REMEDIATED a serve condition after `model_id` OOM'd on it, so the coordinator
+        lets THIS worker retry the model despite the model-level OOM exclusion — before the 6h
+        cooldown. Without this, a locally-cleared advisory doesn't lift the coordinator's
+        exclusion and the fixed node stays benched. Raises on transport/credential failure;
+        the caller invokes it best-effort."""
+        if self._signer is None:
+            raise CoordinatorError(
+                "report_serve_recovered requires a signer; CoordinatorClient built without one"
+            )
+        response = self._signed_request(
+            method="POST",
+            path=f"/api/v0/workers/{worker_id}/serve-recovered",
+            json_body={"model_id": model_id},
+        )
+        if response.status_code == 200:
+            return
+        if response.status_code in (401, 403):
+            raise UnauthorizedError(_error_message(response))
+        raise CoordinatorError(
+            f"report_serve_recovered: unexpected status {response.status_code}: "
+            f"{response.text[:500]}"
+        )
+
     # ---- /accounts/oauth/exchange (anonymous-public) -------------------
 
     def oauth_exchange(self, *, idp: str, access_token: str) -> OAuthExchangeResponse:
@@ -1086,11 +1114,13 @@ def _parse_assignment(payload: dict[str, Any]) -> AssignmentResponse:
             )
         except KeyError as exc:
             raise CoordinatorError(f"assignment work_unit missing field: {exc}") from exc
+    _idle = payload.get("idle_reason")
     return AssignmentResponse(
         assignment_id=_opt_str(payload.get("assignment_id")),
         assigned_at=_parse_optional_datetime(payload.get("assigned_at")),
         coordinator_experiment_id=_opt_str(payload.get("experiment_id")),
         work_unit=work_unit,
+        idle_reason=dict(_idle) if isinstance(_idle, dict) else None,
     )
 
 

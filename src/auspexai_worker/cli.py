@@ -1203,10 +1203,29 @@ def daemon(ctx: click.Context, max_ticks: int | None, verbose: bool) -> None:
             # so their action gets a worker-UI response without waiting for the
             # coordinator to route the next unit here.
             def _advisory_recovery(available_memory_gb: float | None) -> None:
+                from auspexai_worker.inference.server import ADVISORY_GPU_OOM
+
+                def _signal_recovered(kind: str, model_id: str) -> None:
+                    # A locally-cleared GPU-OOM card doesn't lift the coordinator's model-level
+                    # serve exclusion — tell it, so this remediated node is re-offered the model
+                    # before the 6h cooldown (surgical: only THIS node). Best-effort; a failure
+                    # just falls back to the 6h path.
+                    if kind == ADVISORY_GPU_OOM:
+                        try:
+                            client.report_serve_recovered(
+                                worker_id=worker.worker_id, model_id=model_id
+                            )
+                        except Exception:
+                            logging.getLogger(__name__).debug(
+                                "serve-recovered signal to coordinator failed (ignored)",
+                                exc_info=True,
+                            )
+
                 run_recovery_check(
                     ServeAdvisoryRepository(db),
                     backend=_inference_backend,
                     available_memory_gb=available_memory_gb,
+                    on_cleared=_signal_recovered,
                 )
 
             # §9 #46 determinism provenance: probe the serving Ollama's version

@@ -90,3 +90,35 @@ def test_run_recovery_leaves_an_unrecovered_card():
 def test_run_recovery_no_advisory_is_a_noop():
     repo = _Repo(None)
     assert run_recovery_check(repo, backend=_Backend("0.32.0"), available_memory_gb=None) is False
+
+
+def test_on_cleared_fires_with_kind_and_model_when_a_card_clears():
+    # #2: clearing a GPU-OOM card ALSO signals the coordinator (so it lifts the model-level
+    # serve exclusion for this remediated node before the 6h cooldown).
+    from auspexai_worker.inference.server import ADVISORY_GPU_OOM
+
+    repo = _Repo(_row(ADVISORY_GPU_OOM, available_at_raise_gb=1.0))
+    seen: list[tuple[str, str]] = []
+    cleared = run_recovery_check(
+        repo,
+        backend=_Backend(None),
+        available_memory_gb=3.0,  # rose well above the 1.0 raise baseline → recovered
+        on_cleared=lambda kind, model_id: seen.append((kind, model_id)),
+    )
+    assert cleared is True
+    assert seen == [(ADVISORY_GPU_OOM, "m")]
+
+
+def test_on_cleared_does_not_fire_when_nothing_clears():
+    from auspexai_worker.inference.server import ADVISORY_GPU_OOM
+
+    repo = _Repo(_row(ADVISORY_GPU_OOM, available_at_raise_gb=5.0))
+    seen: list[tuple[str, str]] = []
+    cleared = run_recovery_check(
+        repo,
+        backend=_Backend(None),
+        available_memory_gb=5.1,  # barely above baseline, under the 0.5 margin → NOT recovered
+        on_cleared=lambda kind, model_id: seen.append((kind, model_id)),
+    )
+    assert cleared is False
+    assert seen == []

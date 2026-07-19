@@ -105,6 +105,7 @@ class AssignmentPoller:
         self._worker_self = worker_self
         self._stop_event = stop_event or threading.Event()
         self._stats = AssignmentStats()
+        self._last_idle_code: str | None = None  # announce a CHANGED idle reason, not every poll
 
     @property
     def stats(self) -> AssignmentStats:
@@ -247,6 +248,13 @@ class AssignmentPoller:
         if response.work_unit is None or response.coordinator_experiment_id is None:
             self._stats.no_work_polls += 1
             logger.debug("no work available (poll=%d)", self._stats.polls_attempted)
+            # WHY idle (coordinator's idle_reason) — announced at INFO on CHANGE so a healthy
+            # -but-idle node reads as "understood", not "stuck", without spamming every poll.
+            reason = response.idle_reason if isinstance(response.idle_reason, dict) else None
+            code = reason.get("code") if reason else None
+            if reason and code != self._last_idle_code:
+                logger.info("idle: %s", reason.get("message") or code)
+            self._last_idle_code = code
             return
 
         ctx = GateContext(
